@@ -93,6 +93,14 @@ using std::sin;
 using std::sinh;
 using std::tan;
 
+struct PowerFunctor;
+
+template<typename Func>
+struct ElementWiseIntDispatch
+{
+    static inline bool apply(const Func&, const Mat&, Mat&) { return false; }
+};
+
 template<typename Func>
 class ElementWiseLayer : public Func::Layer
 {
@@ -225,6 +233,9 @@ public:
             const Mat &src = inputs[i];
             Mat &dst = outputs[i];
             CV_Assert_N(src.size == dst.size, src.isContinuous(), dst.isContinuous());
+
+            if (ElementWiseIntDispatch<Func>::apply(func, src, dst))
+                continue;
 
             if (src.type() == CV_32F && dst.type() == CV_32F)
             {
@@ -2452,6 +2463,49 @@ struct PowerFunctor : public BaseFunctor
     }
 
     int64 getFLOPSPerElement() const { return power == 1 ? 2 : 10; }
+};
+
+// This is required for ONNX Neg on integer tensors produced by Shape/Size subgraphs.
+template<>
+struct ElementWiseIntDispatch<PowerFunctor>
+{
+    static inline bool apply(const PowerFunctor& func, const Mat& src, Mat& dst)
+    {
+        if (src.type() != dst.type())
+            return false;
+        const int depth = src.depth();
+        if (depth != CV_32S && depth != CV_64S)
+            return false;
+
+        if (func.power != 1.f)
+            return false;
+        if (func.shift != 0.f)
+            return false;
+
+        // scale must be an integer value (Neg uses scale=-1)
+        const double scale_d = (double)func.scale;
+        if (std::floor(scale_d) != scale_d)
+            return false;
+        const int64_t scale = (int64_t)scale_d;
+
+        const size_t n = src.total();
+        if (depth == CV_32S)
+        {
+            const int32_t* sp = src.ptr<int32_t>();
+            int32_t* dp = dst.ptr<int32_t>();
+            for (size_t i = 0; i < n; ++i)
+                dp[i] = (int32_t)((int64_t)sp[i] * scale);
+            return true;
+        }
+        else // CV_64S
+        {
+            const int64_t* sp = src.ptr<int64_t>();
+            int64_t* dp = dst.ptr<int64_t>();
+            for (size_t i = 0; i < n; ++i)
+                dp[i] = sp[i] * scale;
+            return true;
+        }
+    }
 };
 
 struct ExpFunctor : public BaseDefaultFunctor<ExpFunctor>

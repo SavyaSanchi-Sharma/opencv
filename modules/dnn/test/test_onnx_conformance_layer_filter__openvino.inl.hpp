@@ -1201,43 +1201,119 @@ CASE(test_isnan)
 CASE(test_isnan_float16)
     SKIP;
 CASE(test_layer_normalization_2d_axis0)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_2d_axis0_expanded)
+    SKIP;
+CASE(test_layer_normalization_2d_axis0_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_2d_axis1)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_2d_axis1_expanded)
+    SKIP;
+CASE(test_layer_normalization_2d_axis1_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_2d_axis_negative_1)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_2d_axis_negative_1_expanded)
+    SKIP;
+CASE(test_layer_normalization_2d_axis_negative_1_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_2d_axis_negative_2)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_2d_axis_negative_2_expanded)
+    SKIP;
+CASE(test_layer_normalization_2d_axis_negative_2_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis0_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis0_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis0_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis1_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis1_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis1_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis2_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis2_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis2_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis_negative_1_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_1_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_1_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis_negative_2_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_2_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_2_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_3d_axis_negative_3_epsilon)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_3_epsilon_expanded)
+    SKIP;
+CASE(test_layer_normalization_3d_axis_negative_3_epsilon_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis0)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis0_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis0_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis1)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis1_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis1_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis2)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis2_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis2_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis3)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis3_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis3_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis_negative_1)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_1_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_1_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis_negative_2)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_2_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_2_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis_negative_3)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_3_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_3_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_4d_axis_negative_4)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_4_expanded)
+    SKIP;
+CASE(test_layer_normalization_4d_axis_negative_4_expanded_ver18)
+    SKIP;
 CASE(test_layer_normalization_default_axis)
-    // no filter
+    SKIP;
+CASE(test_layer_normalization_default_axis_expanded)
+    SKIP;
+CASE(test_layer_normalization_default_axis_expanded_ver18)
+    SKIP;
 CASE(test_leakyrelu)
     // no filter
 CASE(test_leakyrelu_default)

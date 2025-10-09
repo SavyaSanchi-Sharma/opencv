@@ -12,6 +12,9 @@ namespace cv { namespace dnn {
 // Normalization speedup by multi-threading, mainly for Caffe MVN layer which has normalize_variance parameter.
 void fastNorm(const Mat &input, Mat &output, float epsilon, size_t normalized_axis = 0, bool normalize_variance = true);
 
+// Compute mean and inverse standard deviation.
+void fastNormMeanInvStdDev(const Mat& input, Mat& mean, Mat& invStdDev, float epsilon, size_t normalized_axis = 0);
+
 // Normalization speedup by multi-threading with absent bias. Mainly for LayerNormalization.
 void fastNorm(const Mat &input, const Mat &scale, Mat &output, float epsilon, size_t normalized_axis = 0, bool recenter=true);
 
