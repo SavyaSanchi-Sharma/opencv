@@ -107,7 +107,6 @@ struct Net::Impl : public detail::NetImplBase
     // FIXIT use inheritance
     virtual Ptr<BackendWrapper> wrap(Mat& host);
 
-
     virtual void clear();
 
 
