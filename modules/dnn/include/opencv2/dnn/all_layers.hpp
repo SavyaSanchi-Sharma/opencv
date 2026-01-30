@@ -1469,6 +1469,15 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<LayerNormLayer> create(const LayerParams& params);
     };
 
+    class CV_EXPORTS LayerNorm2Layer : public Layer
+    {
+    public:
+        int axis;
+        float epsilon;
+
+        static Ptr<LayerNorm2Layer> create(const LayerParams& params);
+    };
+
     class CV_EXPORTS GemmLayer : public Layer {
     public:
         bool trans_a;
