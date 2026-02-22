@@ -4094,7 +4094,7 @@ namespace fisheye
     the number of points in the view.
     @param imagePoints Output array of image points, 2xN/Nx2 1-channel or 1xN/Nx1 2-channel, or
     vector\<Point2f\>.
-    @param affine
+    @param affine Pose of the camera.
     @param K Camera intrinsic matrix \f$\cameramatrix{K}\f$.
     @param D Input vector of distortion coefficients \f$\distcoeffsfisheye\f$.
     @param alpha The skew coefficient.
