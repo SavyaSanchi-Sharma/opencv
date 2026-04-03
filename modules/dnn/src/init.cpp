@@ -120,6 +120,7 @@ void initializeLayerFactory()
     CV_DNN_REGISTER_LAYER_CLASS(IsInf,          IsInfLayer);
     CV_DNN_REGISTER_LAYER_CLASS(OneHot,         OneHotLayer);
     CV_DNN_REGISTER_LAYER_CLASS(Det,            DetLayer);
+    CV_DNN_REGISTER_LAYER_CLASS(EyeLike,        EyeLikeLayer);
     CV_DNN_REGISTER_LAYER_CLASS(BlackmanWindow, BlackmanWindowLayer);
     CV_DNN_REGISTER_LAYER_CLASS(HannWindow,     HannWindowLayer);
     CV_DNN_REGISTER_LAYER_CLASS(HammingWindow,  HammingWindowLayer);

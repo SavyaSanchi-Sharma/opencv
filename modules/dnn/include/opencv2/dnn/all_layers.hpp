@@ -1557,6 +1557,12 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<DetLayer> create(const LayerParams &params);
     };
 
+    class CV_EXPORTS EyeLikeLayer : public Layer
+    {
+    public:
+        static Ptr<EyeLikeLayer> create(const LayerParams &params);
+    };
+
     class CV_EXPORTS CenterCropPadLayer : public Layer
     {
     public:

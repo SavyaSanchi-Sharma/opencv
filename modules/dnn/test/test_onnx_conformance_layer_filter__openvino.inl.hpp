@@ -717,11 +717,11 @@ CASE(test_expand_dim_changed)
 CASE(test_expand_dim_unchanged)
     SKIP;
 CASE(test_eyelike_populate_off_main_diagonal)
-    // no filter
+    SKIP;
 CASE(test_eyelike_with_dtype)
-    // no filter
+    SKIP;
 CASE(test_eyelike_without_dtype)
-    // no filter
+    SKIP;
 CASE(test_flatten_axis0)
     // no filter
 CASE(test_flatten_axis1)
