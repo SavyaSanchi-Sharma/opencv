@@ -109,6 +109,21 @@ PERF_TEST_P_(DNNTestNetwork, ResNet_50)
     processNet("dnn/ResNet-50-model.caffemodel", "dnn/ResNet-50-deploy.prototxt", cv::Size(224, 224));
 }
 
+PERF_TEST_P_(DNNTestNetwork, ResNet_18_v1_ONNX)
+{
+    processNet("dnn/onnx/models/resnet18v1.onnx", "", cv::Size(224, 224));
+}
+
+PERF_TEST_P_(DNNTestNetwork, ResNet_50_v1_ONNX)
+{
+    processNet("dnn/onnx/models/resnet50v1.onnx", "", cv::Size(224, 224));
+}
+
+PERF_TEST_P_(DNNTestNetwork, MobileNetv2_ONNX)
+{
+    processNet("dnn/onnx/models/mobilenetv2.onnx", "", cv::Size(224, 224));
+}
+
 PERF_TEST_P_(DNNTestNetwork, SqueezeNet_v1_1)
 {
     processNet("dnn/squeezenet_v1.1.caffemodel", "dnn/squeezenet_v1.1.prototxt", cv::Size(227, 227));
@@ -375,6 +390,33 @@ PERF_TEST_P_(DNNTestNetwork, VIT_B_32)
     applyTestTag(CV_TEST_TAG_DEBUG_VERYLONG);
 
     processNet("dnn/onnx/models/vit_b_32.onnx", "", cv::Size(224, 224));
+}
+
+PERF_TEST_P_(DNNTestNetwork, VIT_Base_Patch16_224)
+{
+    applyTestTag(CV_TEST_TAG_MEMORY_512MB);
+    processNet("dnn/vit_base_patch16_224_Opset16.onnx", "", cv::Size(224, 224));
+}
+
+PERF_TEST_P_(DNNTestNetwork, DeiT_Tiny_Patch16_224)
+{
+    processNet("dnn/deit_tiny_patch16_224_Opset16.onnx", "", cv::Size(224, 224));
+}
+
+PERF_TEST_P_(DNNTestNetwork, MobileViT_XS)
+{
+    processNet("dnn/mobilevit_xs_Opset16.onnx", "", cv::Size(256, 256));
+}
+
+PERF_TEST_P_(DNNTestNetwork, MobileViTv2_100_ONNX)
+{
+    processNet("dnn/mobilevitv2_100_Opset16.onnx", "", cv::Size(256, 256));
+}
+
+PERF_TEST_P_(DNNTestNetwork, BEiT_Base_Patch16_224)
+{
+    applyTestTag(CV_TEST_TAG_MEMORY_512MB);
+    processNet("dnn/beit_base_patch16_224_Opset16.onnx", "", cv::Size(224, 224));
 }
 
 INSTANTIATE_TEST_CASE_P(/*nothing*/, DNNTestNetwork, dnnBackendsAndTargets());
