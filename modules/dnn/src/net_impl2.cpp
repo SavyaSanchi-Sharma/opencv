@@ -619,7 +619,7 @@ void Net::Impl::allocateLayerOutputs(
 void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays outputs)
 {
 #ifdef HAVE_ONNXRUNTIME
-    if (mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
+    if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
     if (this->ort_session)
     {
@@ -678,7 +678,7 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
 void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayOfArrays outputBlobs)
 {
 #ifdef HAVE_ONNXRUNTIME
-    if (mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
+    if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
     if (this->ort_session)
     {
@@ -763,7 +763,7 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
 void Net::Impl::forwardWithMultipleOutputs(OutputArrayOfArrays outblobs, const std::vector<std::string>& outnames)
 {
 #ifdef HAVE_ONNXRUNTIME
-    if (mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
+    if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
     if (this->ort_session)
     {
@@ -947,7 +947,7 @@ void Net::Impl::traceArg(std::ostream& strm_, const char* prefix, size_t i, Arg 
 void Net::Impl::setMainGraphInput(InputArray m, const std::string& inpname)
 {
 #ifdef HAVE_ONNXRUNTIME
-    if (ortNeedsReinit && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
+    if (useOrtEngine && ortNeedsReinit && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
     {
         Mat inputMat = m.getMat();
         if (inputMat.empty())
