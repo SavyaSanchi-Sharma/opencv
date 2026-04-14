@@ -221,6 +221,7 @@ protected:
     void parseOneHot               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDFT                  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDet                  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseEyeLike              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseBlackmanWindow       (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseHannWindow           (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseHammingWindow        (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -1764,6 +1765,17 @@ void ONNXImporter2::parseDet(LayerParams& layerParams, const opencv_onnx::NodePr
     addLayer(layerParams, node_proto);
 }
 
+void ONNXImporter2::parseEyeLike(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+{
+    layerParams.type = "EyeLike";
+    if (layerParams.has("dtype"))
+    {
+        int onnxDtype = layerParams.get<int>("dtype");
+        layerParams.set("dtype", dataType2cv((opencv_onnx::TensorProto_DataType)onnxDtype));
+    }
+    addLayer(layerParams, node_proto);
+}
+
 void ONNXImporter2::parseBlackmanWindow(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
     layerParams.type = "BlackmanWindow";
@@ -2731,6 +2743,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     dispatch["OneHot"] = &ONNXImporter2::parseOneHot;
     dispatch["DFT"] = &ONNXImporter2::parseDFT;
     dispatch["Det"] = &ONNXImporter2::parseDet;
+    dispatch["EyeLike"] = &ONNXImporter2::parseEyeLike;
     dispatch["BlackmanWindow"] = &ONNXImporter2::parseBlackmanWindow;
     dispatch["HannWindow"] = &ONNXImporter2::parseHannWindow;
     dispatch["HammingWindow"] = &ONNXImporter2::parseHammingWindow;
