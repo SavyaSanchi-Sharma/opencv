@@ -2847,6 +2847,7 @@ Net readNetFromONNX2_ORT(const String& onnxFile)
     auto impl = net.getImpl();
     impl->modelFileName = onnxFile;
     impl->modelFormat = DNN_MODEL_ONNX;
+    impl->useOrtEngine = true;
     impl->ortNeedsReinit = true;
 
     // Create an empty main graph placeholder so that callers can detect
