@@ -845,6 +845,8 @@ TEST(videoio_ffmpeg, create_with_property_badarg)
     EXPECT_FALSE(cap.isOpened());
 }
 
+// requires FFmpeg wrapper rebuild on Windows
+#ifndef _WIN32
 TEST(videoio_ffmpeg, open_with_format_cv8uc3)
 {
     if (!videoio_registry::hasBackend(CAP_FFMPEG))
@@ -860,6 +862,7 @@ TEST(videoio_ffmpeg, open_with_format_cv8uc3)
     ASSERT_TRUE(cap.read(frame));
     EXPECT_EQ(frame.channels(), 3);
 }
+#endif
 
 // related issue: https://github.com/opencv/opencv/issues/16821
 TEST(videoio_ffmpeg, DISABLED_open_from_web)
