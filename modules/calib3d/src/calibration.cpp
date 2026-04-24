@@ -43,8 +43,6 @@
 #include "precomp.hpp"
 #include "hal_replacement.hpp"
 #include "distortion_model.hpp"
-#include "opencv2/core/core_c.h"
-#include "opencv2/calib3d/calib3d_c.h"
 #include <iterator>
 
 /*
@@ -542,9 +540,9 @@ static void initIntrinsicParams2D( const Mat& objectPoints,
              0,  0,  1)).copyTo(cameraMatrix);
 }
 
-static void subMatrix(const Mat& src, Mat& dst,
-                      const std::vector<uchar>& cols,
-                      const std::vector<uchar>& rows)
+static void subMatrixWithIndices(const Mat& src, Mat& dst,
+                                 const std::vector<uchar>& cols,
+                                 const std::vector<uchar>& rows)
 {
     CV_Assert(src.type() == CV_64F && dst.type() == CV_64F);
     int m = (int)rows.size(), n = (int)cols.size();
@@ -567,6 +565,217 @@ static void subMatrix(const Mat& src, Mat& dst,
             }
         }
     }
+}
+
+LevMarq::LevMarq()
+{
+    lambdaLg10 = 0; state = DONE;
+    iters = 0;
+    completeSymmFlag = false;
+    errNorm = prevErrNorm = DBL_MAX;
+    solveMethod = DECOMP_SVD;
+}
+
+LevMarq::LevMarq( int nparams, int nerrs, TermCriteria criteria0, bool _completeSymmFlag )
+{
+    init(nparams, nerrs, criteria0, _completeSymmFlag);
+}
+
+void LevMarq::init( int nparams, int nerrs, TermCriteria criteria0, bool _completeSymmFlag )
+{
+    mask.create( nparams, 1);
+    mask.setTo(1);
+    prevParam.create( nparams, 1);
+    param.create(nparams, 1);
+    JtJ.create(nparams, nparams);
+    JtErr.create(nparams, 1);
+    if( nerrs > 0 )
+    {
+        J.create(nerrs, nparams);
+        err.create( nerrs, 1);
+    }
+    errNorm = prevErrNorm = DBL_MAX;
+    lambdaLg10 = -3;
+    criteria = criteria0;
+    if( criteria.type & TermCriteria::COUNT )
+        criteria.maxCount = MIN(MAX(criteria.maxCount,1),1000);
+    else
+        criteria.maxCount = 30;
+    if( criteria.type & TermCriteria::EPS )
+        criteria.epsilon = MAX(criteria.epsilon, 0);
+    else
+        criteria.epsilon = DBL_EPSILON;
+    state = STARTED;
+    iters = 0;
+    completeSymmFlag = _completeSymmFlag;
+    solveMethod = DECOMP_SVD;
+}
+
+bool LevMarq::update( Mat1d& _param, Mat1d& matJ, Mat1d& _err )
+{
+    CV_Assert( !err.empty() );
+    if( state == DONE )
+    {
+        _param = param;
+        return false;
+    }
+
+    if( state == STARTED )
+    {
+        _param = param;
+        J.setTo(0);
+        err.setTo(0);
+        matJ = J;
+        _err = err;
+        state = CALC_J;
+        return true;
+    }
+
+    if( state == CALC_J )
+    {
+        Mat(J.t() * J).copyTo(JtJ);
+        JtErr = J.t() * err;
+        param.copyTo(prevParam);
+        step();
+        if( iters == 0 )
+            prevErrNorm = norm(err, NORM_L2);
+        _param = param;
+        err.setTo(0);
+        _err = err;
+        state = CHECK_ERR;
+        return true;
+    }
+
+    CV_Assert( state == CHECK_ERR );
+    errNorm = norm( err, NORM_L2 );
+    if( errNorm > prevErrNorm )
+    {
+        if( ++lambdaLg10 <= 16 )
+        {
+            step();
+            _param = param;
+            err.setTo(0);
+            _err = err;
+            state = CHECK_ERR;
+            return true;
+        }
+    }
+
+    lambdaLg10 = MAX(lambdaLg10-1, -16);
+    if( ++iters >= criteria.maxCount ||
+        norm(param, prevParam, NORM_L2 | NORM_RELATIVE) < criteria.epsilon )
+    {
+        _param = param;
+        state = DONE;
+        return true;
+    }
+
+    prevErrNorm = errNorm;
+    _param = param;
+    J.setTo(0);
+    matJ = J;
+    _err = err;
+    state = CALC_J;
+    return true;
+}
+
+
+bool LevMarq::updateAlt( Mat1d& _param, Mat1d& _JtJ, Mat1d& _JtErr, double*& _errNorm )
+{
+    CV_Assert( err.empty() );
+    if( state == DONE )
+    {
+        _param = param;
+        return false;
+    }
+
+    if( state == STARTED )
+    {
+        _param = param;
+        JtJ.setTo(0);
+        JtErr.setTo(0);
+        errNorm = 0;
+        _JtJ = JtJ;
+        _JtErr = JtErr;
+        _errNorm = &errNorm;
+        state = CALC_J;
+        return true;
+    }
+
+    if( state == CALC_J )
+    {
+        param.copyTo(prevParam);
+        step();
+        _param = param;
+        prevErrNorm = errNorm;
+        errNorm = 0;
+        _errNorm = &errNorm;
+        state = CHECK_ERR;
+        return true;
+    }
+
+    CV_Assert( state == CHECK_ERR );
+    if( errNorm > prevErrNorm )
+    {
+        if( ++lambdaLg10 <= 16 )
+        {
+            step();
+            _param = param;
+            errNorm = 0;
+            _errNorm = &errNorm;
+            state = CHECK_ERR;
+            return true;
+        }
+    }
+
+    lambdaLg10 = MAX(lambdaLg10-1, -16);
+    if( ++iters >= criteria.maxCount ||
+        norm(param, prevParam, NORM_L2 | NORM_RELATIVE) < criteria.epsilon )
+    {
+        _param = param;
+        _JtJ = JtJ;
+        _JtErr = JtErr;
+        state = DONE;
+        return false;
+    }
+
+    prevErrNorm = errNorm;
+    JtJ.setTo(0);
+    JtErr.setTo(0);
+    _param = param;
+    _JtJ = JtJ;
+    _JtErr = JtErr;
+    state = CALC_J;
+    return true;
+}
+
+void LevMarq::step()
+{
+    using namespace cv;
+    const double LOG10 = log(10.);
+    double lambda = exp(lambdaLg10*LOG10);
+    int nparams = param.rows;
+
+    int nparams_nz = countNonZero(mask);
+    if(JtJN.rows != nparams_nz) {
+        // prevent re-allocation in every step
+        JtJN.create(nparams_nz, nparams_nz);
+        JtJV.create(nparams_nz, 1);
+        JtJW.create(nparams_nz, 1);
+    }
+
+    subMatrixWithIndices(JtErr, JtJV, std::vector<uchar>(1, 1), mask);
+    subMatrixWithIndices(JtJ, JtJN, mask, mask);
+
+    if( err.empty() )
+        completeSymm( JtJN, completeSymmFlag );
+
+    JtJN.diag() *= 1. + lambda;
+    solve(JtJN, JtJV, JtJW, solveMethod);
+
+    int j = 0;
+    for( int i = 0; i < nparams; i++ )
+        param(i, 0) = prevParam(i, 0) - (mask(i, 0) ? JtJW(j++, 0) : 0);
 }
 
 /*
@@ -747,7 +956,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
         initIntrinsicParams2D( matM, _m, npoints, imageSize, A, aspectRatio );
     }
 
-    CvLevMarq solver( nparams, 0, cvTermCriteria(termCrit) );
+    LevMarq solver( nparams, 0, termCrit );
 
     if(flags & CALIB_USE_LU) {
         solver.solveMethod = DECOMP_LU;
@@ -757,8 +966,8 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     }
 
     {
-    double* param = solver.param->data.db;
-    uchar* mask = solver.mask->data.ptr;
+    double* param = solver.param.ptr<double>();
+    uchar* mask = solver.mask.ptr<uchar>();
 
     param[0] = A(0, 0); param[1] = A(1, 1); param[2] = A(0, 2); param[3] = A(1, 2);
     std::copy(k.begin(), k.end(), param + 4);
@@ -818,8 +1027,8 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     }
     }
 
-    Mat_<double> param_m = cvarrToMat(solver.param);
-    Mat mask = cvarrToMat(solver.mask);
+    Mat_<double> param_m = solver.param;
+    Mat mask = solver.mask;
     int nparams_nz = countNonZero(mask);
 
     if (nparams_nz >= 2 * total)
@@ -856,12 +1065,12 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     {
         bool optimizeObjPoints = releaseObject;
 
-        const CvMat* _param = 0;
-        CvMat *_JtJ = 0, *_JtErr = 0;
+        Mat1d _param;
+        Mat1d JtJ, JtErr;
         double* _errNorm = 0;
-        bool proceed = solver.updateAlt( _param, _JtJ, _JtErr, _errNorm );
-        double *param = solver.param->data.db, *pparam = solver.prevParam->data.db;
-        bool calcJ = solver.state == CvLevMarq::CALC_J || (!proceed && !stdDevs.empty());
+        bool proceed = solver.updateAlt( _param, JtJ, JtErr, _errNorm );
+        double *param = _param.ptr<double>(), *pparam = solver.prevParam.ptr<double>();
+        bool calcJ = solver.state == LevMarq::CALC_J || (!proceed && !stdDevs.empty());
 
         if( flags & CALIB_FIX_ASPECT_RATIO )
         {
@@ -878,7 +1087,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
         if ( !proceed && stdDevs.empty() && perViewErr.empty() )
             break;
         else if ( !proceed && !stdDevs.empty() )
-            cvZero(_JtJ);
+            JtJ.setTo(0);
 
         reprojErr = 0;
 
@@ -933,8 +1142,6 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
 
             if( calcJ )
             {
-                Mat JtJ(cvarrToMat(_JtJ)), JtErr(cvarrToMat(_JtErr));
-
                 // see HZ: (A6.14) for details on the structure of the Jacobian
                 JtJ(Rect(0, 0, NINTRINSIC, NINTRINSIC)) += Ji.t() * Ji;
                 JtJ(Rect(si, si, 6, 6)) = Je.t() * Je;
@@ -970,7 +1177,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
             {
                 Mat JtJinv, JtJN;
                 JtJN.create(nparams_nz, nparams_nz, CV_64F);
-                subMatrix(cvarrToMat(_JtJ), JtJN, mask, mask);
+                subMatrixWithIndices(JtJ, JtJN, mask, mask);
                 completeSymm(JtJN, false);
                 cv::invert(JtJN, JtJinv, DECOMP_SVD);
                 // an explanation of that denominator correction can be found here:
@@ -991,7 +1198,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     }
 
     // 4. store the results
-    double * param = solver.param->data.db;
+    double * param = solver.param.ptr<double>();
     A = Matx33d(param[0], 0, param[2], 0, param[1], param[3], 0, 0, 1);
     Mat(A).convertTo(cameraMatrix, cameraMatrix.type());
     _k = Mat(distCoeffs.size(), CV_64F, param + 4);
@@ -1642,7 +1849,7 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
         Mat JtJinv, JtJN;
         JtJN.create(nparams_nz, nparams_nz, CV_64F);
         std::vector<uchar> mask_copy(mask.ptr<uchar>(), mask.ptr<uchar>() + nparams);
-        subMatrix(JtJ, JtJN, mask_copy, mask_copy);
+        subMatrixWithIndices(JtJ, JtJN, mask_copy, mask_copy);
         completeSymm(JtJN, false);
         cv::invert(JtJN, JtJinv, DECOMP_SVD);
 
@@ -1836,10 +2043,10 @@ static double stereoCalibrateImpl(
     // - next NINTRINSICS: the same for for 2nd camera
     nparams = 6*(nimages+1) + (recomputeIntrinsics ? NINTRINSIC*2 : 0);
 
-    CvLevMarq solver( nparams, 0, cvTermCriteria(termCrit) );
-    double * param = solver.param->data.db;
-    Mat paramM = Mat(solver.param->rows, solver.param->cols, CV_64F, param);
-    uchar* mask = solver.mask->data.ptr;
+    LevMarq solver( nparams, 0, termCrit );
+    double * param = solver.param.ptr<double>();
+    Mat paramM = Mat(solver.param.rows, solver.param.cols, CV_64F, param);
+    uchar* mask = solver.mask.ptr<uchar>();
 
     if(flags & CALIB_USE_LU) {
         solver.solveMethod = DECOMP_LU;
@@ -2001,10 +2208,10 @@ static double stereoCalibrateImpl(
 
     for(;;)
     {
-        const CvMat* tmp_param = 0;
-        CvMat *JtJ = 0, *JtErr = 0;
+        Mat1d tmp_param;
+        Mat1d JtJ, JtErr;
         double *_errNorm = 0;
-        Mat_<double> param_m(1,nparams, solver.param->data.db);
+        Mat_<double> param_m(1,nparams, solver.param.ptr<double>());
         Vec3d om_LR(param_m(0), param_m(1), param_m(2));
         Vec3d T_LR(param_m(3), param_m(4), param_m(5));
         Vec3d om[2], T[2];
@@ -2060,7 +2267,7 @@ static double stereoCalibrateImpl(
             om[0] = Vec3d(param_m(idx + 0), param_m(idx + 1), param_m(idx + 2));
             T[0]  = Vec3d(param_m(idx + 3), param_m(idx + 4), param_m(idx + 5));
 
-            if( JtJ || JtErr )
+            if( !JtJ.empty() || !JtErr.empty() )
                 composeRT( om[0], T[0], om_LR, T_LR, om[1], T[1], dr3dr1, noArray(),
                            dr3dr2, noArray(), noArray(), dt3dt1, dt3dr2, dt3dt2 );
             else
@@ -2083,7 +2290,7 @@ static double stereoCalibrateImpl(
             {
                 Mat imgpt_ik = imagePoints[k](Range::all(), Range(ptPos, ptPos + ni));
 
-                if( JtJ || JtErr )
+                if( !JtJ.empty() || !JtErr.empty() )
                     projectPoints(objpt_i, om[k], T[k], intrin[k], distCoeffs[k],
                                   tmpImagePoints, dpdrot, dpdt, dpdf, dpdc, dpdk, noArray(),
                                   (flags & CALIB_FIX_ASPECT_RATIO) ? aspectRatio[k] : 0.);
@@ -2091,12 +2298,10 @@ static double stereoCalibrateImpl(
                     projectPoints(objpt_i, om[k], T[k], intrin[k], distCoeffs[k], tmpImagePoints);
                 subtract( tmpImagePoints, imgpt_ik, tmpImagePoints );
 
-                if( solver.state == CvLevMarq::CALC_J )
+                if( solver.state == LevMarq::CALC_J )
                 {
                     int iofs = (nimages+1)*6 + k*NINTRINSIC, eofs = (i+1)*6;
-                    CV_Assert( JtJ && JtErr );
-
-                    Mat _JtJ(cvarrToMat(JtJ)), _JtErr(cvarrToMat(JtErr));
+                    CV_Assert( !JtJ.empty() && !JtErr.empty() );
 
                     if( k == 1 )
                     {
@@ -2135,23 +2340,23 @@ static double stereoCalibrateImpl(
                                 J_LR.at<double>(p, 3+j) = de3dt2(j);
                         }
 
-                        _JtJ(Rect(0, 0, 6, 6)) += J_LR.t()*J_LR;
-                        _JtJ(Rect(eofs, 0, 6, 6)) = J_LR.t()*Je;
-                        _JtErr.rowRange(0, 6) += J_LR.t()*err;
+                        JtJ(Rect(0, 0, 6, 6)) += J_LR.t()*J_LR;
+                        JtJ(Rect(eofs, 0, 6, 6)) = J_LR.t()*Je;
+                        JtErr.rowRange(0, 6) += J_LR.t()*err;
                     }
 
-                    _JtJ(Rect(eofs, eofs, 6, 6)) += Je.t()*Je;
-                    _JtErr.rowRange(eofs, eofs + 6) += Je.t()*err;
+                    JtJ(Rect(eofs, eofs, 6, 6)) += Je.t()*Je;
+                    JtErr.rowRange(eofs, eofs + 6) += Je.t()*err;
 
                     if( recomputeIntrinsics )
                     {
-                        _JtJ(Rect(iofs, iofs, NINTRINSIC, NINTRINSIC)) += Ji.t()*Ji;
-                        _JtJ(Rect(iofs, eofs, NINTRINSIC, 6)) += Je.t()*Ji;
+                        JtJ(Rect(iofs, iofs, NINTRINSIC, NINTRINSIC)) += Ji.t()*Ji;
+                        JtJ(Rect(iofs, eofs, NINTRINSIC, 6)) += Je.t()*Ji;
                         if( k == 1 )
                         {
-                            _JtJ(Rect(iofs, 0, NINTRINSIC, 6)) += J_LR.t()*Ji;
+                            JtJ(Rect(iofs, 0, NINTRINSIC, 6)) += J_LR.t()*Ji;
                         }
-                        _JtErr.rowRange(iofs, iofs + NINTRINSIC) += Ji.t()*err;
+                        JtErr.rowRange(iofs, iofs + NINTRINSIC) += Ji.t()*err;
                     }
                 }
 
