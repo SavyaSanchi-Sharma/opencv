@@ -53,8 +53,6 @@ namespace cv { namespace
         Vec3d dom, dT;
         double dalpha;
     };
-
-    void subMatrix(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const std::vector<uchar>& rows);
 }}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1058,7 +1056,7 @@ double cv::fisheye::stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayO
         cv::Vec6d oldTom(Tcur[0], Tcur[1], Tcur[2], omcur[0], omcur[1], omcur[2]);
 
         //update all parameters
-        cv::subMatrix(J, J, selectedParams, std::vector<uchar>(J.rows, 1));
+        cv::subMatrixWithMasks(J, J, selectedParams, std::vector<uchar>(J.rows, 1), /*resize_dst=*/true);
         int a = cv::countNonZero(intrinsicLeft.isEstimate);
         int b = cv::countNonZero(intrinsicRight.isEstimate);
         cv::Mat deltas;
@@ -1161,12 +1159,12 @@ bool cv::fisheye::solvePnPRansac( InputArray opoints, InputArray ipoints,
                               useExtrinsicGuess, iterationsCount, reprojectionError, confidence, inliers, flags);
 }
 
-namespace cv{ namespace {
-void subMatrix(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const std::vector<uchar>& rows)
+namespace cv{
+void subMatrixWithMasks(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const std::vector<uchar>& rows, bool resize_dst)
 {
     CV_Assert(src.channels() == 1);
 
-    int nonzeros_cols = cv::countNonZero(cols);
+    int nonzeros_cols = resize_dst ? cv::countNonZero(cols) : dst.cols;
     Mat tmp(src.rows, nonzeros_cols, CV_64F);
 
     for (int i = 0, j = 0; i < (int)cols.size(); i++)
@@ -1177,8 +1175,10 @@ void subMatrix(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const s
         }
     }
 
-    int nonzeros_rows  = cv::countNonZero(rows);
-    dst.create(nonzeros_rows, nonzeros_cols, CV_64F);
+    if (resize_dst) {
+        int nonzeros_rows  = cv::countNonZero(rows);
+        dst.create(nonzeros_rows, nonzeros_cols, CV_64F);
+    }
     for (int i = 0, j = 0; i < (int)rows.size(); i++)
     {
         if (rows[i])
@@ -1188,7 +1188,7 @@ void subMatrix(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const s
     }
 }
 
-}}
+}
 
 cv::internal::IntrinsicParams::IntrinsicParams():
     f(Vec2d::all(0)), c(Vec2d::all(0)), k(Vec4d::all(0)), alpha(0), isEstimate(9,0)
@@ -1564,8 +1564,8 @@ void cv::internal::ComputeJacobians(InputArrayOfArrays objectPoints, InputArrayO
     std::vector<uchar> idxs(param.isEstimate);
     idxs.insert(idxs.end(), 6 * n, 1);
 
-    subMatrix(JJ2, JJ2, idxs, idxs);
-    subMatrix(ex3, ex3, std::vector<uchar>(1, 1), idxs);
+    subMatrixWithMasks(JJ2, JJ2, idxs, idxs, /*resize_dst=*/true);
+    subMatrixWithMasks(ex3, ex3, std::vector<uchar>(1, 1), idxs, /*resize_dst=*/true);
 }
 
 void cv::internal::EstimateUncertainties(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints,

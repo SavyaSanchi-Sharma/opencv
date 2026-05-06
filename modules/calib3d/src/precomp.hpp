@@ -48,6 +48,7 @@
 #include "opencv2/core/private.hpp"
 
 #include "opencv2/calib3d.hpp"
+#include "opencv2/calib3d/private.hpp"
 #include "opencv2/imgproc.hpp"
 #include "opencv2/features2d.hpp"
 
@@ -154,6 +155,10 @@ void projectPoints( InputArray objectPoints,
 void getUndistortRectangles(InputArray _cameraMatrix, InputArray _distCoeffs,
               InputArray R, InputArray newCameraMatrix, Size imgSize,
               Rect_<double>& inner, Rect_<double>& outer );
+
+// cols and rows contains masks to use to get the sub-matrix.
+void subMatrixWithMasks(const Mat& src, Mat& dst, const std::vector<uchar>& cols,
+                        const std::vector<uchar>& rows, bool resize_dst);
 
 } // namespace cv
 
