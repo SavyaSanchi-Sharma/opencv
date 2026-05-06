@@ -195,9 +195,12 @@ minMaxIdx_finish( const T* src, const uchar* mask, WT* minval, WT* maxval,
 }
 #endif
 
-static void minMaxIdx_8u(const uchar* src, const uchar* mask, int* minval, int* maxval,
+static void minMaxIdx_8u(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                          size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const uchar* src = static_cast<const uchar*>(src_);
+    int* minval = static_cast<int*>(minval_);
+    int* maxval = static_cast<int*>(maxval_);
 #if CV_SIMD128
     if ( len >= VTraits<v_uint8x16>::vlanes() )
     {
@@ -272,9 +275,12 @@ static void minMaxIdx_8u(const uchar* src, const uchar* mask, int* minval, int* 
 #endif
 }
 
-static void minMaxIdx_8s(const schar* src, const uchar* mask, int* minval, int* maxval,
+static void minMaxIdx_8s(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                          size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const schar* src = static_cast<const schar*>(src_);
+    int* minval = static_cast<int*>(minval_);
+    int* maxval = static_cast<int*>(maxval_);
 #if CV_SIMD128
     if ( len >= VTraits<v_int8x16>::vlanes() )
     {
@@ -349,9 +355,12 @@ static void minMaxIdx_8s(const schar* src, const uchar* mask, int* minval, int* 
 #endif
 }
 
-static void minMaxIdx_16u(const ushort* src, const uchar* mask, int* minval, int* maxval,
+static void minMaxIdx_16u(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                           size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const ushort* src = static_cast<const ushort*>(src_);
+    int* minval = static_cast<int*>(minval_);
+    int* maxval = static_cast<int*>(maxval_);
 #if CV_SIMD128
     if ( len >= VTraits<v_uint16x8>::vlanes() )
     {
@@ -426,9 +435,12 @@ static void minMaxIdx_16u(const ushort* src, const uchar* mask, int* minval, int
 #endif
 }
 
-static void minMaxIdx_16s(const short* src, const uchar* mask, int* minval, int* maxval,
+static void minMaxIdx_16s(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                           size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const short* src = static_cast<const short*>(src_);
+    int* minval = static_cast<int*>(minval_);
+    int* maxval = static_cast<int*>(maxval_);
 #if CV_SIMD128
     if ( len >= VTraits<v_int16x8>::vlanes() )
     {
@@ -503,9 +515,12 @@ static void minMaxIdx_16s(const short* src, const uchar* mask, int* minval, int*
 #endif
 }
 
-static void minMaxIdx_32s(const int* src, const uchar* mask, int* minval, int* maxval,
+static void minMaxIdx_32s(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                           size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const int* src = static_cast<const int*>(src_);
+    int* minval = static_cast<int*>(minval_);
+    int* maxval = static_cast<int*>(maxval_);
 #if CV_SIMD128
     if ( len >= 2 * VTraits<v_int32x4>::vlanes() )
     {
@@ -594,9 +609,12 @@ static void minMaxIdx_32s(const int* src, const uchar* mask, int* minval, int* m
 #endif
 }
 
-static void minMaxIdx_32f(const float* src, const uchar* mask, float* minval, float* maxval,
+static void minMaxIdx_32f(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                           size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const float* src = static_cast<const float*>(src_);
+    float* minval = static_cast<float*>(minval_);
+    float* maxval = static_cast<float*>(maxval_);
 #if CV_SIMD128
     if ( len >= 2 * VTraits<v_float32x4>::vlanes() )
     {
@@ -689,9 +707,12 @@ static void minMaxIdx_32f(const float* src, const uchar* mask, float* minval, fl
 #endif
 }
 
-static void minMaxIdx_64f(const double* src, const uchar* mask, double* minval, double* maxval,
+static void minMaxIdx_64f(const void* src_, const uchar* mask, void* minval_, void* maxval_,
                           size_t* minidx, size_t* maxidx, int len, size_t startidx )
 {
+    const double* src = static_cast<const double*>(src_);
+    double* minval = static_cast<double*>(minval_);
+    double* maxval = static_cast<double*>(maxval_);
 #if CV_SIMD128_64F
     if ( len >= 4 * VTraits<v_float64x2>::vlanes() )
     {
@@ -819,16 +840,16 @@ static void minMaxIdx_64f(const double* src, const uchar* mask, double* minval, 
 #endif
 }
 
-typedef void (*MinMaxIdxFunc)(const uchar*, const uchar*, int*, int*, size_t*, size_t*, int, size_t);
+typedef void (*MinMaxIdxFunc)(const void*, const uchar*, void*, void*, size_t*, size_t*, int, size_t);
 
 static MinMaxIdxFunc getMinmaxTab(int depth)
 {
     static MinMaxIdxFunc minmaxTab[CV_DEPTH_MAX] =
     {
-        (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_8u), (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_8s),
-        (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_16u), (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_16s),
-        (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_32s),
-        (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_32f), (MinMaxIdxFunc)GET_OPTIMIZED(minMaxIdx_64f),
+        GET_OPTIMIZED(minMaxIdx_8u), GET_OPTIMIZED(minMaxIdx_8s),
+        GET_OPTIMIZED(minMaxIdx_16u), GET_OPTIMIZED(minMaxIdx_16s),
+        GET_OPTIMIZED(minMaxIdx_32s),
+        GET_OPTIMIZED(minMaxIdx_32f), GET_OPTIMIZED(minMaxIdx_64f),
         0
     };
 
@@ -1169,13 +1190,13 @@ void cv::minMaxIdx(InputArray _src, double* minVal,
     float  fminval = std::numeric_limits<float>::infinity(),  fmaxval = -fminval;
     double dminval = std::numeric_limits<double>::infinity(), dmaxval = -dminval;
     size_t startidx = 1;
-    int *minval = &iminval, *maxval = &imaxval;
+    void *minval = &iminval, *maxval = &imaxval;
     int planeSize = (int)it.size*cn;
 
     if( depth == CV_32F )
-        minval = (int*)&fminval, maxval = (int*)&fmaxval;
+        minval = &fminval, maxval = &fmaxval;
     else if( depth == CV_64F )
-        minval = (int*)&dminval, maxval = (int*)&dmaxval;
+        minval = &dminval, maxval = &dmaxval;
 
     for( size_t i = 0; i < it.nplanes; i++, ++it, startidx += planeSize )
         func( ptrs[0], ptrs[1], minval, maxval, &minidx, &maxidx, planeSize, startidx );
