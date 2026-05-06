@@ -9,8 +9,7 @@ namespace opencv_test { namespace {
 TEST(Features2d_AKAZE, detect_and_compute_split)
 {
     Mat testImg(100, 100, CV_8U);
-    RNG rng(101);
-    rng.fill(testImg, RNG::UNIFORM, Scalar(0), Scalar(255), true);
+    theRNG().fill(testImg, RNG::UNIFORM, Scalar(0), Scalar(255), true);
 
     Ptr<Feature2D> ext = AKAZE::create(AKAZE::DESCRIPTOR_MLDB, 0, 3, 0.001f, 1, 1, KAZE::DIFF_PM_G2);
     vector<KeyPoint> detAndCompKps;
@@ -49,8 +48,7 @@ TEST(Features2d_AKAZE, uninitialized_and_nans)
 TEST(Features2d_KAZE, diffusivity_charbonnier)
 {
     Mat testImg(200, 200, CV_8U);
-    RNG rng(42);
-    rng.fill(testImg, RNG::UNIFORM, Scalar(0), Scalar(255), true);
+    theRNG().fill(testImg, RNG::UNIFORM, Scalar(0), Scalar(255), true);
 
     // KAZE with DIFF_CHARBONNIER
     Ptr<KAZE> kaze_charbonnier = KAZE::create(false, false, 0.001f, 4, 4, KAZE::DIFF_CHARBONNIER);
