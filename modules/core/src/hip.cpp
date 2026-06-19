@@ -312,8 +312,6 @@ cv::hip::Stream::Stream(const size_t hipFlags_)
 #endif
 }
 
-cv::hip::Stream::Stream(const Ptr<Impl>& impl_) : impl(impl_) {}
-
 bool cv::hip::Stream::queryIfComplete() const
 {
 #ifndef HAVE_HIP

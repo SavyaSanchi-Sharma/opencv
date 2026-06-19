@@ -70,9 +70,9 @@ namespace cv{
             operator bool_type() const;
             CV_WRAP void* hipPtr() const;
             class Impl;
-            private: 
+            private:
                 Ptr<Impl>impl;
-                Stream(const Ptr<Impl>& impl);
+                Stream(const Ptr<Impl>& impl_) : impl(impl_) {}
                 friend struct StreamAccessor;
                 friend class DefaultDeviceInitializer;
             
@@ -111,7 +111,7 @@ namespace cv{
 
     private:
         Ptr<Impl> impl_;
-        Event(const Ptr<Impl>& impl);
+        Event(const Ptr<Impl>& impl) : impl_(impl) {}
 
         friend struct EventAccessor;
     };
@@ -241,10 +241,6 @@ namespace cv{
 
     }
 }
-
-#ifndef OPENCV_CORE_HIP_IMPL
-#include "opencv2/core/hip.inl.hpp"
-#endif
 
 #endif /*for OPENCV_CORE_HIP_HPP*/
 

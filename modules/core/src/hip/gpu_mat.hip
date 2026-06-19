@@ -189,15 +189,15 @@ void cv::hip::device::setToWithoutMask(void* data_, size_t step, int rows, int c
     CV_DbgAssert(data && depth <= CV_64F && cn <= 4);
 
     if (val[0] == 0.0 && val[1] == 0.0 && val[2] == 0.0 && val[3] == 0.0) {
-        CV_HIP_SAFE_CALL(hipMemset2DAsync(data, step, 0, cols * elemSize, rows, s));
+        CV_HIP_SAFE_CALL(hipMemset2D(data, step, 0, cols * elemSize, rows));
         return;
     }
     if (depth == CV_8U) {
         if (cn == 1 || (cn == 2 && val[0]==val[1]) ||
             (cn == 3 && val[0]==val[1] && val[0]==val[2]) ||
             (cn == 4 && val[0]==val[1] && val[0]==val[2] && val[0]==val[3])) {
-            CV_HIP_SAFE_CALL(hipMemset2DAsync(data, step, hip_saturate_cast<uchar>(val[0]),
-                             cols * elemSize, rows, s));
+            CV_HIP_SAFE_CALL(hipMemset2D(data, step, hip_saturate_cast<uchar>(val[0]),
+                             cols * elemSize, rows));
             return;
         }
     }
@@ -213,6 +213,8 @@ void cv::hip::device::setToWithoutMask(void* data_, size_t step, int rows, int c
         {setToImpl<double>, setToImpl<double2>, setToImpl<double3>, setToImpl<double4>}
     };
     funcs[depth][cn - 1](data, step, rows, cols, val, s);
+    CV_HIP_SAFE_CALL(hipGetLastError());
+    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
 // ── setToWithMask ─────────────────────────────────────────────────────────────
@@ -263,6 +265,8 @@ void cv::hip::device::setToWithMask(void* data_, size_t step, int rows, int cols
         {setToMaskedImpl<double>, setToMaskedImpl<double2>, setToMaskedImpl<double3>, setToMaskedImpl<double4>}
     };
     funcs[depth][cn - 1](data, step, mask, maskStep, rows, cols, val, s);
+    CV_HIP_SAFE_CALL(hipGetLastError());
+    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
 // ── copyToWithMask ────────────────────────────────────────────────────────────
@@ -333,6 +337,8 @@ void cv::hip::device::copyToWithMask(const void* src_, size_t srcStep,
         CV_DbgAssert(func);
         func(src, srcStep, dst, dstStep, mask, maskStep, rows, cols, s);
     }
+    CV_HIP_SAFE_CALL(hipGetLastError());
+    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
 // ── convertToNoScale ──────────────────────────────────────────────────────────
@@ -388,6 +394,8 @@ void cv::hip::device::convertToNoScale(const void* src_, size_t srcStep, int sty
     const func_t func = funcs[sd][dd];
     CV_Assert(func);
     func(src, srcStep, dst, dstStep, rows, cols1, s);
+    CV_HIP_SAFE_CALL(hipGetLastError());
+    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
 // ── convertToScale ────────────────────────────────────────────────────────────
@@ -451,6 +459,8 @@ void cv::hip::device::convertToScale(const void* src_, size_t srcStep, int stype
     const func_t func = funcs[sd][dd];
     CV_Assert(func);
     func(src, srcStep, dst, dstStep, rows, cols1, alpha, beta, s);
+    CV_HIP_SAFE_CALL(hipGetLastError());
+    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
 // ── multiplyF32 ───────────────────────────────────────────────────────────────
