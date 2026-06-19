@@ -654,14 +654,13 @@ static void arithm_op(InputArray _src1, InputArray _src2, OutputArray _dst,
             _src1.isUMat() && _src2.isUMat() && _dst.isUMat())
         {
             UMat u1 = _src1.getUMat(), u2 = _src2.getUMat(), ud = _dst.getUMat();
-            if (u1.u && u2.u && ud.u &&
-                u1.u->currAllocator == cv::hip::getHipAllocator() &&
-                u2.u->currAllocator == cv::hip::getHipAllocator())
+            if (cv::hip::isHipUMat(u1) && cv::hip::isHipUMat(u2) && cv::hip::isHipUMat(ud))
             {
-                cv::hip::HipMat ha(u1.rows, u1.cols, u1.type(), u1.u->handle, u1.step[0]);
-                cv::hip::HipMat hb(u2.rows, u2.cols, u2.type(), u2.u->handle, u2.step[0]);
-                cv::hip::HipMat hc(ud.rows, ud.cols, ud.type(), ud.u->handle, ud.step[0]);
-                cv::hip::device::multiplyF32(ha, hb, hc, cv::hip::Stream::Null());
+                // Raw device handles + step, mirroring the OpenCL KernelArg path.
+                cv::hip::device::multiplyF32(u1.u->handle, u1.step[0],
+                                             u2.u->handle, u2.step[0],
+                                             ud.u->handle, ud.step[0],
+                                             u1.rows, u1.cols, cv::hip::Stream::Null());
                 ud.u->markHostCopyObsolete(true);
                 return;
             }

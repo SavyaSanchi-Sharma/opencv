@@ -1,3 +1,9 @@
+// This file is part of OpenCV project.
+// It is subject to the license terms in the LICENSE file found in the top-level directory
+// of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
+
 #include "opencv2/core/hip.hpp"
 #include "opencv2/core/hip_stream_accessor.hpp"
 #include "opencv2/core/hipdev.hpp"
@@ -173,22 +179,25 @@ void setToImpl(uchar* data, size_t step, int rows, int cols, const Scalar& s, hi
 }
 }
 
-void cv::hip::device::setToWithoutMask(cv::hip::HipMat& mat, Scalar val, cv::hip::Stream& stream)
+void cv::hip::device::setToWithoutMask(void* data_, size_t step, int rows, int cols, int type,
+                                       Scalar val, cv::hip::Stream& stream)
 {
+    uchar* data = static_cast<uchar*>(data_);
+    const int depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
+    const size_t elemSize = CV_ELEM_SIZE(type);
     hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    CV_DbgAssert(!mat.empty() && mat.depth() <= CV_64F && mat.channels() <= 4);
+    CV_DbgAssert(data && depth <= CV_64F && cn <= 4);
 
     if (val[0] == 0.0 && val[1] == 0.0 && val[2] == 0.0 && val[3] == 0.0) {
-        CV_HIP_SAFE_CALL(hipMemset2DAsync(mat.data, mat.step, 0, mat.cols * mat.elemSize(), mat.rows, s));
+        CV_HIP_SAFE_CALL(hipMemset2DAsync(data, step, 0, cols * elemSize, rows, s));
         return;
     }
-    if (mat.depth() == CV_8U) {
-        int cn = mat.channels();
+    if (depth == CV_8U) {
         if (cn == 1 || (cn == 2 && val[0]==val[1]) ||
             (cn == 3 && val[0]==val[1] && val[0]==val[2]) ||
             (cn == 4 && val[0]==val[1] && val[0]==val[2] && val[0]==val[3])) {
-            CV_HIP_SAFE_CALL(hipMemset2DAsync(mat.data, mat.step, hip_saturate_cast<uchar>(val[0]),
-                             mat.cols * mat.elemSize(), mat.rows, s));
+            CV_HIP_SAFE_CALL(hipMemset2DAsync(data, step, hip_saturate_cast<uchar>(val[0]),
+                             cols * elemSize, rows, s));
             return;
         }
     }
@@ -203,7 +212,7 @@ void cv::hip::device::setToWithoutMask(cv::hip::HipMat& mat, Scalar val, cv::hip
         {setToImpl<float>,  setToImpl<float2>,  setToImpl<float3>,  setToImpl<float4>},
         {setToImpl<double>, setToImpl<double2>, setToImpl<double3>, setToImpl<double4>}
     };
-    funcs[mat.depth()][mat.channels() - 1](mat.data, mat.step, mat.rows, mat.cols, val, s);
+    funcs[depth][cn - 1](data, step, rows, cols, val, s);
 }
 
 // ── setToWithMask ─────────────────────────────────────────────────────────────
@@ -233,12 +242,15 @@ void setToMaskedImpl(uchar* data, size_t step,
 }
 }
 
-void cv::hip::device::setToWithMask(cv::hip::HipMat& mat, const cv::hip::HipMat& mask,
-                                     Scalar val, cv::hip::Stream& stream)
+void cv::hip::device::setToWithMask(void* data_, size_t step, int rows, int cols, int type,
+                                    const void* mask_, size_t maskStep,
+                                    Scalar val, cv::hip::Stream& stream)
 {
+    uchar* data = static_cast<uchar*>(data_);
+    const uchar* mask = static_cast<const uchar*>(mask_);
+    const int depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
     hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    CV_DbgAssert(!mat.empty() && mat.depth() <= CV_64F && mat.channels() <= 4);
-    CV_DbgAssert(mat.size() == mask.size() && mask.type() == CV_8UC1);
+    CV_DbgAssert(data && mask && depth <= CV_64F && cn <= 4);
 
     typedef void (*func_t)(uchar*, size_t, const uchar*, size_t, int, int, const Scalar&, hipStream_t);
     static const func_t funcs[7][4] = {
@@ -250,8 +262,7 @@ void cv::hip::device::setToWithMask(cv::hip::HipMat& mat, const cv::hip::HipMat&
         {setToMaskedImpl<float>,  setToMaskedImpl<float2>,  setToMaskedImpl<float3>,  setToMaskedImpl<float4>},
         {setToMaskedImpl<double>, setToMaskedImpl<double2>, setToMaskedImpl<double3>, setToMaskedImpl<double4>}
     };
-    funcs[mat.depth()][mat.channels() - 1](
-        mat.data, mat.step, mask.data, mask.step, mat.rows, mat.cols, val, s);
+    funcs[depth][cn - 1](data, step, mask, maskStep, rows, cols, val, s);
 }
 
 // ── copyToWithMask ────────────────────────────────────────────────────────────
@@ -281,14 +292,22 @@ void copyMaskedImpl(const uchar* src, size_t srcStep,
 }
 }
 
-void cv::hip::device::copyToWithMask(const cv::hip::HipMat& src, cv::hip::HipMat& dst,
-                                      const cv::hip::HipMat& mask, cv::hip::Stream& stream)
+void cv::hip::device::copyToWithMask(const void* src_, size_t srcStep,
+                                     void* dst_, size_t dstStep,
+                                     const void* mask_, size_t maskStep,
+                                     int rows, int cols, int type, int maskCn,
+                                     cv::hip::Stream& stream)
 {
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    CV_DbgAssert(!src.empty() && src.depth() <= CV_64F && src.channels() <= 4);
-    CV_DbgAssert(src.size() == mask.size() && mask.depth() == CV_8U &&
-                 (mask.channels() == 1 || mask.channels() == src.channels()));
+    const uchar* src  = static_cast<const uchar*>(src_);
+    uchar*       dst  = static_cast<uchar*>(dst_);
+    const uchar* mask = static_cast<const uchar*>(mask_);
+    const int    cn   = CV_MAT_CN(type);
+    const size_t esz1 = CV_ELEM_SIZE1(type);
+    hipStream_t  s    = cv::hip::StreamAccessor::getStream(stream);
+    CV_DbgAssert(src && CV_MAT_DEPTH(type) <= CV_64F && cn <= 4 &&
+                 (maskCn == 1 || maskCn == cn));
 
+    // funcs indexed by [byte-width-of-one-channel][cn-1]; copy ignores signedness.
     typedef void (*func_t)(const uchar*, size_t, uchar*, size_t,
                            const uchar*, size_t, int, int, hipStream_t);
     static const func_t funcs[9][4] = {
@@ -303,17 +322,16 @@ void cv::hip::device::copyToWithMask(const cv::hip::HipMat& src, cv::hip::HipMat
         {copyMaskedImpl<double>, copyMaskedImpl<double2>, copyMaskedImpl<double3>, copyMaskedImpl<double4>}
     };
 
-    if (mask.channels() == src.channels()) {
-        cv::hip::HipMat s1 = src.reshape(1);
-        cv::hip::HipMat d1 = dst.reshape(1);
-        cv::hip::HipMat m1 = mask.reshape(1);
-        const func_t func = funcs[s1.elemSize1()][0];
+    if (maskCn == cn) {
+        // Per-channel mask: flatten channels into the width and copy single elements.
+        const func_t func = funcs[esz1][0];
         CV_DbgAssert(func);
-        func(s1.data, s1.step, d1.data, d1.step, m1.data, m1.step, s1.rows, s1.cols, s);
+        func(src, srcStep, dst, dstStep, mask, maskStep, rows, cols * cn, s);
     } else {
-        const func_t func = funcs[src.elemSize1()][src.channels() - 1];
+        // Single-channel mask gates whole pixels: use the cn-wide vector copy.
+        const func_t func = funcs[esz1][cn - 1];
         CV_DbgAssert(func);
-        func(src.data, src.step, dst.data, dst.step, mask.data, mask.step, src.rows, src.cols, s);
+        func(src, srcStep, dst, dstStep, mask, maskStep, rows, cols, s);
     }
 }
 
@@ -342,15 +360,19 @@ void convertNoScaleImpl(const uchar* src, size_t srcStep,
 }
 }
 
-void cv::hip::device::convertToNoScale(const cv::hip::HipMat& src, cv::hip::HipMat& dst,
-                                        cv::hip::Stream& stream)
+void cv::hip::device::convertToNoScale(const void* src_, size_t srcStep, int stype,
+                                       void* dst_, size_t dstStep, int dtype,
+                                       int rows, int cols, cv::hip::Stream& stream)
 {
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    const int sd = src.depth(), dd = dst.depth();
+    const uchar* src = static_cast<const uchar*>(src_);
+    uchar*       dst = static_cast<uchar*>(dst_);
+    hipStream_t  s   = cv::hip::StreamAccessor::getStream(stream);
+    const int sd = CV_MAT_DEPTH(stype), dd = CV_MAT_DEPTH(dtype);
     CV_Assert(sd <= CV_64F && dd <= CV_64F);
 
-    cv::hip::HipMat s1 = src.reshape(1);
-    cv::hip::HipMat d1 = dst.reshape(1);
+    // convertTo preserves channel count; flatten channels into the width so the
+    // single-channel typed kernel processes every scalar element.
+    const int cols1 = cols * CV_MAT_CN(stype);
 
     typedef void (*func_t)(const uchar*, size_t, uchar*, size_t, int, int, hipStream_t);
     static const func_t funcs[7][7] = {
@@ -365,7 +387,7 @@ void cv::hip::device::convertToNoScale(const cv::hip::HipMat& src, cv::hip::HipM
 
     const func_t func = funcs[sd][dd];
     CV_Assert(func);
-    func(s1.data, s1.step, d1.data, d1.step, s1.rows, s1.cols, s);
+    func(src, srcStep, dst, dstStep, rows, cols1, s);
 }
 
 // ── convertToScale ────────────────────────────────────────────────────────────
@@ -400,15 +422,19 @@ void convertScaleImpl(const uchar* src, size_t srcStep,
 }
 }
 
-void cv::hip::device::convertToScale(const cv::hip::HipMat& src, cv::hip::HipMat& dst,
-                                      double alpha, double beta, cv::hip::Stream& stream)
+void cv::hip::device::convertToScale(const void* src_, size_t srcStep, int stype,
+                                     void* dst_, size_t dstStep, int dtype,
+                                     int rows, int cols, double alpha, double beta,
+                                     cv::hip::Stream& stream)
 {
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    const int sd = src.depth(), dd = dst.depth();
+    const uchar* src = static_cast<const uchar*>(src_);
+    uchar*       dst = static_cast<uchar*>(dst_);
+    hipStream_t  s   = cv::hip::StreamAccessor::getStream(stream);
+    const int sd = CV_MAT_DEPTH(stype), dd = CV_MAT_DEPTH(dtype);
     CV_Assert(sd <= CV_64F && dd <= CV_64F);
 
-    cv::hip::HipMat s1 = src.reshape(1);
-    cv::hip::HipMat d1 = dst.reshape(1);
+    // convertTo preserves channel count; flatten channels into the width.
+    const int cols1 = cols * CV_MAT_CN(stype);
 
     typedef void (*func_t)(const uchar*, size_t, uchar*, size_t,
                            int, int, double, double, hipStream_t);
@@ -424,7 +450,7 @@ void cv::hip::device::convertToScale(const cv::hip::HipMat& src, cv::hip::HipMat
 
     const func_t func = funcs[sd][dd];
     CV_Assert(func);
-    func(s1.data, s1.step, d1.data, d1.step, s1.rows, s1.cols, alpha, beta, s);
+    func(src, srcStep, dst, dstStep, rows, cols1, alpha, beta, s);
 }
 
 // ── multiplyF32 ───────────────────────────────────────────────────────────────
@@ -442,18 +468,18 @@ __global__ void multiplyF32Kernel(const uchar* src1, size_t step1,
     *reinterpret_cast<float*>(dst + y * stepd + x * sizeof(float)) = a * b;
 }
 
-void cv::hip::device::multiplyF32(const cv::hip::HipMat& src1,
-                                   const cv::hip::HipMat& src2,
-                                         cv::hip::HipMat& dst,
-                                         cv::hip::Stream& stream)
+void cv::hip::device::multiplyF32(const void* src1_, size_t step1,
+                                  const void* src2_, size_t step2,
+                                  void* dst_, size_t stepd,
+                                  int rows, int cols, cv::hip::Stream& stream)
 {
-    CV_Assert(src1.type() == CV_32FC1 && src2.type() == CV_32FC1);
-    CV_Assert(src1.rows == src2.rows && src1.cols == src2.cols);
-    dst.create(src1.rows, src1.cols, CV_32FC1);
+    const uchar* src1 = static_cast<const uchar*>(src1_);
+    const uchar* src2 = static_cast<const uchar*>(src2_);
+    uchar*       dst  = static_cast<uchar*>(dst_);
+    CV_Assert(src1 && src2 && dst);
     hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
-    hipLaunchKernelGGL(multiplyF32Kernel, hipGrid(src1.rows, src1.cols), hipBlock(), 0, s,
-                       src1.data, src1.step, src2.data, src2.step,
-                       dst.data,  dst.step,  src1.rows, src1.cols);
+    hipLaunchKernelGGL(multiplyF32Kernel, hipGrid(rows, cols), hipBlock(), 0, s,
+                       src1, step1, src2, step2, dst, stepd, rows, cols);
     CV_HIP_SAFE_CALL(hipGetLastError());
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }

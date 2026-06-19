@@ -221,7 +221,7 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
     }
 
 #ifdef HAVE_HIP
-    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && dst.isUMat() && CV_MAT_CN(type()) <= 4)
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && dst.isUMat() && CV_MAT_CN(type()) <= 4)
     {
         int stype = type();
         int sdepth = CV_MAT_DEPTH(stype);
@@ -235,14 +235,17 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
         int dtype = CV_MAKE_TYPE(ddepth, CV_MAT_CN(stype));
         dst.create(size(), dtype);
         UMat dstUMat = dst.getUMat();
-        if (dstUMat.u && dstUMat.u->currAllocator == cv::hip::getHipAllocator())
+        if (cv::hip::isHipUMat(dstUMat))
         {
-            cv::hip::HipMat srcMat(rows, cols, stype, u->handle, step[0]);
-            cv::hip::HipMat dstMat(dstUMat.rows, dstUMat.cols, dtype, dstUMat.u->handle, dstUMat.step[0]);
+            // Raw device handle + metadata, mirroring the OpenCL KernelArg path.
             if (noScale)
-                cv::hip::device::convertToNoScale(srcMat, dstMat, cv::hip::Stream::Null());
+                cv::hip::device::convertToNoScale(u->handle, step[0], stype,
+                                                  dstUMat.u->handle, dstUMat.step[0], dtype,
+                                                  rows, cols, cv::hip::Stream::Null());
             else
-                cv::hip::device::convertToScale(srcMat, dstMat, alpha, beta, cv::hip::Stream::Null());
+                cv::hip::device::convertToScale(u->handle, step[0], stype,
+                                                dstUMat.u->handle, dstUMat.step[0], dtype,
+                                                rows, cols, alpha, beta, cv::hip::Stream::Null());
             dstUMat.u->markHostCopyObsolete(true);
             return;
         }

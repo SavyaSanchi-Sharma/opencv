@@ -1314,17 +1314,20 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
         return;
     }
 #ifdef HAVE_HIP
-    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && _dst.isUMat())
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && _dst.isUMat())
     {
         UMat mask = _mask.getUMat();
-        if (mask.u && mask.u->currAllocator == cv::hip::getHipAllocator())
+        if (cv::hip::isHipUMat(mask))
         {
             _dst.create(size(), type());
             UMat dst = _dst.getUMat();
-            cv::hip::HipMat srcMat(rows, cols, type(), u->handle, step[0]);
-            cv::hip::HipMat dstMat(dst.rows, dst.cols, dst.type(), dst.u->handle, dst.step[0]);
-            cv::hip::HipMat maskMat(mask.rows, mask.cols, mask.type(), mask.u->handle, mask.step[0]);
-            cv::hip::device::copyToWithMask(srcMat, dstMat, maskMat, cv::hip::Stream::Null());
+            // Pass the raw device handle + metadata straight to the kernel, the
+            // same way the OpenCL path feeds cl_mem + step via ocl::KernelArg.
+            cv::hip::device::copyToWithMask(u->handle, step[0],
+                                            dst.u->handle, dst.step[0],
+                                            mask.u->handle, mask.step[0],
+                                            rows, cols, type(), mask.channels(),
+                                            cv::hip::Stream::Null());
             dst.u->markHostCopyObsolete(true);
             return;
         }
@@ -1381,7 +1384,7 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
 
     bool haveMask = !_mask.empty();
 #ifdef HAVE_HIP
-    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && CV_MAT_CN(type()) <= 4)
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && CV_MAT_CN(type()) <= 4)
     {
         Mat value = _value.getMat();
         CV_Assert(checkScalar(value, type(), _value.kind(), _InputArray::UMAT));
@@ -1394,14 +1397,14 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
             for (int i = 0; i < n; i++)
                 s.val[i] = tmp.at<double>(i);
         }
-        cv::hip::HipMat dst(rows, cols, type(), u->handle, step[0]);
         if (haveMask)
         {
             UMat mask = _mask.getUMat();
-            if (mask.u && mask.u->currAllocator == cv::hip::getHipAllocator())
+            if (cv::hip::isHipUMat(mask))
             {
-                cv::hip::HipMat maskMat(mask.rows, mask.cols, mask.type(), mask.u->handle, mask.step[0]);
-                cv::hip::device::setToWithMask(dst, maskMat, s, cv::hip::Stream::Null());
+                cv::hip::device::setToWithMask(u->handle, step[0], rows, cols, type(),
+                                               mask.u->handle, mask.step[0],
+                                               s, cv::hip::Stream::Null());
                 u->markHostCopyObsolete(true);
                 return *this;
             }
@@ -1409,7 +1412,8 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
         }
         else
         {
-            cv::hip::device::setToWithoutMask(dst, s, cv::hip::Stream::Null());
+            cv::hip::device::setToWithoutMask(u->handle, step[0], rows, cols, type(),
+                                              s, cv::hip::Stream::Null());
             u->markHostCopyObsolete(true);
             return *this;
         }
