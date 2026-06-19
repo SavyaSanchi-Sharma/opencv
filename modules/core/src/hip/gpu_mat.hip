@@ -423,7 +423,7 @@ void cv::hip::device::convertToScale(const cv::hip::HipMat& src, cv::hip::HipMat
 }
 
 // ── multiplyF32 ───────────────────────────────────────────────────────────────
-/*
+
 __global__ void multiplyF32Kernel(const uchar* src1, size_t step1,
                                    const uchar* src2, size_t step2,
                                    uchar* dst,        size_t stepd,
@@ -452,4 +452,3 @@ void cv::hip::device::multiplyF32(const cv::hip::HipMat& src1,
     CV_HIP_SAFE_CALL(hipGetLastError());
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
-*/

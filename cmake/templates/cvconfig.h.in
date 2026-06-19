@@ -115,9 +115,6 @@
 /* PNG codec */
 #cmakedefine HAVE_SPNG
 
-/* HarfBuzz text shaping */
-#cmakedefine HAVE_HARFBUZZ
-
 /* Posix threads (pthreads) */
 #cmakedefine HAVE_PTHREAD
 
