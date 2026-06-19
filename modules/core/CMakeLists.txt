@@ -195,6 +195,16 @@ endif()
 
 ocv_create_module(${extra_libs})
 
+if(HAVE_HIP AND NOT HAVE_HIP_STANDALONE AND OPENCV_HIP_CUDA_THRUST_INCLUDE)
+  # nvcc auto-adds CCCL as -isystem (after the RSP entries). ROCm is also -isystem
+  # (from hip::device) and appears in the RSP before nvcc's built-in CCCL -isystem.
+  # GCC's dedup rule: -I + -isystem for the same path → drops -I, keeps -isystem.
+  # Fix: add CCCL as this target's OWN system include so cmake emits it first in the
+  # RSP (target-own includes precede linked-target interface includes), putting CCCL's
+  # -isystem before ROCm's -isystem. nvcc's duplicate is then ignored by GCC.
+  target_include_directories(${the_module} SYSTEM BEFORE PRIVATE ${OPENCV_HIP_CUDA_THRUST_INCLUDE})
+endif()
+
 ocv_target_link_libraries(${the_module} PRIVATE
     "${ZLIB_LIBRARIES}" "${OPENCL_LIBRARIES}" "${VA_LIBRARIES}"
     "${OPENGL_LIBRARIES}"

@@ -1,12 +1,15 @@
 #include "opencv2/core/hip.hpp"
 #include "opencv2/core/hip_stream_accessor.hpp"
 #include "opencv2/core/hipdev.hpp"
+#include "cvconfig.h"
 
 #include <limits>
 
 using namespace cv;
 
-// ── ThrustAllocator (declared here; cuda/utility.hpp needs cuda_runtime.h) ───
+// ThrustAllocator is only needed in standalone mode; in combined mode
+// gpu_mat.cu provides it using CUDA memory allocation.
+#ifdef HAVE_HIP_STANDALONE
 
 namespace cv { namespace cuda { namespace device {
 struct CV_EXPORTS ThrustAllocator {
@@ -44,6 +47,8 @@ cv::cuda::device::ThrustAllocator& cv::cuda::device::ThrustAllocator::getAllocat
 void cv::cuda::device::ThrustAllocator::setAllocator(cv::cuda::device::ThrustAllocator* a) {
     g_thrustAllocator = a ? a : &defaultThrustAllocator;
 }
+
+#endif // HAVE_HIP_STANDALONE
 
 // ── hip_saturate_cast ─────────────────────────────────────────────────────────
 // Primary template clamps via double (for integer destinations).
