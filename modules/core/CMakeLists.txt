@@ -101,14 +101,9 @@ ocv_glob_module_sources(SOURCES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version
                         HEADERS ${core_parallel_hdrs} ${module_opencl_hdrs} ${lib_cuda_hdrs} ${lib_cuda_hdrs_detail})
 
 if(HAVE_HIP_STANDALONE)
-  # ROCm-only build: NVIDIA-only headers are absent, exclude these files.
-  # When real CUDA is also present (HAVE_HIP_STANDALONE unset) they compile normally.
+  # ROCm-only build: CUDA GPU kernels can't compile without CUDA toolkit headers.
+  # The .cpp files use #if !defined(HAVE_CUDA)||defined(HAVE_HIP_STANDALONE) stubs instead.
   set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_gpu_mat.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_gpu_mat_nd.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_host_mem.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_info.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_stream.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/cuda/gpu_mat.cu"
     "${CMAKE_CURRENT_LIST_DIR}/src/cuda/gpu_mat_nd.cu"
     PROPERTIES HEADER_FILE_ONLY TRUE

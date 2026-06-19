@@ -54,7 +54,9 @@ __host__ __device__ __forceinline__ D hip_saturate_cast(S val) {
     const double d = static_cast<double>(val);
     if (d < static_cast<double>(std::numeric_limits<D>::lowest())) return std::numeric_limits<D>::lowest();
     if (d > static_cast<double>(std::numeric_limits<D>::max()))    return std::numeric_limits<D>::max();
-    return static_cast<D>(d);
+    // Integer destinations round to nearest (matches OpenCV's saturate_cast/cvRound).
+    // Float/double destinations fall through to straight static_cast via the specialisations below.
+    return static_cast<D>(std::numeric_limits<D>::is_integer ? rint(d) : d);
 }
 
 #define HIP_SAT_FSPEC(D, S) \
@@ -421,7 +423,7 @@ void cv::hip::device::convertToScale(const cv::hip::HipMat& src, cv::hip::HipMat
 }
 
 // ── multiplyF32 ───────────────────────────────────────────────────────────────
-
+/*
 __global__ void multiplyF32Kernel(const uchar* src1, size_t step1,
                                    const uchar* src2, size_t step2,
                                    uchar* dst,        size_t stepd,
@@ -450,3 +452,4 @@ void cv::hip::device::multiplyF32(const cv::hip::HipMat& src1,
     CV_HIP_SAFE_CALL(hipGetLastError());
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
+*/

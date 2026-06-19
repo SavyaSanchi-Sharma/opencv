@@ -135,6 +135,7 @@ public:
             fastFree(u->data);
             u->data     = nullptr;
             u->origdata = nullptr;
+            u->markHostCopyObsolete(true);  // host buffer gone; device is authoritative
         }
     }
 
@@ -742,7 +743,10 @@ void cv::hip::HipMat::copyTo(HipMat& dst, InputArray mask_) const
     CV_UNUSED(dst); CV_UNUSED(mask_); throw_no_hip();
 #else
     CV_DbgAssert(!empty());
+    uchar* old_data = dst.data;
     dst.create(rows, cols, type());
+    if (dst.data != old_data)
+        hipSafeCall(hipMemset2D(dst.data, dst.step, 0, cols * elemSize(), rows));
     CV_Assert(mask_.isUMat());
     UMat maskUMat = mask_.getUMat();
     CV_Assert(maskUMat.u && maskUMat.u->currAllocator == getHipAllocator());
@@ -757,7 +761,12 @@ void cv::hip::HipMat::copyTo(HipMat& dst, HipMat& mask_, Stream& stream_) const
     CV_UNUSED(dst); CV_UNUSED(mask_); CV_UNUSED(stream_); throw_no_hip();
 #else
     CV_DbgAssert(!empty());
+    uchar* old_data = dst.data;
     dst.create(rows, cols, type());
+    if (dst.data != old_data) {
+        hipStream_t s = StreamAccessor::getStream(stream_);
+        hipSafeCall(hipMemset2DAsync(dst.data, dst.step, 0, cols * elemSize(), rows, s));
+    }
     device::copyToWithMask(*this, dst, mask_, stream_);
 #endif
 }
