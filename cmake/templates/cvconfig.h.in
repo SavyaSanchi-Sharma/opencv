@@ -28,6 +28,12 @@
 /* Clp support */
 #cmakedefine HAVE_CLP
 
+/* AMD ROCm/HIP Runtime API */
+#cmakedefine HAVE_HIP
+
+/* AMD ROCm/HIP without a real NVIDIA CUDA installation */
+#cmakedefine HAVE_HIP_STANDALONE
+
 /* NVIDIA CUDA Runtime API*/
 #cmakedefine HAVE_CUDA
 
@@ -108,6 +114,9 @@
 
 /* PNG codec */
 #cmakedefine HAVE_SPNG
+
+/* HarfBuzz text shaping */
+#cmakedefine HAVE_HARFBUZZ
 
 /* Posix threads (pthreads) */
 #cmakedefine HAVE_PTHREAD

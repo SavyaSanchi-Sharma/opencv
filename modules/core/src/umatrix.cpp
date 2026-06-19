@@ -42,6 +42,9 @@
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
 #include "umatrix.hpp"
+#ifdef HAVE_HIP
+#  include "opencv2/core/hip.hpp"
+#endif
 
 #include <opencv2/core/utils/tls.hpp>
 
@@ -448,6 +451,10 @@ UMat& UMat::operator=(UMat&& m)
 
 MatAllocator* UMat::getStdAllocator()
 {
+#ifdef HAVE_HIP
+    if (cv::hip::useHip())
+        return cv::hip::getHipAllocator();
+#endif
 #ifdef HAVE_OPENCL
     if (ocl::useOpenCL())
         return ocl::getOpenCLAllocator();
@@ -1234,7 +1241,7 @@ void UMat::copyTo(OutputArray _dst) const
 {
     CV_INSTRUMENT_REGION();
 
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     if (_dst.isGpuMat())
     {
         _dst.getGpuMat().upload(*this);
@@ -1306,6 +1313,23 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
         copyTo(_dst);
         return;
     }
+#ifdef HAVE_HIP
+    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && _dst.isUMat())
+    {
+        UMat mask = _mask.getUMat();
+        if (mask.u && mask.u->currAllocator == cv::hip::getHipAllocator())
+        {
+            _dst.create(size(), type());
+            UMat dst = _dst.getUMat();
+            cv::hip::HipMat srcMat(rows, cols, type(), u->handle, step[0]);
+            cv::hip::HipMat dstMat(dst.rows, dst.cols, dst.type(), dst.u->handle, dst.step[0]);
+            cv::hip::HipMat maskMat(mask.rows, mask.cols, mask.type(), mask.u->handle, mask.step[0]);
+            cv::hip::device::copyToWithMask(srcMat, dstMat, maskMat, cv::hip::Stream::Null());
+            dst.u->markHostCopyObsolete(true);
+            return;
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int cn = channels(), mtype = _mask.type(), mdepth = CV_MAT_DEPTH(mtype), mcn = CV_MAT_CN(mtype);
     CV_Assert( (mdepth == CV_8U || mdepth == CV_8S || mdepth == CV_Bool) && (mcn == 1 || mcn == cn) );
@@ -1356,6 +1380,41 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
     CV_INSTRUMENT_REGION();
 
     bool haveMask = !_mask.empty();
+#ifdef HAVE_HIP
+    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && CV_MAT_CN(type()) <= 4)
+    {
+        Mat value = _value.getMat();
+        CV_Assert(checkScalar(value, type(), _value.kind(), _InputArray::UMAT));
+        Scalar s;
+        {
+            Mat tmp;
+            value.convertTo(tmp, CV_64F);
+            tmp = tmp.reshape(1, 1);
+            int n = (int)std::min(tmp.total(), (size_t)4);
+            for (int i = 0; i < n; i++)
+                s.val[i] = tmp.at<double>(i);
+        }
+        cv::hip::HipMat dst(rows, cols, type(), u->handle, step[0]);
+        if (haveMask)
+        {
+            UMat mask = _mask.getUMat();
+            if (mask.u && mask.u->currAllocator == cv::hip::getHipAllocator())
+            {
+                cv::hip::HipMat maskMat(mask.rows, mask.cols, mask.type(), mask.u->handle, mask.step[0]);
+                cv::hip::device::setToWithMask(dst, maskMat, s, cv::hip::Stream::Null());
+                u->markHostCopyObsolete(true);
+                return *this;
+            }
+            // mask not on HIP device, fall through to CPU
+        }
+        else
+        {
+            cv::hip::device::setToWithoutMask(dst, s, cv::hip::Stream::Null());
+            u->markHostCopyObsolete(true);
+            return *this;
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int tp = type(), cn = CV_MAT_CN(tp), d = CV_MAT_DEPTH(tp);
 

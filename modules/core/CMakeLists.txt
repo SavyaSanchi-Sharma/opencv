@@ -100,6 +100,24 @@ source_group("Src" FILES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string
 ocv_glob_module_sources(SOURCES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string.inc"
                         HEADERS ${core_parallel_hdrs} ${module_opencl_hdrs} ${lib_cuda_hdrs} ${lib_cuda_hdrs_detail})
 
+if(HAVE_HIP_STANDALONE)
+  # ROCm-only build: NVIDIA-only headers are absent, exclude these files.
+  # When real CUDA is also present (HAVE_HIP_STANDALONE unset) they compile normally.
+  set_source_files_properties(
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_gpu_mat.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_gpu_mat_nd.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_host_mem.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_info.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda_stream.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda/gpu_mat.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/src/cuda/gpu_mat_nd.cu"
+    PROPERTIES HEADER_FILE_ONLY TRUE
+  )
+endif()
+
+if(HAVE_HIP)
+  ocv_module_include_directories(${the_module} ${hip_INCLUDE_DIRS})
+endif()
 ocv_module_include_directories(${the_module} ${ZLIB_INCLUDE_DIRS} ${OPENCL_INCLUDE_DIRS})
 if(ANDROID AND HAVE_CPUFEATURES)
   ocv_append_source_file_compile_definitions(${CMAKE_CURRENT_SOURCE_DIR}/src/system.cpp "HAVE_CPUFEATURES=1")
@@ -164,14 +182,20 @@ if(PARALLEL_ENABLE_PLUGINS)
   endif()
 endif()
 
+if(HAVE_HIP)
+  list(APPEND extra_libs hip::host)
+endif()
 if(HAVE_CUDA)
-  if(NOT HAVE_opencv_cudev)
-    message(FATAL_ERROR "CUDA: OpenCV requires enabled 'cudev' module from 'opencv_contrib' repository: https://github.com/opencv/opencv_contrib")
+  if(NOT HAVE_HIP_STANDALONE)
+    # Real CUDA installation present — cudev module required.
+    if(NOT HAVE_opencv_cudev)
+      message(FATAL_ERROR "CUDA: OpenCV requires enabled 'cudev' module from 'opencv_contrib' repository: https://github.com/opencv/opencv_contrib")
+    endif()
+    ocv_warnings_disable(CMAKE_CXX_FLAGS -Wundef -Wenum-compare -Wunused-function -Wshadow)
   endif()
   if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
-   list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
+    list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
   endif()
-  ocv_warnings_disable(CMAKE_CXX_FLAGS -Wundef -Wenum-compare -Wunused-function -Wshadow)
 endif()
 
 ocv_create_module(${extra_libs})

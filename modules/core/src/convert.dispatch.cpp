@@ -4,6 +4,9 @@
 
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
+#ifdef HAVE_HIP
+#  include "opencv2/core/hip.hpp"
+#endif
 
 #include "convert.simd.hpp"
 #include "convert.simd_declarations.hpp" // defines CV_CPU_DISPATCH_MODES_ALL=AVX2,...,BASELINE based on CMakeLists.txt content
@@ -217,6 +220,34 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
         return;
     }
 
+#ifdef HAVE_HIP
+    if (dims <= 2 && u && u->currAllocator == cv::hip::getHipAllocator() && dst.isUMat() && CV_MAT_CN(type()) <= 4)
+    {
+        int stype = type();
+        int sdepth = CV_MAT_DEPTH(stype);
+        int ddepth = type_ >= 0 ? CV_MAT_DEPTH(type_) : (dst.fixedType() ? dst.depth() : sdepth);
+        bool noScale = std::fabs(alpha - 1) < DBL_EPSILON && std::fabs(beta) < DBL_EPSILON;
+        if (sdepth == ddepth && noScale)
+        {
+            copyTo(dst);
+            return;
+        }
+        int dtype = CV_MAKE_TYPE(ddepth, CV_MAT_CN(stype));
+        dst.create(size(), dtype);
+        UMat dstUMat = dst.getUMat();
+        if (dstUMat.u && dstUMat.u->currAllocator == cv::hip::getHipAllocator())
+        {
+            cv::hip::HipMat srcMat(rows, cols, stype, u->handle, step[0]);
+            cv::hip::HipMat dstMat(dstUMat.rows, dstUMat.cols, dtype, dstUMat.u->handle, dstUMat.step[0]);
+            if (noScale)
+                cv::hip::device::convertToNoScale(srcMat, dstMat, cv::hip::Stream::Null());
+            else
+                cv::hip::device::convertToScale(srcMat, dstMat, alpha, beta, cv::hip::Stream::Null());
+            dstUMat.u->markHostCopyObsolete(true);
+            return;
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int stype = type();
     int sdepth = CV_MAT_DEPTH(stype);

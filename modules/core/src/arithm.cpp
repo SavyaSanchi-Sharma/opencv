@@ -49,6 +49,9 @@
 
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
+#ifdef HAVE_HIP
+#  include "opencv2/core/hip.hpp"
+#endif
 
 namespace cv
 {
@@ -646,6 +649,24 @@ static void arithm_op(InputArray _src1, InputArray _src2, OutputArray _dst,
         (src1Scalar == src2Scalar) )
     {
         _dst.createSameSize(*psrc1, type1);
+#ifdef HAVE_HIP
+        if (oclop == OCL_OP_MUL && type1 == CV_32FC1 &&
+            _src1.isUMat() && _src2.isUMat() && _dst.isUMat())
+        {
+            UMat u1 = _src1.getUMat(), u2 = _src2.getUMat(), ud = _dst.getUMat();
+            if (u1.u && u2.u && ud.u &&
+                u1.u->currAllocator == cv::hip::getHipAllocator() &&
+                u2.u->currAllocator == cv::hip::getHipAllocator())
+            {
+                cv::hip::HipMat ha(u1.rows, u1.cols, u1.type(), u1.u->handle, u1.step[0]);
+                cv::hip::HipMat hb(u2.rows, u2.cols, u2.type(), u2.u->handle, u2.step[0]);
+                cv::hip::HipMat hc(ud.rows, ud.cols, ud.type(), ud.u->handle, ud.step[0]);
+                cv::hip::device::multiplyF32(ha, hb, hc, cv::hip::Stream::Null());
+                ud.u->markHostCopyObsolete(true);
+                return;
+            }
+        }
+#endif
         CV_OCL_RUN(use_opencl,
             ocl_arithm_op(*psrc1, *psrc2, _dst, _mask,
                           (!usrdata ? type1 : std::max(depth1, CV_32F)),
