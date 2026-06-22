@@ -660,7 +660,7 @@ static void arithm_op(InputArray _src1, InputArray _src2, OutputArray _dst,
                 cv::hip::device::multiplyF32(u1.u->handle, u1.step[0],
                                              u2.u->handle, u2.step[0],
                                              ud.u->handle, ud.step[0],
-                                             u1.rows, u1.cols, cv::hip::Stream::Null());
+                                             u1.rows, u1.cols);
                 ud.u->markHostCopyObsolete(true);
                 return;
             }

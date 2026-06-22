@@ -16,7 +16,6 @@
 
 namespace cv{
     namespace hip{
-        class Stream;  // forward-declared here; defined later in this file
 
     CV_EXPORTS_W bool useHip();
     CV_EXPORTS MatAllocator* getHipAllocator();
@@ -35,110 +34,41 @@ namespace cv{
     //! arithmetic ops) call these directly.
     namespace device {
         CV_EXPORTS void setToWithoutMask(void* data, size_t step, int rows, int cols, int type,
-                                         Scalar val, Stream& stream);
+                                         Scalar val);
         CV_EXPORTS void setToWithMask(void* data, size_t step, int rows, int cols, int type,
                                       const void* mask, size_t maskStep,
-                                      Scalar val, Stream& stream);
+                                      Scalar val);
         CV_EXPORTS void copyToWithMask(const void* src, size_t srcStep,
                                        void* dst, size_t dstStep,
                                        const void* mask, size_t maskStep,
-                                       int rows, int cols, int type, int maskCn, Stream& stream);
+                                       int rows, int cols, int type, int maskCn);
         CV_EXPORTS void convertToNoScale(const void* src, size_t srcStep, int stype,
                                          void* dst, size_t dstStep, int dtype,
-                                         int rows, int cols, Stream& stream);
+                                         int rows, int cols);
         CV_EXPORTS void convertToScale(const void* src, size_t srcStep, int stype,
                                        void* dst, size_t dstStep, int dtype,
-                                       int rows, int cols, double alpha, double beta, Stream& stream);
+                                       int rows, int cols, double alpha, double beta);
         CV_EXPORTS void multiplyF32(const void* src1, size_t step1,
                                     const void* src2, size_t step2,
                                     void* dst, size_t stepd,
-                                    int rows, int cols, Stream& stream);
+                                    int rows, int cols);
     } // namespace device
 
 
-    class CV_EXPORTS_W Stream{
-        typedef void(Stream::*bool_type)() const;
-        void this_type_does_not_support_comparisions() const {}
-        public:
-            typedef void(*StreamCallback)(int status,void* userData);
-            CV_WRAP Stream();
-            CV_WRAP Stream(const size_t hipFlags);
-            CV_WRAP bool queryIfComplete() const;
-            CV_WRAP void waitForCompletion();
-            CV_WRAP void enqueueHostCallback(StreamCallback callback, void* userData);
-            CV_WRAP static Stream& Null();
-            operator bool_type() const;
-            CV_WRAP void* hipPtr() const;
-            class Impl;
-            private:
-                Ptr<Impl>impl;
-                Stream(const Ptr<Impl>& impl_) : impl(impl_) {}
-                friend struct StreamAccessor;
-                friend class DefaultDeviceInitializer;
-            
-
-    };
-
-    CV_EXPORTS_W Stream wrapStream(size_t cudaStreamMemoryAddress);
-
-
-
-    class CV_EXPORTS_W Event{
-        public:
-        enum CreateFlags{
-            DEFAULT        = 0x00,  /**< Default event flag */
-            BLOCKING_SYNC  = 0x01,  /**< Event uses blocking synchronization */
-            DISABLE_TIMING = 0x02,  /**< Event will not record timing data */
-            INTERPROCESS   = 0x04   /**< Event is suitable for interprocess use. DisableTiming must be set */
-        };
-
-
-        CV_WRAP explicit Event(const Event::CreateFlags flags = Event::CreateFlags::DEFAULT);
-
-        //! records an event
-        CV_WRAP void record(Stream& stream = Stream::Null());
-
-        //! queries an event's status
-        CV_WRAP bool queryIfComplete() const;
-
-        //! waits for an event to complete
-        CV_WRAP void waitForCompletion();
-
-        //! computes the elapsed time between events
-        CV_WRAP static float elapsedTime(const Event& start, const Event& end);
-
-        class Impl;
-
-    private:
-        Ptr<Impl> impl_;
-        Event(const Ptr<Impl>& impl) : impl_(impl) {}
-
-        friend struct EventAccessor;
-    };
-
-    CV_ENUM_FLAGS(Event::CreateFlags)
-
-
+    //! @brief Returns the number of installed HIP-enabled devices.
+    //! Returns 0 if HIP support is not compiled in or no device is found.
     CV_EXPORTS_W int getHipEnabledDeviceCount();
 
-    /** @brief Sets a device and initializes it for the current thread.
-
-    @param device System index of a CUDA device starting with 0.
-
-    If the call of this function is omitted, a default device is initialized at the fist CUDA usage.
-    */
+    //! @brief Sets the current HIP device.
     CV_EXPORTS_W void setDevice(int device);
 
-    /** @brief Returns the current device index set by cuda::setDevice or initialized by default.
-     */
+    //! @brief Returns the current HIP device index.
     CV_EXPORTS_W int getDevice();
 
-    /** @brief Explicitly destroys and cleans up all resources associated with the current device in the current
-    process.
-
-    Any subsequent API call to this device will reinitialize the device.
-    */
+    //! @brief Explicitly destroys and cleans up all resources associated with
+    //! the current device in the current process.
     CV_EXPORTS_W void resetDevice();
+
     enum FeatureSet
     {
         GLOBAL_ATOMICS,

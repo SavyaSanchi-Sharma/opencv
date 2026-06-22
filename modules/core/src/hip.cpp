@@ -7,7 +7,6 @@
 #define OPENCV_CORE_HIP_IMPL
 #include "precomp.hpp"
 #include "opencv2/core/hip.hpp"
-#include "opencv2/core/hip_stream_accessor.hpp"
 #include "opencv2/core/private/hip_stubs.hpp"
 #include "umatrix.hpp"
 
@@ -33,6 +32,21 @@ namespace {
 
 class HipAllocator CV_FINAL : public MatAllocator
 {
+    // HIP allocation unavailable (e.g. hipMalloc failed): hand off to OpenCL,
+    // which has its own CPU fallback when OpenCL is disabled/absent. So the
+    // chain is HIP -> OpenCL -> CPU.  When OpenCL isn't compiled in, fall
+    // straight to the CPU allocator.
+    static UMatData* fallbackAllocate(int dims, const int* sizes, int type,
+                                      void* data, size_t* step,
+                                      AccessFlag flags, UMatUsageFlags usageFlags)
+    {
+#ifdef HAVE_OPENCL
+        return ocl::getOpenCLAllocator()->allocate(dims, sizes, type, data, step, flags, usageFlags);
+#else
+        return Mat::getStdAllocator()->allocate(dims, sizes, type, data, step, flags, usageFlags);
+#endif
+    }
+
 public:
     UMatData* allocate(int dims, const int* sizes, int type,
                        void* data, size_t* step,
@@ -48,7 +62,10 @@ public:
         }
 
         void* devicePtr = nullptr;
-        hipSafeCall(hipMalloc(&devicePtr, total));
+        if (hipMalloc(&devicePtr, total) != hipSuccess || !devicePtr) {
+            (void)hipGetLastError();  // clear the sticky error before using another backend
+            return fallbackAllocate(dims, sizes, type, data, step, flags, usageFlags);
+        }
 
         UMatData* u = new UMatData(this);
         u->data     = nullptr;
@@ -70,7 +87,17 @@ public:
         if (u->handle == nullptr) {
             CV_Assert(u->origdata != nullptr);
             void* devicePtr = nullptr;
-            hipSafeCall(hipMalloc(&devicePtr, u->size));
+            if (hipMalloc(&devicePtr, u->size) != hipSuccess || !devicePtr) {
+                (void)hipGetLastError();  // clear the sticky error
+#ifdef HAVE_OPENCL
+                // OpenCL's UMatData allocate has no internal disabled-guard, so only
+                // delegate when OpenCL is actually usable; otherwise let the caller
+                // (UMat::create) fall back to the CPU allocator.
+                if (ocl::useOpenCL())
+                    return ocl::getOpenCLAllocator()->allocate(u, accessFlags, usageFlags);
+#endif
+                return false;
+            }
             u->handle = devicePtr;
             if (u->origdata) {
                 hipSafeCall(hipMemcpy(u->handle, u->origdata, u->size, hipMemcpyHostToDevice));
@@ -161,7 +188,9 @@ public:
         } else {
             hipSafeCall(hipMemcpy(u->handle, src, u->size, hipMemcpyHostToDevice));
         }
-        u->markHostCopyObsolete(false);
+        // upload writes the device buffer only; the host copy (u->data) is now
+        // stale and the device is authoritative.  (Matches OpenCLAllocator::upload.)
+        u->markHostCopyObsolete(true);
         u->markDeviceCopyObsolete(false);
     }
 
@@ -246,7 +275,6 @@ CV_EXPORTS_W bool useHip()
         g_useHip = false;
         return false;
     }
-    // Disable OpenCL so its kernels never receive HIP-allocated buffers.
     // UMat paths check currAllocator for HIP, but Mat::copyTo / Mat::setTo
     // fire CV_OCL_RUN before that check and would pass a HIP buffer to OpenCL.
     cv::ocl::setUseOpenCL(false);
@@ -266,238 +294,6 @@ namespace cv { namespace hip {
 bool isHipUMat(InputArray) { return false; }
 }} // cv::hip
 #endif
-
-// ======================== Stream::Impl ========================
-
-#ifdef HAVE_HIP
-struct cv::hip::Stream::Impl
-{
-    hipStream_t stream;
-    bool ownStream;
-
-    Impl() : stream(0), ownStream(false) {}
-
-    explicit Impl(unsigned int hipFlags)
-        : stream(0), ownStream(true)
-    {
-        hipSafeCall(hipStreamCreateWithFlags(&stream, hipFlags));
-    }
-
-    explicit Impl(hipStream_t s) : stream(s), ownStream(false) {}
-
-    ~Impl()
-    {
-        if (ownStream && stream) hipSafeCall(hipStreamDestroy(stream));
-    }
-};
-#endif
-
-// ======================== Stream ========================
-
-cv::hip::Stream::Stream()
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    impl = makePtr<Impl>();
-#endif
-}
-
-cv::hip::Stream::Stream(const size_t hipFlags_)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(hipFlags_); throw_no_hip();
-#else
-    impl = makePtr<Impl>((unsigned int)hipFlags_);
-#endif
-}
-
-bool cv::hip::Stream::queryIfComplete() const
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    hipError_t err = hipStreamQuery(impl->stream);
-    if (err == hipSuccess) return true;
-    if (err == hipErrorNotReady) return false;
-    hipSafeCall(err);
-    return false;
-#endif
-}
-
-void cv::hip::Stream::waitForCompletion()
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    hipSafeCall(hipStreamSynchronize(impl->stream));
-#endif
-}
-
-void cv::hip::Stream::enqueueHostCallback(StreamCallback callback, void* userData)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(callback); CV_UNUSED(userData); throw_no_hip();
-#else
-    hipSafeCall(hipStreamAddCallback(impl->stream,
-        reinterpret_cast<hipStreamCallback_t>(callback), userData, 0));
-#endif
-}
-
-Stream& cv::hip::Stream::Null()
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    static Stream s(makePtr<Stream::Impl>());
-    return s;
-#endif
-}
-
-cv::hip::Stream::operator bool_type() const
-{
-#ifndef HAVE_HIP
-    return nullptr;
-#else
-    return (impl && impl->stream != 0) ?
-        &Stream::this_type_does_not_support_comparisions : nullptr;
-#endif
-}
-
-void* cv::hip::Stream::hipPtr() const
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    return impl->stream;
-#endif
-}
-
-// ======================== StreamAccessor ========================
-
-hipStream_t cv::hip::StreamAccessor::getStream(const Stream& stream)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(stream); throw_no_hip();
-#else
-    return stream.impl->stream;
-#endif
-}
-
-Stream cv::hip::StreamAccessor::wrapStream(hipStream_t stream_)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(stream_); throw_no_hip();
-#else
-    return Stream(makePtr<Stream::Impl>(stream_));
-#endif
-}
-
-Stream cv::hip::wrapStream(size_t hipStreamMemoryAddress)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(hipStreamMemoryAddress); throw_no_hip();
-#else
-    return StreamAccessor::wrapStream(reinterpret_cast<hipStream_t>(hipStreamMemoryAddress));
-#endif
-}
-
-// ======================== Event::Impl ========================
-
-#ifdef HAVE_HIP
-struct cv::hip::Event::Impl
-{
-    hipEvent_t event;
-
-    explicit Impl(unsigned int flags_)
-    {
-        hipSafeCall(hipEventCreateWithFlags(&event, flags_));
-    }
-
-    ~Impl()
-    {
-        if (event) hipSafeCall(hipEventDestroy(event));
-    }
-};
-#endif
-
-// ======================== Event ========================
-
-cv::hip::Event::Event(const Event::CreateFlags flags_)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(flags_); throw_no_hip();
-#else
-    unsigned int hf = 0;
-    if (flags_ & BLOCKING_SYNC)  hf |= hipEventBlockingSync;
-    if (flags_ & DISABLE_TIMING) hf |= hipEventDisableTiming;
-    if (flags_ & INTERPROCESS)   hf |= hipEventInterprocess;
-    impl_ = makePtr<Impl>(hf);
-#endif
-}
-
-void cv::hip::Event::record(Stream& stream_)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(stream_); throw_no_hip();
-#else
-    hipSafeCall(hipEventRecord(impl_->event, StreamAccessor::getStream(stream_)));
-#endif
-}
-
-bool cv::hip::Event::queryIfComplete() const
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    hipError_t err = hipEventQuery(impl_->event);
-    if (err == hipSuccess) return true;
-    if (err == hipErrorNotReady) return false;
-    hipSafeCall(err);
-    return false;
-#endif
-}
-
-void cv::hip::Event::waitForCompletion()
-{
-#ifndef HAVE_HIP
-    throw_no_hip();
-#else
-    hipSafeCall(hipEventSynchronize(impl_->event));
-#endif
-}
-
-float cv::hip::Event::elapsedTime(const Event& start, const Event& end)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(start); CV_UNUSED(end); throw_no_hip();
-#else
-    float ms = 0.0f;
-    hipSafeCall(hipEventElapsedTime(&ms, start.impl_->event, end.impl_->event));
-    return ms;
-#endif
-}
-
-// ======================== EventAccessor ========================
-
-hipEvent_t cv::hip::EventAccessor::getEvent(const Event& event)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(event); throw_no_hip();
-#else
-    return event.impl_->event;
-#endif
-}
-
-Event cv::hip::EventAccessor::wrapEvent(hipEvent_t event_)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(event_); throw_no_hip();
-#else
-    CV_UNUSED(event_);
-    CV_Error(cv::Error::StsNotImplemented, "EventAccessor::wrapEvent not supported");
-#endif
-}
 
 // ======================== Device management ========================
 

@@ -5,7 +5,6 @@
 // Third party copyrights are property of their respective owners.
 
 #include "opencv2/core/hip.hpp"
-#include "opencv2/core/hip_stream_accessor.hpp"
 #include "opencv2/core/hipdev.hpp"
 #include "cvconfig.h"
 
@@ -180,12 +179,12 @@ void setToImpl(uchar* data, size_t step, int rows, int cols, const Scalar& s, hi
 }
 
 void cv::hip::device::setToWithoutMask(void* data_, size_t step, int rows, int cols, int type,
-                                       Scalar val, cv::hip::Stream& stream)
+                                       Scalar val)
 {
     uchar* data = static_cast<uchar*>(data_);
     const int depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
     const size_t elemSize = CV_ELEM_SIZE(type);
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     CV_DbgAssert(data && depth <= CV_64F && cn <= 4);
 
     if (val[0] == 0.0 && val[1] == 0.0 && val[2] == 0.0 && val[3] == 0.0) {
@@ -246,12 +245,12 @@ void setToMaskedImpl(uchar* data, size_t step,
 
 void cv::hip::device::setToWithMask(void* data_, size_t step, int rows, int cols, int type,
                                     const void* mask_, size_t maskStep,
-                                    Scalar val, cv::hip::Stream& stream)
+                                    Scalar val)
 {
     uchar* data = static_cast<uchar*>(data_);
     const uchar* mask = static_cast<const uchar*>(mask_);
     const int depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     CV_DbgAssert(data && mask && depth <= CV_64F && cn <= 4);
 
     typedef void (*func_t)(uchar*, size_t, const uchar*, size_t, int, int, const Scalar&, hipStream_t);
@@ -299,15 +298,14 @@ void copyMaskedImpl(const uchar* src, size_t srcStep,
 void cv::hip::device::copyToWithMask(const void* src_, size_t srcStep,
                                      void* dst_, size_t dstStep,
                                      const void* mask_, size_t maskStep,
-                                     int rows, int cols, int type, int maskCn,
-                                     cv::hip::Stream& stream)
+                                     int rows, int cols, int type, int maskCn)
 {
     const uchar* src  = static_cast<const uchar*>(src_);
     uchar*       dst  = static_cast<uchar*>(dst_);
     const uchar* mask = static_cast<const uchar*>(mask_);
     const int    cn   = CV_MAT_CN(type);
     const size_t esz1 = CV_ELEM_SIZE1(type);
-    hipStream_t  s    = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     CV_DbgAssert(src && CV_MAT_DEPTH(type) <= CV_64F && cn <= 4 &&
                  (maskCn == 1 || maskCn == cn));
 
@@ -368,11 +366,11 @@ void convertNoScaleImpl(const uchar* src, size_t srcStep,
 
 void cv::hip::device::convertToNoScale(const void* src_, size_t srcStep, int stype,
                                        void* dst_, size_t dstStep, int dtype,
-                                       int rows, int cols, cv::hip::Stream& stream)
+                                       int rows, int cols)
 {
     const uchar* src = static_cast<const uchar*>(src_);
     uchar*       dst = static_cast<uchar*>(dst_);
-    hipStream_t  s   = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     const int sd = CV_MAT_DEPTH(stype), dd = CV_MAT_DEPTH(dtype);
     CV_Assert(sd <= CV_64F && dd <= CV_64F);
 
@@ -432,12 +430,11 @@ void convertScaleImpl(const uchar* src, size_t srcStep,
 
 void cv::hip::device::convertToScale(const void* src_, size_t srcStep, int stype,
                                      void* dst_, size_t dstStep, int dtype,
-                                     int rows, int cols, double alpha, double beta,
-                                     cv::hip::Stream& stream)
+                                     int rows, int cols, double alpha, double beta)
 {
     const uchar* src = static_cast<const uchar*>(src_);
     uchar*       dst = static_cast<uchar*>(dst_);
-    hipStream_t  s   = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     const int sd = CV_MAT_DEPTH(stype), dd = CV_MAT_DEPTH(dtype);
     CV_Assert(sd <= CV_64F && dd <= CV_64F);
 
@@ -481,13 +478,13 @@ __global__ void multiplyF32Kernel(const uchar* src1, size_t step1,
 void cv::hip::device::multiplyF32(const void* src1_, size_t step1,
                                   const void* src2_, size_t step2,
                                   void* dst_, size_t stepd,
-                                  int rows, int cols, cv::hip::Stream& stream)
+                                  int rows, int cols)
 {
     const uchar* src1 = static_cast<const uchar*>(src1_);
     const uchar* src2 = static_cast<const uchar*>(src2_);
     uchar*       dst  = static_cast<uchar*>(dst_);
     CV_Assert(src1 && src2 && dst);
-    hipStream_t s = cv::hip::StreamAccessor::getStream(stream);
+    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
     hipLaunchKernelGGL(multiplyF32Kernel, hipGrid(rows, cols), hipBlock(), 0, s,
                        src1, step1, src2, step2, dst, stepd, rows, cols);
     CV_HIP_SAFE_CALL(hipGetLastError());

@@ -1319,15 +1319,22 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
         UMat mask = _mask.getUMat();
         if (cv::hip::isHipUMat(mask))
         {
+            UMatData* prevu = _dst.getUMat().u;
             _dst.create(size(), type());
             UMat dst = _dst.getUMat();
+            // A (re)allocated dst is uninitialized device memory and the kernel
+            // writes only masked pixels, so zero it first to avoid leaving garbage
+            // outside the mask — matching CPU Mat::copyTo and the OpenCL
+            // HAVE_DST_UNINIT path. Skip when dst is reused (preserve its pixels).
+            if (prevu != dst.u)
+                cv::hip::device::setToWithoutMask(dst.u->handle, dst.step[0],
+                                                  rows, cols, type(), Scalar::all(0));
             // Pass the raw device handle + metadata straight to the kernel, the
             // same way the OpenCL path feeds cl_mem + step via ocl::KernelArg.
             cv::hip::device::copyToWithMask(u->handle, step[0],
                                             dst.u->handle, dst.step[0],
                                             mask.u->handle, mask.step[0],
-                                            rows, cols, type(), mask.channels(),
-                                            cv::hip::Stream::Null());
+                                            rows, cols, type(), mask.channels());
             dst.u->markHostCopyObsolete(true);
             return;
         }
@@ -1404,7 +1411,7 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
             {
                 cv::hip::device::setToWithMask(u->handle, step[0], rows, cols, type(),
                                                mask.u->handle, mask.step[0],
-                                               s, cv::hip::Stream::Null());
+                                               s);
                 u->markHostCopyObsolete(true);
                 return *this;
             }
@@ -1413,7 +1420,7 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
         else
         {
             cv::hip::device::setToWithoutMask(u->handle, step[0], rows, cols, type(),
-                                              s, cv::hip::Stream::Null());
+                                              s);
             u->markHostCopyObsolete(true);
             return *this;
         }

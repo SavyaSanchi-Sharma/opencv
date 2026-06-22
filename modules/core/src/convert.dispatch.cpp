@@ -241,11 +241,11 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
             if (noScale)
                 cv::hip::device::convertToNoScale(u->handle, step[0], stype,
                                                   dstUMat.u->handle, dstUMat.step[0], dtype,
-                                                  rows, cols, cv::hip::Stream::Null());
+                                                  rows, cols);
             else
                 cv::hip::device::convertToScale(u->handle, step[0], stype,
                                                 dstUMat.u->handle, dstUMat.step[0], dtype,
-                                                rows, cols, alpha, beta, cv::hip::Stream::Null());
+                                                rows, cols, alpha, beta);
             dstUMat.u->markHostCopyObsolete(true);
             return;
         }
