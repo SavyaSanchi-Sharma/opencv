@@ -42,16 +42,9 @@ namespace cv{
                                        void* dst, size_t dstStep,
                                        const void* mask, size_t maskStep,
                                        int rows, int cols, int type, int maskCn);
-        CV_EXPORTS void convertToNoScale(const void* src, size_t srcStep, int stype,
-                                         void* dst, size_t dstStep, int dtype,
-                                         int rows, int cols);
         CV_EXPORTS void convertToScale(const void* src, size_t srcStep, int stype,
                                        void* dst, size_t dstStep, int dtype,
                                        int rows, int cols, double alpha, double beta);
-        CV_EXPORTS void multiplyF32(const void* src1, size_t step1,
-                                    const void* src2, size_t step2,
-                                    void* dst, size_t stepd,
-                                    int rows, int cols);
     } // namespace device
 
 

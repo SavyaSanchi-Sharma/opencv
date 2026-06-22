@@ -32,9 +32,8 @@ namespace {
 
 class HipAllocator CV_FINAL : public MatAllocator
 {
-    // HIP allocation unavailable (e.g. hipMalloc failed): hand off to OpenCL,
-    // which has its own CPU fallback when OpenCL is disabled/absent. So the
-    // chain is HIP -> OpenCL -> CPU.  When OpenCL isn't compiled in, fall
+    // HIP allocation failed: delegate down the chain HIP -> OpenCL -> CPU.
+    // OpenCL carries its own CPU fallback; when OpenCL isn't built in, go
     // straight to the CPU allocator.
     static UMatData* fallbackAllocate(int dims, const int* sizes, int type,
                                       void* data, size_t* step,

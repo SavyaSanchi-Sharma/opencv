@@ -237,15 +237,10 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
         UMat dstUMat = dst.getUMat();
         if (cv::hip::isHipUMat(dstUMat))
         {
-            // Raw device handle + metadata, mirroring the OpenCL KernelArg path.
-            if (noScale)
-                cv::hip::device::convertToNoScale(u->handle, step[0], stype,
-                                                  dstUMat.u->handle, dstUMat.step[0], dtype,
-                                                  rows, cols);
-            else
-                cv::hip::device::convertToScale(u->handle, step[0], stype,
-                                                dstUMat.u->handle, dstUMat.step[0], dtype,
-                                                rows, cols, alpha, beta);
+            // Apply alpha*x + beta on the device (the no-scale case returned above).
+            cv::hip::device::convertToScale(u->handle, step[0], stype,
+                                            dstUMat.u->handle, dstUMat.step[0], dtype,
+                                            rows, cols, alpha, beta);
             dstUMat.u->markHostCopyObsolete(true);
             return;
         }

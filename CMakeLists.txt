@@ -1744,7 +1744,6 @@ endif()
 status("")
 status("  Other third-party libraries:")
 
-
 if(WITH_IPP AND HAVE_IPP)
   status("    Intel IPP:" "${IPP_VERSION_STR} [${IPP_VERSION_MAJOR}.${IPP_VERSION_MINOR}.${IPP_VERSION_BUILD}]")
   status("           at:" "${IPP_ROOT_DIR}")

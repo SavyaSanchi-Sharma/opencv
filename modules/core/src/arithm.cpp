@@ -649,23 +649,6 @@ static void arithm_op(InputArray _src1, InputArray _src2, OutputArray _dst,
         (src1Scalar == src2Scalar) )
     {
         _dst.createSameSize(*psrc1, type1);
-#ifdef HAVE_HIP
-        if (oclop == OCL_OP_MUL && type1 == CV_32FC1 &&
-            _src1.isUMat() && _src2.isUMat() && _dst.isUMat())
-        {
-            UMat u1 = _src1.getUMat(), u2 = _src2.getUMat(), ud = _dst.getUMat();
-            if (cv::hip::isHipUMat(u1) && cv::hip::isHipUMat(u2) && cv::hip::isHipUMat(ud))
-            {
-                // Raw device handles + step, mirroring the OpenCL KernelArg path.
-                cv::hip::device::multiplyF32(u1.u->handle, u1.step[0],
-                                             u2.u->handle, u2.step[0],
-                                             ud.u->handle, ud.step[0],
-                                             u1.rows, u1.cols);
-                ud.u->markHostCopyObsolete(true);
-                return;
-            }
-        }
-#endif
         CV_OCL_RUN(use_opencl,
             ocl_arithm_op(*psrc1, *psrc2, _dst, _mask,
                           (!usrdata ? type1 : std::max(depth1, CV_32F)),

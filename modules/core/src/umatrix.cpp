@@ -1329,8 +1329,6 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
             if (prevu != dst.u)
                 cv::hip::device::setToWithoutMask(dst.u->handle, dst.step[0],
                                                   rows, cols, type(), Scalar::all(0));
-            // Pass the raw device handle + metadata straight to the kernel, the
-            // same way the OpenCL path feeds cl_mem + step via ocl::KernelArg.
             cv::hip::device::copyToWithMask(u->handle, step[0],
                                             dst.u->handle, dst.step[0],
                                             mask.u->handle, mask.step[0],

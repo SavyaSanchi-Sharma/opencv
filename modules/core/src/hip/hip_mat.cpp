@@ -339,63 +339,6 @@ void cv::hip::device::copyToWithMask(const void* src_, size_t srcStep,
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
-// ── convertToNoScale ──────────────────────────────────────────────────────────
-
-template<typename T, typename D>
-__global__ void convertKernel(const uchar* src, size_t srcStep,
-                               uchar* dst, size_t dstStep, int rows, int cols)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < cols && y < rows)
-        *reinterpret_cast<D*>(dst + y * dstStep + x * sizeof(D)) =
-            hip_saturate_cast<D>(
-                *reinterpret_cast<const T*>(src + y * srcStep + x * sizeof(T)));
-}
-
-namespace {
-template<typename T, typename D>
-void convertNoScaleImpl(const uchar* src, size_t srcStep,
-                         uchar* dst, size_t dstStep,
-                         int rows, int cols, hipStream_t stream)
-{
-    hipLaunchKernelGGL((convertKernel<T,D>), hipGrid(rows, cols), hipBlock(), 0, stream,
-                       src, srcStep, dst, dstStep, rows, cols);
-}
-}
-
-void cv::hip::device::convertToNoScale(const void* src_, size_t srcStep, int stype,
-                                       void* dst_, size_t dstStep, int dtype,
-                                       int rows, int cols)
-{
-    const uchar* src = static_cast<const uchar*>(src_);
-    uchar*       dst = static_cast<uchar*>(dst_);
-    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
-    const int sd = CV_MAT_DEPTH(stype), dd = CV_MAT_DEPTH(dtype);
-    CV_Assert(sd <= CV_64F && dd <= CV_64F);
-
-    // convertTo preserves channel count; flatten channels into the width so the
-    // single-channel typed kernel processes every scalar element.
-    const int cols1 = cols * CV_MAT_CN(stype);
-
-    typedef void (*func_t)(const uchar*, size_t, uchar*, size_t, int, int, hipStream_t);
-    static const func_t funcs[7][7] = {
-        {0, convertNoScaleImpl<uchar,schar>, convertNoScaleImpl<uchar,ushort>, convertNoScaleImpl<uchar,short>, convertNoScaleImpl<uchar,int>, convertNoScaleImpl<uchar,float>, convertNoScaleImpl<uchar,double>},
-        {convertNoScaleImpl<schar,uchar>, 0, convertNoScaleImpl<schar,ushort>, convertNoScaleImpl<schar,short>, convertNoScaleImpl<schar,int>, convertNoScaleImpl<schar,float>, convertNoScaleImpl<schar,double>},
-        {convertNoScaleImpl<ushort,uchar>, convertNoScaleImpl<ushort,schar>, 0, convertNoScaleImpl<ushort,short>, convertNoScaleImpl<ushort,int>, convertNoScaleImpl<ushort,float>, convertNoScaleImpl<ushort,double>},
-        {convertNoScaleImpl<short,uchar>, convertNoScaleImpl<short,schar>, convertNoScaleImpl<short,ushort>, 0, convertNoScaleImpl<short,int>, convertNoScaleImpl<short,float>, convertNoScaleImpl<short,double>},
-        {convertNoScaleImpl<int,uchar>, convertNoScaleImpl<int,schar>, convertNoScaleImpl<int,ushort>, convertNoScaleImpl<int,short>, 0, convertNoScaleImpl<int,float>, convertNoScaleImpl<int,double>},
-        {convertNoScaleImpl<float,uchar>, convertNoScaleImpl<float,schar>, convertNoScaleImpl<float,ushort>, convertNoScaleImpl<float,short>, convertNoScaleImpl<float,int>, 0, convertNoScaleImpl<float,double>},
-        {convertNoScaleImpl<double,uchar>, convertNoScaleImpl<double,schar>, convertNoScaleImpl<double,ushort>, convertNoScaleImpl<double,short>, convertNoScaleImpl<double,int>, convertNoScaleImpl<double,float>, 0},
-    };
-
-    const func_t func = funcs[sd][dd];
-    CV_Assert(func);
-    func(src, srcStep, dst, dstStep, rows, cols1, s);
-    CV_HIP_SAFE_CALL(hipGetLastError());
-    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
-}
-
 // ── convertToScale ────────────────────────────────────────────────────────────
 
 template<typename T, typename D, typename S>
@@ -460,33 +403,3 @@ void cv::hip::device::convertToScale(const void* src_, size_t srcStep, int stype
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
-// ── multiplyF32 ───────────────────────────────────────────────────────────────
-
-__global__ void multiplyF32Kernel(const uchar* src1, size_t step1,
-                                   const uchar* src2, size_t step2,
-                                   uchar* dst,        size_t stepd,
-                                   int rows, int cols)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= cols || y >= rows) return;
-    const float a = *reinterpret_cast<const float*>(src1 + y * step1 + x * sizeof(float));
-    const float b = *reinterpret_cast<const float*>(src2 + y * step2 + x * sizeof(float));
-    *reinterpret_cast<float*>(dst + y * stepd + x * sizeof(float)) = a * b;
-}
-
-void cv::hip::device::multiplyF32(const void* src1_, size_t step1,
-                                  const void* src2_, size_t step2,
-                                  void* dst_, size_t stepd,
-                                  int rows, int cols)
-{
-    const uchar* src1 = static_cast<const uchar*>(src1_);
-    const uchar* src2 = static_cast<const uchar*>(src2_);
-    uchar*       dst  = static_cast<uchar*>(dst_);
-    CV_Assert(src1 && src2 && dst);
-    const hipStream_t s = 0;  // UMat T-API has no stream concept; use the default stream
-    hipLaunchKernelGGL(multiplyF32Kernel, hipGrid(rows, cols), hipBlock(), 0, s,
-                       src1, step1, src2, step2, dst, stepd, rows, cols);
-    CV_HIP_SAFE_CALL(hipGetLastError());
-    CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
-}
