@@ -20,18 +20,12 @@ namespace cv{
     CV_EXPORTS_W bool useHip();
     CV_EXPORTS MatAllocator* getHipAllocator();
 
-    //! Returns true if @p a is a UMat currently residing on a HIP device.
-    //! Use this instead of repeating the currAllocator == getHipAllocator() check.
+    //! True if @p a is a UMat residing on a HIP device (preferred over a raw currAllocator check).
     CV_EXPORTS bool isHipUMat(InputArray a);
 
-    //! @brief AOT-compiled HIP kernel launchers.
-    //!
-    //! These take the raw device handle + matrix metadata (pointer, row step,
-    //! rows, cols, type) exactly as carried by a HIP-backed UMat (UMatData::handle
-    //! and the UMat header).  This mirrors how the OpenCL backend feeds cl_mem +
-    //! step into a kernel via ocl::KernelArg — there is no intermediate matrix
-    //! type.  The UMat T-API dispatch points (UMat::setTo/copyTo/convertTo and the
-    //! arithmetic ops) call these directly.
+    //! @brief AOT-compiled HIP kernel launchers, called from UMat::setTo/copyTo/convertTo.
+    //! They take the raw device handle + matrix metadata as a HIP-backed UMat carries it,
+    //! mirroring how OpenCL feeds cl_mem + step via ocl::KernelArg (no intermediate Mat type).
     namespace device {
         CV_EXPORTS void setToWithoutMask(void* data, size_t step, int rows, int cols, int type,
                                          Scalar val);
@@ -48,8 +42,7 @@ namespace cv{
     } // namespace device
 
 
-    //! @brief Returns the number of installed HIP-enabled devices.
-    //! Returns 0 if HIP support is not compiled in or no device is found.
+    //! @brief Number of installed HIP-enabled devices (0 if HIP isn't compiled in or no device found).
     CV_EXPORTS_W int getHipEnabledDeviceCount();
 
     //! @brief Sets the current HIP device.
@@ -58,8 +51,7 @@ namespace cv{
     //! @brief Returns the current HIP device index.
     CV_EXPORTS_W int getDevice();
 
-    //! @brief Explicitly destroys and cleans up all resources associated with
-    //! the current device in the current process.
+    //! @brief Destroys and frees all resources for the current device in this process.
     CV_EXPORTS_W void resetDevice();
 
     enum FeatureSet
@@ -160,7 +152,6 @@ namespace cv{
     };
 
     CV_EXPORTS_W void printHipDeviceInfo(int device);
-    CV_EXPORTS_W void printShortHipDeviceInfo(int device);
 
     }
 }

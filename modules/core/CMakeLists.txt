@@ -110,17 +110,17 @@ if(HAVE_HIP_STANDALONE)
   )
 endif()
 
-# src/hip/hip_mat.cpp holds HIP device kernels. It's a .cpp (not .hip), so the
+# src/hip/kernels.cpp holds HIP device kernels. It's a .cpp (not .hip), so the
 # generic src/*.cpp glob picks it up and would otherwise feed it to the C++
 # compiler. Force the HIP toolchain when ROCm is present; with no ROCm the file
 # can't compile as plain C++ (it has __global__/hipLaunchKernelGGL), so drop it.
 if(HAVE_HIP)
   set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/src/hip/hip_mat.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/hip/kernels.cpp"
     PROPERTIES LANGUAGE HIP)
 else()
   set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/src/hip/hip_mat.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/hip/kernels.cpp"
     PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 

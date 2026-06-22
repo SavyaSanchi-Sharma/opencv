@@ -6,6 +6,7 @@
 
 #define OPENCV_CORE_HIP_IMPL
 #include "precomp.hpp"
+#include "opencv2/core/utils/logger.hpp"
 #include "opencv2/core/hip.hpp"
 #include "opencv2/core/private/hip_stubs.hpp"
 #include "umatrix.hpp"
@@ -25,16 +26,14 @@ using namespace cv::hip;
 
 #endif
 
-// ======================== HipAllocator ========================
+// HipAllocator
 
 #ifdef HAVE_HIP
 namespace {
 
 class HipAllocator CV_FINAL : public MatAllocator
 {
-    // HIP allocation failed: delegate down the chain HIP -> OpenCL -> CPU.
-    // OpenCL carries its own CPU fallback; when OpenCL isn't built in, go
-    // straight to the CPU allocator.
+    // HIP allocation failed: fall back down the chain HIP -> OpenCL -> CPU (straight to CPU if OpenCL isn't built in).
     static UMatData* fallbackAllocate(int dims, const int* sizes, int type,
                                       void* data, size_t* step,
                                       AccessFlag flags, UMatUsageFlags usageFlags)
@@ -89,9 +88,7 @@ public:
             if (hipMalloc(&devicePtr, u->size) != hipSuccess || !devicePtr) {
                 (void)hipGetLastError();  // clear the sticky error
 #ifdef HAVE_OPENCL
-                // OpenCL's UMatData allocate has no internal disabled-guard, so only
-                // delegate when OpenCL is actually usable; otherwise let the caller
-                // (UMat::create) fall back to the CPU allocator.
+                // OpenCL's UMatData allocate has no disabled-guard, so delegate only when OpenCL is usable.
                 if (ocl::useOpenCL())
                     return ocl::getOpenCLAllocator()->allocate(u, accessFlags, usageFlags);
 #endif
@@ -187,8 +184,7 @@ public:
         } else {
             hipSafeCall(hipMemcpy(u->handle, src, u->size, hipMemcpyHostToDevice));
         }
-        // upload writes the device buffer only; the host copy (u->data) is now
-        // stale and the device is authoritative.  (Matches OpenCLAllocator::upload.)
+        // upload writes only the device buffer; host copy is now stale (matches OpenCLAllocator::upload).
         u->markHostCopyObsolete(true);
         u->markDeviceCopyObsolete(false);
     }
@@ -219,7 +215,7 @@ public:
             rawSrc = srcdata->data;
             rawDst = dstdata->handle;
         } else {
-            return; // both CPU — generic Mat path handles this
+            return; // both CPU - generic Mat path handles this
         }
 
         if (!rawSrc || !rawDst) return;
@@ -274,8 +270,7 @@ CV_EXPORTS_W bool useHip()
         g_useHip = false;
         return false;
     }
-    // UMat paths check currAllocator for HIP, but Mat::copyTo / Mat::setTo
-    // fire CV_OCL_RUN before that check and would pass a HIP buffer to OpenCL.
+    // Mat::copyTo/setTo fire CV_OCL_RUN before the HIP currAllocator check, which would feed a HIP buffer to OpenCL.
     cv::ocl::setUseOpenCL(false);
     return true;
 }
@@ -294,7 +289,7 @@ bool isHipUMat(InputArray) { return false; }
 }} // cv::hip
 #endif
 
-// ======================== Device management ========================
+// Device management
 
 int cv::hip::getHipEnabledDeviceCount()
 {
@@ -358,7 +353,7 @@ bool cv::hip::deviceSupports(FeatureSet feature_set)
 #endif
 }
 
-// ======================== TargetArchs ========================
+// TargetArchs
 
 bool cv::hip::TargetArchs::builtWith(FeatureSet feature_set) { return deviceSupports(feature_set); }
 
@@ -397,7 +392,7 @@ bool cv::hip::TargetArchs::hasEqualOrGreaterBin(int major, int minor)
     return hasEqualOrGreater(major, minor);
 }
 
-// ======================== DeviceInfo ========================
+// DeviceInfo
 
 #ifdef HAVE_HIP
 static hipDeviceProp_t getDeviceProp(int id)
@@ -617,7 +612,7 @@ bool cv::hip::DeviceInfo::isCompatible() const
 #endif
 }
 
-// ======================== Print functions ========================
+// Print functions
 
 void cv::hip::printHipDeviceInfo(int device)
 {
@@ -626,43 +621,29 @@ void cv::hip::printHipDeviceInfo(int device)
 #else
     hipDeviceProp_t p;
     hipSafeCall(hipGetDeviceProperties(&p, device));
-    std::printf("Device %d: \"%s\"\n",                     device, p.name);
-    std::printf("  HIP Compute Capability:              %d.%d\n", p.major, p.minor);
-    std::printf("  GCN Architecture:                    %s\n",    p.gcnArchName);
-    std::printf("  Total global memory:                 %.0f MB\n", (double)p.totalGlobalMem / (1 << 20));
-    std::printf("  Shared memory per block:             %zu bytes\n", p.sharedMemPerBlock);
-    std::printf("  Registers per block:                 %d\n",    p.regsPerBlock);
-    std::printf("  Warp size:                           %d\n",    p.warpSize);
-    std::printf("  Max threads per block:               %d\n",    p.maxThreadsPerBlock);
-    std::printf("  Max block dimensions:                [%d, %d, %d]\n",
-                p.maxThreadsDim[0], p.maxThreadsDim[1], p.maxThreadsDim[2]);
-    std::printf("  Max grid dimensions:                 [%d, %d, %d]\n",
-                p.maxGridSize[0], p.maxGridSize[1], p.maxGridSize[2]);
-    std::printf("  Clock rate:                          %.2f GHz\n", p.clockRate * 1e-6);
-    std::printf("  Memory clock rate:                   %.2f GHz\n", p.memoryClockRate * 1e-6);
-    std::printf("  Memory bus width:                    %d-bit\n", p.memoryBusWidth);
-    std::printf("  L2 cache size:                       %d bytes\n", p.l2CacheSize);
-    std::printf("  Multiprocessors:                     %d\n",    p.multiProcessorCount);
-    std::printf("  Max threads per multiprocessor:      %d\n",    p.maxThreadsPerMultiProcessor);
-    std::printf("  Concurrent kernels:                  %s\n",    p.concurrentKernels ? "Yes" : "No");
-    std::printf("  ECC enabled:                         %s\n",    p.ECCEnabled ? "Yes" : "No");
-    std::printf("  Cooperative launch:                  %s\n",    p.cooperativeLaunch ? "Yes" : "No");
-    std::printf("  Large bar:                           %s\n",    p.isLargeBar ? "Yes" : "No");
-    std::printf("  PCI Bus/Device/Domain:               %d/%d/%d\n",
-                p.pciBusID, p.pciDeviceID, p.pciDomainID);
-#endif
-}
-
-void cv::hip::printShortHipDeviceInfo(int device)
-{
-#ifndef HAVE_HIP
-    CV_UNUSED(device); throw_no_hip();
-#else
-    hipDeviceProp_t p;
-    hipSafeCall(hipGetDeviceProperties(&p, device));
-    std::printf("Device %d: \"%s\"  %.0f MB  compute %d.%d  %s\n",
-                device, p.name,
-                (double)p.totalGlobalMem / (1 << 20),
-                p.major, p.minor, p.gcnArchName);
+    CV_LOG_INFO(NULL, cv::format("Device %d: \"%s\"", device, p.name));
+    CV_LOG_INFO(NULL, cv::format("  HIP Compute Capability:              %d.%d", p.major, p.minor));
+    CV_LOG_INFO(NULL, cv::format("  GCN Architecture:                    %s", p.gcnArchName));
+    CV_LOG_INFO(NULL, cv::format("  Total global memory:                 %.0f MB", (double)p.totalGlobalMem / (1 << 20)));
+    CV_LOG_INFO(NULL, cv::format("  Shared memory per block:             %zu bytes", p.sharedMemPerBlock));
+    CV_LOG_INFO(NULL, cv::format("  Registers per block:                 %d", p.regsPerBlock));
+    CV_LOG_INFO(NULL, cv::format("  Warp size:                           %d", p.warpSize));
+    CV_LOG_INFO(NULL, cv::format("  Max threads per block:               %d", p.maxThreadsPerBlock));
+    CV_LOG_INFO(NULL, cv::format("  Max block dimensions:                [%d, %d, %d]",
+                                 p.maxThreadsDim[0], p.maxThreadsDim[1], p.maxThreadsDim[2]));
+    CV_LOG_INFO(NULL, cv::format("  Max grid dimensions:                 [%d, %d, %d]",
+                                 p.maxGridSize[0], p.maxGridSize[1], p.maxGridSize[2]));
+    CV_LOG_INFO(NULL, cv::format("  Clock rate:                          %.2f GHz", p.clockRate * 1e-6));
+    CV_LOG_INFO(NULL, cv::format("  Memory clock rate:                   %.2f GHz", p.memoryClockRate * 1e-6));
+    CV_LOG_INFO(NULL, cv::format("  Memory bus width:                    %d-bit", p.memoryBusWidth));
+    CV_LOG_INFO(NULL, cv::format("  L2 cache size:                       %d bytes", p.l2CacheSize));
+    CV_LOG_INFO(NULL, cv::format("  Multiprocessors:                     %d", p.multiProcessorCount));
+    CV_LOG_INFO(NULL, cv::format("  Max threads per multiprocessor:      %d", p.maxThreadsPerMultiProcessor));
+    CV_LOG_INFO(NULL, cv::format("  Concurrent kernels:                  %s", p.concurrentKernels ? "Yes" : "No"));
+    CV_LOG_INFO(NULL, cv::format("  ECC enabled:                         %s", p.ECCEnabled ? "Yes" : "No"));
+    CV_LOG_INFO(NULL, cv::format("  Cooperative launch:                  %s", p.cooperativeLaunch ? "Yes" : "No"));
+    CV_LOG_INFO(NULL, cv::format("  Large bar:                           %s", p.isLargeBar ? "Yes" : "No"));
+    CV_LOG_INFO(NULL, cv::format("  PCI Bus/Device/Domain:               %d/%d/%d",
+                                 p.pciBusID, p.pciDeviceID, p.pciDomainID));
 #endif
 }

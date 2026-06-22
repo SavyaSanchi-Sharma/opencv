@@ -1322,10 +1322,8 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
             UMatData* prevu = _dst.getUMat().u;
             _dst.create(size(), type());
             UMat dst = _dst.getUMat();
-            // A (re)allocated dst is uninitialized device memory and the kernel
-            // writes only masked pixels, so zero it first to avoid leaving garbage
-            // outside the mask — matching CPU Mat::copyTo and the OpenCL
-            // HAVE_DST_UNINIT path. Skip when dst is reused (preserve its pixels).
+            // Zero a freshly allocated dst first (the kernel writes only masked pixels), matching
+            // Mat::copyTo / OpenCL HAVE_DST_UNINIT. Skip when dst is reused, to keep its pixels.
             if (prevu != dst.u)
                 cv::hip::device::setToWithoutMask(dst.u->handle, dst.step[0],
                                                   rows, cols, type(), Scalar::all(0));

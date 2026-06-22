@@ -12,8 +12,7 @@
 
 using namespace cv;
 
-// ThrustAllocator is only needed in standalone mode; in combined mode
-// gpu_mat.cu provides it using CUDA memory allocation.
+// ThrustAllocator is needed only in standalone mode; combined mode uses gpu_mat.cu's.
 #ifdef HAVE_HIP_STANDALONE
 
 namespace cv { namespace cuda { namespace device {
@@ -55,17 +54,14 @@ void cv::cuda::device::ThrustAllocator::setAllocator(cv::cuda::device::ThrustAll
 
 #endif // HAVE_HIP_STANDALONE
 
-// ── hip_saturate_cast ─────────────────────────────────────────────────────────
-// Primary template clamps via double (for integer destinations).
-// Explicit specialisations for float/double just static_cast.
+// hip_saturate_cast: integer dests clamp via double; float/double use the static_cast specialisations below.
 
 template<typename D, typename S>
 __host__ __device__ __forceinline__ D hip_saturate_cast(S val) {
     const double d = static_cast<double>(val);
     if (d < static_cast<double>(std::numeric_limits<D>::lowest())) return std::numeric_limits<D>::lowest();
     if (d > static_cast<double>(std::numeric_limits<D>::max()))    return std::numeric_limits<D>::max();
-    // Integer destinations round to nearest (matches OpenCV's saturate_cast/cvRound).
-    // Float/double destinations fall through to straight static_cast via the specialisations below.
+    // Integer destinations round to nearest (matches saturate_cast/cvRound).
     return static_cast<D>(std::numeric_limits<D>::is_integer ? rint(d) : d);
 }
 
@@ -79,7 +75,7 @@ HIP_SAT_FSPEC(double, short)  HIP_SAT_FSPEC(double, int)    HIP_SAT_FSPEC(double
 HIP_SAT_FSPEC(double, double)
 #undef HIP_SAT_FSPEC
 
-// ── HipVecTraits ──────────────────────────────────────────────────────────────
+// HipVecTraits
 
 template<typename T> struct HipVecTraits;
 
@@ -146,16 +142,16 @@ DEFINE_VT4(double4, double, make_double4);
 #undef DEFINE_VT3
 #undef DEFINE_VT4
 
-// ── HipLargerType ─────────────────────────────────────────────────────────────
+// HipLargerType
 template<typename A, typename B> struct HipLargerType          { typedef float  type; };
 template<>                       struct HipLargerType<double, float> { typedef double type; };
 
-// ── Grid helpers ──────────────────────────────────────────────────────────────
+// Grid helpers
 
 static dim3 hipBlock() { return dim3(32, 32); }
 static dim3 hipGrid(int rows, int cols) { return dim3((cols + 31) / 32, (rows + 31) / 32); }
 
-// ── setToWithoutMask ─────────────────────────────────────────────────────────
+// setToWithoutMask
 
 template<typename T>
 __global__ void setToKernel(uchar* data, size_t step, int rows, int cols, T val)
@@ -216,7 +212,7 @@ void cv::hip::device::setToWithoutMask(void* data_, size_t step, int rows, int c
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
-// ── setToWithMask ─────────────────────────────────────────────────────────────
+// setToWithMask
 
 template<typename T>
 __global__ void setToMaskedKernel(uchar* data, size_t step,
@@ -268,7 +264,7 @@ void cv::hip::device::setToWithMask(void* data_, size_t step, int rows, int cols
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
-// ── copyToWithMask ────────────────────────────────────────────────────────────
+// copyToWithMask
 
 template<typename T>
 __global__ void copyMaskedKernel(const uchar* src, size_t srcStep,
@@ -339,7 +335,7 @@ void cv::hip::device::copyToWithMask(const void* src_, size_t srcStep,
     CV_HIP_SAFE_CALL(hipStreamSynchronize(s));
 }
 
-// ── convertToScale ────────────────────────────────────────────────────────────
+// convertToScale
 
 template<typename T, typename D, typename S>
 __global__ void convertScaleKernel(const uchar* src, size_t srcStep,
