@@ -382,7 +382,7 @@ void _InputArray::getUMatVector(std::vector<UMat>& umv) const
 
 cuda::GpuMat _InputArray::getGpuMat() const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
 
     if (k == CUDA_GPU_MAT)
@@ -412,7 +412,7 @@ cuda::GpuMat _InputArray::getGpuMat() const
 }
 void _InputArray::getGpuMatVector(std::vector<cuda::GpuMat>& gpumv) const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
     if (k == STD_VECTOR_CUDA_GPU_MAT)
     {
@@ -425,7 +425,7 @@ void _InputArray::getGpuMatVector(std::vector<cuda::GpuMat>& gpumv) const
 }
 void _InputArray::getGpuMatNDVector(std::vector<cuda::GpuMatND>& gpumv) const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
     if (k == STD_VECTOR_CUDA_GPU_MAT_ND)
     {
@@ -438,7 +438,7 @@ void _InputArray::getGpuMatNDVector(std::vector<cuda::GpuMatND>& gpumv) const
 }
 cuda::GpuMatND _InputArray::getGpuMatND() const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
 
     if (k == CUDA_GPU_MATND)
@@ -464,7 +464,7 @@ ogl::Buffer _InputArray::getOGlBuffer() const
 
 int _InputArray::rows_(int i) const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
     if (k == CUDA_GPU_MATND)
     {
@@ -478,7 +478,7 @@ int _InputArray::rows_(int i) const
 
 int _InputArray::cols_(int i) const
 {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     _InputArray::KindFlag k = kind();
     if (k == CUDA_GPU_MATND)
     {
@@ -548,7 +548,7 @@ Size _InputArray::size_(int i) const
 
     if (k == STD_VECTOR_CUDA_GPU_MAT)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         const std::vector<cuda::GpuMat>& vv = *(const std::vector<cuda::GpuMat>*)obj;
         if (i < 0)
             return vv.empty() ? Size() : Size((int)vv.size(), 1);
@@ -561,7 +561,7 @@ Size _InputArray::size_(int i) const
 
     if (k == STD_VECTOR_CUDA_GPU_MAT_ND)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         const std::vector<cuda::GpuMatND>& vv = *(const std::vector<cuda::GpuMatND>*)obj;
         if (i < 0)
             return vv.empty() ? Size() : Size((int)vv.size(), 1);
@@ -589,7 +589,7 @@ Size _InputArray::size_(int i) const
 
     if (k == STD_VECTOR_CUDA_GPU_MAT_ND)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         const std::vector<cuda::GpuMatND>& vv = *(const std::vector<cuda::GpuMatND>*)obj;
         if (i < 0)
             return vv.empty() ? Size() : Size((int)vv.size(), 1);
@@ -1055,7 +1055,7 @@ int _InputArray::type_(int i) const
 
     if (k == STD_VECTOR_CUDA_GPU_MAT)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         const std::vector<cuda::GpuMat>& vv = *(const std::vector<cuda::GpuMat>*)obj;
         if (vv.empty())
         {
@@ -1071,7 +1071,7 @@ int _InputArray::type_(int i) const
 
     if (k == STD_VECTOR_CUDA_GPU_MAT_ND)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         const std::vector<cuda::GpuMatND>& vv = *(const std::vector<cuda::GpuMatND>*)obj;
         if (vv.empty())
         {
@@ -1409,7 +1409,7 @@ void _InputArray::copyTo(const _OutputArray& arr) const
     }
     else if( k == UMAT )
         ((UMat*)obj)->copyTo(arr);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     else if (k == CUDA_GPU_MAT)
         ((cuda::GpuMat*)obj)->copyTo(arr);
 #endif
@@ -1430,7 +1430,7 @@ void _InputArray::copyTo(const _OutputArray& arr, const _InputArray & mask) cons
     }
     else if( k == UMAT )
         ((UMat*)obj)->copyTo(arr, mask);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
     else if (k == CUDA_GPU_MAT)
         ((cuda::GpuMat*)obj)->copyTo(arr, mask);
 #endif
@@ -1469,7 +1469,7 @@ void _OutputArray::create_(Size _sz, int mtype, int i, bool allowTransposed, _Ou
     {
         CV_Assert(!fixedSize() || ((cuda::GpuMat*)obj)->size() == _sz);
         CV_Assert(!fixedType() || ((cuda::GpuMat*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::GpuMat*)obj)->create(_sz, mtype);
         return;
 #else
@@ -1480,7 +1480,7 @@ void _OutputArray::create_(Size _sz, int mtype, int i, bool allowTransposed, _Ou
     {
         CV_Assert(!fixedSize() || ((((cuda::GpuMatND*)obj)->dims == 2) && (((cuda::GpuMatND*)obj)->size[0] == _sz.height) && (((cuda::GpuMatND*)obj)->size[1] == _sz.width)));
         CV_Assert(!fixedType() || ((cuda::GpuMatND*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         cuda::GpuMatND::SizeArray sizes({_sz.height, _sz.width});
         ((cuda::GpuMatND*)obj)->create(sizes, mtype);
         return;
@@ -1503,7 +1503,7 @@ void _OutputArray::create_(Size _sz, int mtype, int i, bool allowTransposed, _Ou
     {
         CV_Assert(!fixedSize() || ((cuda::HostMem*)obj)->size() == _sz);
         CV_Assert(!fixedType() || ((cuda::HostMem*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::HostMem*)obj)->create(_sz, mtype);
         return;
 #else
@@ -1535,7 +1535,7 @@ void _OutputArray::create_(int _rows, int _cols, int mtype, int i, bool allowTra
     {
         CV_Assert(!fixedSize() || ((cuda::GpuMat*)obj)->size() == Size(_cols, _rows));
         CV_Assert(!fixedType() || ((cuda::GpuMat*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::GpuMat*)obj)->create(_rows, _cols, mtype);
         return;
 #else
@@ -1546,7 +1546,7 @@ void _OutputArray::create_(int _rows, int _cols, int mtype, int i, bool allowTra
     {
         CV_Assert(!fixedSize() || ((((cuda::GpuMatND*)obj)->dims == 2) && (((cuda::GpuMatND*)obj)->size[0] == _rows) && (((cuda::GpuMatND*)obj)->size[1] == _cols)));
         CV_Assert(!fixedType() || ((cuda::GpuMatND*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         cuda::GpuMatND::SizeArray sizes({_rows, _cols});
         ((cuda::GpuMatND*)obj)->create(sizes, mtype);
         return;
@@ -1569,7 +1569,7 @@ void _OutputArray::create_(int _rows, int _cols, int mtype, int i, bool allowTra
     {
         CV_Assert(!fixedSize() || ((cuda::HostMem*)obj)->size() == Size(_cols, _rows));
         CV_Assert(!fixedType() || ((cuda::HostMem*)obj)->type() == mtype);
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::HostMem*)obj)->create(_rows, _cols, mtype);
         return;
 #else
@@ -1907,7 +1907,7 @@ void _OutputArray::create(int d, const int* sizes, int mtype, int i,
 
     if( k == CUDA_GPU_MATND && d > 0 && i < 0 && !allowTransposed && fixedDepthMask == 0 )
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         cuda::GpuMatND::SizeArray sizeArray = cuda::GpuMatND::SizeArray(sizes, sizes+d);
         ((cuda::GpuMatND*)obj)->create(sizeArray, mtype);
         return;
@@ -2084,7 +2084,7 @@ void _OutputArray::release() const
 
     if( k == CUDA_GPU_MAT )
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::GpuMat*)obj)->release();
         return;
 #else
@@ -2094,7 +2094,7 @@ void _OutputArray::release() const
 
     if( k == CUDA_GPU_MATND )
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::GpuMatND*)obj)->release();
         return;
 #else
@@ -2104,7 +2104,7 @@ void _OutputArray::release() const
 
     if( k == CUDA_HOST_MEM )
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((cuda::HostMem*)obj)->release();
         return;
 #else
@@ -2171,7 +2171,7 @@ void _OutputArray::release() const
     }
     if (k == STD_VECTOR_CUDA_GPU_MAT)
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         ((std::vector<cuda::GpuMat>*)obj)->clear();
         return;
 #else
@@ -2297,7 +2297,7 @@ void _OutputArray::setTo(const _InputArray& arr, const _InputArray & mask) const
         ((UMat*)obj)->setTo(arr, mask);
     else if( k == CUDA_GPU_MAT )
     {
-#ifdef HAVE_CUDA
+#if defined(HAVE_CUDA) && !defined(HAVE_HIP_STANDALONE)
         Mat value = arr.getMat();
         CV_Assert( checkScalar(value, type(), arr.kind(), _InputArray::CUDA_GPU_MAT) );
         ((cuda::GpuMat*)obj)->setTo(Scalar(Vec<double, 4>(value.ptr<double>())), mask);
