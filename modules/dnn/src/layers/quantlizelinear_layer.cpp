@@ -114,7 +114,7 @@ static void quantizeLinear(const _InpTp* inp_, const _ScaleTp* scale_,
                                                 sc += scale_step, zp += zp_step) {
                     float scval = (float)(*sc);
                     _OutTp zpval = zp ? *zp : (_InpTp)0;
- 
+
                     for (int64_t j = 0; j < slice_size; j++)
                         out[j] = saturate_cast<_OutTp>(cvRound((float)inp[j] / scval) + (int)zpval);
                 }
