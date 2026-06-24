@@ -2220,7 +2220,6 @@ void ONNXImporter2::parseQuantizeLinear(LayerParams& layerParams, const opencv_o
 
 void ONNXImporter2::parseDynamicQuantizeLinear(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
-    // No attributes; scale/zero-point are computed at runtime. Output is always uint8.
     addLayer(layerParams, node_proto);
 }
 

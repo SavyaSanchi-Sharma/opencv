@@ -114,7 +114,7 @@ static void quantizeLinear(const _InpTp* inp_, const _ScaleTp* scale_,
                                                 sc += scale_step, zp += zp_step) {
                     float scval = (float)(*sc);
                     _OutTp zpval = zp ? *zp : (_InpTp)0;
-
+ 
                     for (int64_t j = 0; j < slice_size; j++)
                         out[j] = saturate_cast<_OutTp>(cvRound((float)inp[j] / scval) + (int)zpval);
                 }
@@ -406,16 +406,7 @@ Ptr<QuantizeLinearLayer> QuantizeLinearLayer::create(const LayerParams& params)
     DynamicQuantizeLinear layer, as defined in ONNX specification:
     https://onnx.ai/onnx/operators/onnx__DynamicQuantizeLinear.html
 
-    Opset 11+. The output is always uint8 (qmin = 0, qmax = 255). Unlike
-    QuantizeLinear the scale and zero-point are not inputs; they are computed
-    from the data range (which is forced to include 0) and emitted as the
-    second and third outputs.
-
-        y_scale         = (max(0, max(x)) - min(0, min(x))) / (qmax - qmin)
-        y_zero_point    = round(saturate(qmin - min(0, min(x)) / y_scale))
-        y               = saturate(round(x / y_scale) + y_zero_point)
-
-    round() is round-half-to-even, matching saturate_cast<uint8_t>(float).
+    Opset 11 to 26 are covered.
 */
 
 class DynamicQuantizeLinearLayerImpl CV_FINAL : public DynamicQuantizeLinearLayer

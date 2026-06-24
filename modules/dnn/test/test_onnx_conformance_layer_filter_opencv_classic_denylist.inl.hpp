@@ -825,4 +825,4 @@
 "test_dynamicquantizelinear_max_adjusted",
 "test_dynamicquantizelinear_max_adjusted_expanded", 
 "test_dynamicquantizelinear_min_adjusted",
-"test_dynamicquantizelinear_min_adjusted_expanded", 
+"test_dynamicquantizelinear_min_adjusted_expanded"
