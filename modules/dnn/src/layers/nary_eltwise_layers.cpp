@@ -19,7 +19,7 @@
 #include <iterator>
 #include <numeric>
 
-#ifdef HAVE_CUDA
+#if CV_CUDA4DNN
 #include "../cuda4dnn/primitives/eltwise.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
@@ -1522,7 +1522,7 @@ public:
         };
     }
 
-#ifdef HAVE_CUDA
+#if CV_CUDA4DNN
     Ptr<BackendNode> initCUDA(
         void *context_,
         InputArrayOfArrays inputs_,
