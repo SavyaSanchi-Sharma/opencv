@@ -4320,15 +4320,15 @@ Mat readTensorFromONNX(const String& path)
 
 #define DNN_PROTOBUF_UNSUPPORTED() CV_Error(Error::StsError, "DNN/ONNX: Build OpenCV with Protobuf to import ONNX models")
 
-Net readNetFromONNX(const String&) {
+Net readNetFromONNX(const String&, int) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
-Net readNetFromONNX(const char*, size_t) {
+Net readNetFromONNX(const char*, size_t, int) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
-Net readNetFromONNX(const std::vector<uchar>&) {
+Net readNetFromONNX(const std::vector<uchar>&, int) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
