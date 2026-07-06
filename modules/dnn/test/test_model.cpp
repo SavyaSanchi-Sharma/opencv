@@ -829,8 +829,9 @@ INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ViT_ONNX,
 typedef testing::TestWithParam<Target> Reproducibility_BERT_ONNX;
 TEST_P(Reproducibility_BERT_ONNX, Accuracy)
 {
+    applyTestTag(CV_TEST_TAG_MEMORY_2GB);
+
     Target targetId = GetParam();
-    applyTestTag(targetId == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_1GB : CV_TEST_TAG_MEMORY_2GB);
     ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
     auto engine_forced = static_cast<EngineType>(
     cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
