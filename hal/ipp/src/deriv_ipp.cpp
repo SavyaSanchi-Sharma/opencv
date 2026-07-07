@@ -225,6 +225,7 @@ int ipp_hal_sobel(const uchar* src_data, size_t src_step, uchar* dst_data, size_
                   int margin_left, int margin_top, int margin_right, int margin_bottom,
                   int dx, int dy, int ksize, double scale, double delta, int border_type)
 {
+    CV_HAL_CHECK_USE_IPP();
     return ipp_Deriv(src_data, src_step, dst_data, dst_step, width, height, src_depth, dst_depth, cn,
                      margin_left, margin_top, margin_right, margin_bottom,
                      dx, dy, ksize, scale, delta, border_type, false);
@@ -235,6 +236,7 @@ int ipp_hal_scharr(const uchar* src_data, size_t src_step, uchar* dst_data, size
                    int margin_left, int margin_top, int margin_right, int margin_bottom,
                    int dx, int dy, double scale, double delta, int border_type)
 {
+    CV_HAL_CHECK_USE_IPP();
     return ipp_Deriv(src_data, src_step, dst_data, dst_step, width, height, src_depth, dst_depth, cn,
                      margin_left, margin_top, margin_right, margin_bottom,
                      dx, dy, 0, scale, delta, border_type, true);
