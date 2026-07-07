@@ -3373,15 +3373,15 @@ void writeTextGraph(const String& _model, const String& output)
 
 #define DNN_PROTOBUF_UNSUPPORTED() CV_Error(Error::StsError, "DNN/TF: Build OpenCV with Protobuf to import TensorFlow models")
 
-Net readNetFromTensorflow(const String &, const String &) {
+Net readNetFromTensorflow(const String &, const String &, int, const std::vector<String>&) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
-Net readNetFromTensorflow(const char*, size_t, const char*, size_t) {
+Net readNetFromTensorflow(const char*, size_t, const char*, size_t, int, const std::vector<String>&) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
-Net readNetFromTensorflow(const std::vector<uchar>&, const std::vector<uchar>&) {
+Net readNetFromTensorflow(const std::vector<uchar>&, const std::vector<uchar>&, int, const std::vector<String>&) {
     DNN_PROTOBUF_UNSUPPORTED();
 }
 
