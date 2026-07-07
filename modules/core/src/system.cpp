@@ -2586,7 +2586,12 @@ public:
     IPPInitSingleton()
     {
         useIPP         = true;
+
+#if defined(OPENCV_ALGO_HINT_DEFAULT)
+        useIPP_NE      = OPENCV_ALGO_HINT_DEFAULT == cv::ALGO_HINT_APPROX;
+#else
         useIPP_NE      = false;
+#endif
         ippStatus      = 0;
         funcname       = NULL;
         filename       = NULL;
