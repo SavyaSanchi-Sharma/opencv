@@ -144,6 +144,11 @@ int ipp_hal_matchTemplate(const uchar* src_data, size_t src_step, int src_width,
 #undef cv_hal_matchTemplate
 #define cv_hal_matchTemplate ipp_hal_matchTemplate
 
+int ipp_hal_threshold(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                      int width, int height, int depth, int cn, double thresh, double maxValue, int thresholdType);
+#undef cv_hal_threshold
+#define cv_hal_threshold ipp_hal_threshold
+
 #endif // IPP_VERSION_X100 >= 700
 
 #define IPP_DISABLE_PERF_CANNY_MT 1 // cv::Canny OpenCV MT performance is better
