@@ -3427,6 +3427,9 @@ TEST_P(Test_ONNX_nets, YOLOv5n)
 TEST_P(Test_ONNX_layers, Tile)
 {
     testONNXModels("tile", pb);
+    // tile-1 (opset 1) form with a negative axis; the parser must normalize it
+    // against the input rank instead of indexing the repeats buffer directly.
+    testONNXModels("tile_neg_axis");
 }
 
 TEST_P(Test_ONNX_layers, Gelu)

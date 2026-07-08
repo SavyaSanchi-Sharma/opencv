@@ -24,6 +24,21 @@ int ipp_hal_warpAffine(int src_type, const uchar *src_data, size_t src_step, int
 // Does not pass tests in 5.x branch
 //#undef cv_hal_warpAffine
 //#define cv_hal_warpAffine ipp_hal_warpAffine
+
+int ipp_hal_sobel(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                  int width, int height, int src_depth, int dst_depth, int cn,
+                  int margin_left, int margin_top, int margin_right, int margin_bottom,
+                  int dx, int dy, int ksize, double scale, double delta, int border_type);
+#undef cv_hal_sobel
+#define cv_hal_sobel ipp_hal_sobel
+
+int ipp_hal_scharr(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                   int width, int height, int src_depth, int dst_depth, int cn,
+                   int margin_left, int margin_top, int margin_right, int margin_bottom,
+                   int dx, int dy, double scale, double delta, int border_type);
+#undef cv_hal_scharr
+#define cv_hal_scharr ipp_hal_scharr
+
 #endif
 
 #if IPP_VERSION_X100 >= 202600
@@ -43,6 +58,14 @@ int ipp_hal_remap32f(int src_type, const uchar *src_data, size_t src_step, int s
     int interpolation, int border_type, const double border_value[4]);
 #undef cv_hal_remap32f
 #define cv_hal_remap32f ipp_hal_remap32f
+
+#if defined(HAVE_IPP_IW)
+int ipp_hal_resize(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height,
+                   uchar *dst_data, size_t dst_step, int dst_width, int dst_height,
+                   double inv_scale_x, double inv_scale_y, int interpolation);
+#undef cv_hal_resize
+#define cv_hal_resize ipp_hal_resize
+#endif // HAVE_IPP_IW
 
 #if defined(HAVE_IPP_IW) && !DISABLE_IPP_BOX_FILTER
 int ipp_hal_boxFilter(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
