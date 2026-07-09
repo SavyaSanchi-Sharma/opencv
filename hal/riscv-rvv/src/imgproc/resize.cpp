@@ -6,7 +6,26 @@
 
 #include "rvv_hal.hpp"
 #include "common.hpp"
+#include "opencv2/core/softfloat.hpp"
 #include <list>
+
+// Coverage matrix (depth x channels x interpolation). Entries not listed fall back to the
+// generic implementation via CV_HAL_ERROR_NOT_IMPLEMENTED.
+//
+//                    | 8UC1 8UC2 8UC3 8UC4 | 16UC1 16UC2 16UC3 16UC4 | 32FC1 32FC2 32FC3 32FC4
+// NEAREST            |  Y    Y    Y    Y   |  Y*    Y*    -     -    |  Y*    -     -     -
+// NEAREST_EXACT      |  Y    Y    Y    Y   |  Y*    Y*    -     -    |  Y*    -     -     -
+// LINEAR             |  Y    Y    Y    Y   |  Y     Y     Y     Y    |  Y     Y     Y     Y
+// LINEAR_EXACT       |  Y    Y    Y    Y   |  -     -     -     -    |  n/a (core uses LINEAR)
+// AREA (2x2 fast)    |  Y    Y    Y    Y   |  Y     Y     Y     Y    |  -     -     -     -
+// AREA (generic dn)  |  Y    Y    Y    Y   |  -     -     -     -    |  -     -     -     -
+// AREA (upscale)     |  -  (falls back: core maps AREA upscale to LINEAR-like path)
+// CUBIC / LANCZOS4   |  -  (not implemented)
+//
+// Y* : NEAREST dispatches on element size in bytes (1..4), so 16UC1/16UC2/32FC1/32SC1 etc.
+//      are covered by the same gather kernels as 8UC2/8UC4.
+// Additional limits: width guards require cn*src_width (resp. cn*4*src_width for AREA
+// generic) to fit in ushort, since gather indices are 16-bit byte offsets.
 
 namespace cv { namespace rvv_hal { namespace imgproc {
 
@@ -39,16 +58,14 @@ static inline int invoke(int height, std::function<int(int, int, Args...)> func,
     return func(0, 1, std::forward<Args>(args)...);
 }
 
+// cn is the element size in bytes, not the channel count; x_ofs/y_ofs hold precomputed
+// clamped source offsets (x in bytes) so NEAREST and NEAREST_EXACT share the same kernel
 template<int cn>
-static inline int resizeNN(int start, int end, const uchar *src_data, size_t src_step, int src_height, uchar *dst_data, size_t dst_step, int dst_width, int dst_height, double scale_y, int interpolation, const ushort* x_ofs)
+static inline int resizeNN(int start, int end, const uchar *src_data, size_t src_step, uchar *dst_data, size_t dst_step, int dst_width, const int* y_ofs_tab, const ushort* x_ofs)
 {
-    const int ify = ((src_height << 16) + dst_height / 2) / dst_height;
-    const int ify0 = ify / 2 - src_height % 2;
-
     for (int i = start; i < end; i++)
     {
-        int y_ofs = interpolation == CV_HAL_INTER_NEAREST ? static_cast<int>(std::floor(i * scale_y)) : (ify * i + ify0) >> 16;
-        y_ofs = std::min(y_ofs, src_height - 1);
+        int y_ofs = y_ofs_tab[i];
 
         int vl;
         switch (cn)
@@ -739,29 +756,44 @@ static inline int resizeArea(int start, int end, const uchar *src_data, size_t s
 // in the function static void resizeNN and static void resizeNN_bitexact
 static inline int resizeNN(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height, uchar *dst_data, size_t dst_step, int dst_width, int dst_height, double scale_x, double scale_y, int interpolation)
 {
-    const int cn = CV_ELEM_SIZE(src_type);
-    if (cn * src_width > std::numeric_limits<ushort>::max())
+    const int pix_size = CV_ELEM_SIZE(src_type);
+    if (pix_size * src_width > std::numeric_limits<ushort>::max())
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     std::vector<ushort> x_ofs(dst_width);
-    const int ifx = ((src_width << 16) + dst_width / 2) / dst_width;
-    const int ifx0 = ifx / 2 - src_width % 2;
-    for (int i = 0; i < dst_width; i++)
+    std::vector<int> y_ofs(dst_height);
+    if (interpolation == CV_HAL_INTER_NEAREST)
     {
-        x_ofs[i] = interpolation == CV_HAL_INTER_NEAREST ? static_cast<ushort>(std::floor(i * scale_x)) : (ifx * i + ifx0) >> 16;
-        x_ofs[i] = std::min(x_ofs[i], static_cast<ushort>(src_width - 1)) * cn;
+        for (int i = 0; i < dst_width; i++)
+            x_ofs[i] = static_cast<ushort>(std::min(cvFloor(i * scale_x), src_width - 1) * pix_size);
+        for (int i = 0; i < dst_height; i++)
+            y_ofs[i] = std::min(cvFloor(i * scale_y), src_height - 1);
+    }
+    else
+    {
+        // NEAREST_EXACT must reproduce resizeNN_bitexact_tab: Pillow-compatible pixel-center
+        // mapping accumulated in softdouble, otherwise results diverge from the core path
+        const softdouble fx = softdouble(src_width) / softdouble(dst_width);
+        softdouble vx = fx * softdouble(0.5);
+        for (int i = 0; i < dst_width; i++, vx += fx)
+            x_ofs[i] = static_cast<ushort>(std::min(cvFloor(vx), src_width - 1) * pix_size);
+        const softdouble fy = softdouble(src_height) / softdouble(dst_height);
+        softdouble vy = fy * softdouble(0.5);
+        for (int i = 0; i < dst_height; i++, vy += fy)
+            y_ofs[i] = std::min(cvFloor(vy), src_height - 1);
     }
 
-    switch (src_type)
+    // gather kernels only depend on the element size, so e.g. 16UC1 shares the 8UC2 path
+    switch (pix_size)
     {
-    case CV_8UC1:
-        return invoke(dst_height, {resizeNN<1>}, src_data, src_step, src_height, dst_data, dst_step, dst_width, dst_height, scale_y, interpolation, x_ofs.data());
-    case CV_8UC2:
-        return invoke(dst_height, {resizeNN<2>}, src_data, src_step, src_height, dst_data, dst_step, dst_width, dst_height, scale_y, interpolation, x_ofs.data());
-    case CV_8UC3:
-        return invoke(dst_height, {resizeNN<3>}, src_data, src_step, src_height, dst_data, dst_step, dst_width, dst_height, scale_y, interpolation, x_ofs.data());
-    case CV_8UC4:
-        return invoke(dst_height, {resizeNN<4>}, src_data, src_step, src_height, dst_data, dst_step, dst_width, dst_height, scale_y, interpolation, x_ofs.data());
+    case 1:
+        return invoke(dst_height, {resizeNN<1>}, src_data, src_step, dst_data, dst_step, dst_width, y_ofs.data(), x_ofs.data());
+    case 2:
+        return invoke(dst_height, {resizeNN<2>}, src_data, src_step, dst_data, dst_step, dst_width, y_ofs.data(), x_ofs.data());
+    case 3:
+        return invoke(dst_height, {resizeNN<3>}, src_data, src_step, dst_data, dst_step, dst_width, y_ofs.data(), x_ofs.data());
+    case 4:
+        return invoke(dst_height, {resizeNN<4>}, src_data, src_step, dst_data, dst_step, dst_width, y_ofs.data(), x_ofs.data());
     }
     return CV_HAL_ERROR_NOT_IMPLEMENTED;
 }
@@ -990,8 +1022,8 @@ int resize(int src_type, const uchar *src_data, size_t src_step, int src_width, 
 {
     inv_scale_x = 1 / inv_scale_x;
     inv_scale_y = 1 / inv_scale_y;
-    //if (interpolation == CV_HAL_INTER_NEAREST || interpolation == CV_HAL_INTER_NEAREST_EXACT)
-    //    return resizeNN(src_type, src_data, src_step, src_width, src_height, dst_data, dst_step, dst_width, dst_height, inv_scale_x, inv_scale_y, interpolation);
+    if (interpolation == CV_HAL_INTER_NEAREST || interpolation == CV_HAL_INTER_NEAREST_EXACT)
+        return resizeNN(src_type, src_data, src_step, src_width, src_height, dst_data, dst_step, dst_width, dst_height, inv_scale_x, inv_scale_y, interpolation);
     if (interpolation == CV_HAL_INTER_LINEAR || interpolation == CV_HAL_INTER_LINEAR_EXACT)
         return resizeLinear(src_type, src_data, src_step, src_width, src_height, dst_data, dst_step, dst_width, dst_height, inv_scale_x, inv_scale_y, interpolation);
     if (interpolation == CV_HAL_INTER_AREA)
