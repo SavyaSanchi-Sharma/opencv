@@ -138,10 +138,6 @@ int ipp_hal_cvtRGBAtoMultipliedRGBA(const uchar * src_data, size_t src_step, uch
 #undef cv_hal_cvtRGBAtoMultipliedRGBA
 #define cv_hal_cvtRGBAtoMultipliedRGBA ipp_hal_cvtRGBAtoMultipliedRGBA
 
-int ipp_hal_cvtColorYUV2Gray(const uchar * src_data, size_t src_step, uchar * dst_data, size_t dst_step, int width, int height);
-#undef cv_hal_cvtColorYUV2Gray
-#define cv_hal_cvtColorYUV2Gray ipp_hal_cvtColorYUV2Gray
-
 #endif // IPP_VERSION_X100 >= 700
 
 #endif //__IPP_HAL_IMGPROC_HPP__
