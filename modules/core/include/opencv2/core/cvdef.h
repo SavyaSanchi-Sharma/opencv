@@ -594,68 +594,68 @@ __CV_ENUM_CLASS_EXPOSE_1(EnumType, MEMBER_CONST);                               
 __CV_EXPAND(__CV_ENUM_CLASS_EXPOSE_8(EnumType, __VA_ARGS__));                                         \
 
 #define __CV_ENUM_FLAGS_LOGICAL_NOT(EnumType)                                                         \
-static inline bool operator!(const EnumType& val)                                                     \
+inline bool operator!(const EnumType& val)                                                     \
 {                                                                                                     \
     typedef std::underlying_type<EnumType>::type UnderlyingType;                                      \
     return !static_cast<UnderlyingType>(val);                                                         \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_LOGICAL_NOT_EQ(Arg1Type, Arg2Type)                                            \
-static inline bool operator!=(const Arg1Type& a, const Arg2Type& b)                                   \
+inline bool operator!=(const Arg1Type& a, const Arg2Type& b)                                   \
 {                                                                                                     \
     return static_cast<int>(a) != static_cast<int>(b);                                                \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_LOGICAL_EQ(Arg1Type, Arg2Type)                                                \
-static inline bool operator==(const Arg1Type& a, const Arg2Type& b)                                   \
+inline bool operator==(const Arg1Type& a, const Arg2Type& b)                                   \
 {                                                                                                     \
     return static_cast<int>(a) == static_cast<int>(b);                                                \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_NOT(EnumType)                                                         \
-static inline EnumType operator~(const EnumType& val)                                                 \
+inline EnumType operator~(const EnumType& val)                                                 \
 {                                                                                                     \
     typedef std::underlying_type<EnumType>::type UnderlyingType;                                      \
     return static_cast<EnumType>(~static_cast<UnderlyingType>(val));                                  \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_OR(EnumType, Arg1Type, Arg2Type)                                      \
-static inline EnumType operator|(const Arg1Type& a, const Arg2Type& b)                                \
+inline EnumType operator|(const Arg1Type& a, const Arg2Type& b)                                \
 {                                                                                                     \
     typedef std::underlying_type<EnumType>::type UnderlyingType;                                      \
     return static_cast<EnumType>(static_cast<UnderlyingType>(a) | static_cast<UnderlyingType>(b));    \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_AND(EnumType, Arg1Type, Arg2Type)                                     \
-static inline EnumType operator&(const Arg1Type& a, const Arg2Type& b)                                \
+inline EnumType operator&(const Arg1Type& a, const Arg2Type& b)                                \
 {                                                                                                     \
     typedef std::underlying_type<EnumType>::type UnderlyingType;                                      \
     return static_cast<EnumType>(static_cast<UnderlyingType>(a) & static_cast<UnderlyingType>(b));    \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_XOR(EnumType, Arg1Type, Arg2Type)                                     \
-static inline EnumType operator^(const Arg1Type& a, const Arg2Type& b)                                \
+inline EnumType operator^(const Arg1Type& a, const Arg2Type& b)                                \
 {                                                                                                     \
     typedef std::underlying_type<EnumType>::type UnderlyingType;                                      \
     return static_cast<EnumType>(static_cast<UnderlyingType>(a) ^ static_cast<UnderlyingType>(b));    \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_OR_EQ(EnumType, Arg1Type)                                             \
-static inline EnumType& operator|=(EnumType& _this, const Arg1Type& val)                              \
+inline EnumType& operator|=(EnumType& _this, const Arg1Type& val)                              \
 {                                                                                                     \
     _this = static_cast<EnumType>(static_cast<int>(_this) | static_cast<int>(val));                   \
     return _this;                                                                                     \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_AND_EQ(EnumType, Arg1Type)                                            \
-static inline EnumType& operator&=(EnumType& _this, const Arg1Type& val)                              \
+inline EnumType& operator&=(EnumType& _this, const Arg1Type& val)                              \
 {                                                                                                     \
     _this = static_cast<EnumType>(static_cast<int>(_this) & static_cast<int>(val));                   \
     return _this;                                                                                     \
 }                                                                                                     \
 
 #define __CV_ENUM_FLAGS_BITWISE_XOR_EQ(EnumType, Arg1Type)                                            \
-static inline EnumType& operator^=(EnumType& _this, const Arg1Type& val)                              \
+inline EnumType& operator^=(EnumType& _this, const Arg1Type& val)                              \
 {                                                                                                     \
     _this = static_cast<EnumType>(static_cast<int>(_this) ^ static_cast<int>(val));                   \
     return _this;                                                                                     \
@@ -745,7 +745,7 @@ __CV_ENUM_FLAGS_BITWISE_XOR_EQ   (EnumType, EnumType)                           
 #  define CV_XADD(addr, delta) (int)_InterlockedExchangeAdd((long volatile*)addr, delta)
 #else
   #ifdef OPENCV_FORCE_UNSAFE_XADD
-    CV_INLINE int CV_XADD(int* addr, int delta) { int tmp = *addr; *addr += delta; return tmp; }
+    inline int CV_XADD(int* addr, int delta) { int tmp = *addr; *addr += delta; return tmp; }
   #else
     #error "OpenCV: can't define safe CV_XADD macro for current platform (unsupported). Define CV_XADD macro through custom port header (see OPENCV_INCLUDE_PORT_FILE)"
   #endif
@@ -985,7 +985,7 @@ protected:
 /** @brief Constructs the 'fourcc' code, used in video codecs and many other places.
     Simply call it with 4 chars like `CV_FOURCC('I', 'Y', 'U', 'V')`
 */
-CV_INLINE int CV_FOURCC(char c1, char c2, char c3, char c4)
+inline int CV_FOURCC(char c1, char c2, char c3, char c4)
 {
     return (c1 & 255) + ((c2 & 255) << 8) + ((c3 & 255) << 16) + ((c4 & 255) << 24);
 }
