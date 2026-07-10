@@ -909,7 +909,10 @@ void impl_accum_F32(const uchar* inwptr_, const uchar* wptr_, uchar* outbuf_, in
     const float* wptr   = (const float*)wptr_;
     float*       outbuf = (float*)outbuf_;
     CV_Assert(winoIblock == 6 && winoKblock == 4 && winoAtomF32 == 8);
-    const size_t vl = __riscv_vsetvlmax_e32m1(); // 8 on VLEN=256
+    // One atom is winoAtomF32 == 8 floats, so vl must be 8 regardless of VLEN;
+    // vsetvlmax would return VLEN/32 (16 at VLEN=512, 32 at VLEN=1024) and make the
+    // atom loads below overlap their neighbours and the stores run past outbuf.
+    const size_t vl = __riscv_vsetvl_e32m1(8);
 
     if (iblock > 3) {
         for (int atom_id = 0; atom_id < winoNatomF32; atom_id++,
@@ -1039,7 +1042,7 @@ void impl_BtXB_8x8_F32(const float* inptr, int inpstep, uchar* outptr_, int Cg,
                         const int winoIblock, const int winoAtomF32)
 {
     float* outptr = (float*)outptr_;
-    const size_t vl = __riscv_vsetvlmax_e32m1();
+    const size_t vl = __riscv_vsetvl_e32m1(8); // 8x8 tile: exactly 8 lanes, any VLEN
     float tmp[8][8], tmp2[8][8];
 
     wino_bt8x8_rvv(inptr,           inptr+inpstep,   inptr+inpstep*2, inptr+inpstep*3,
@@ -1094,7 +1097,7 @@ void impl_AtXA_8x8_F32(const uchar* inptr_, int inpstep,
                         float bias, float minval, float maxval, bool ifMinMaxAct)
 {
     const float* inptr = (const float*)inptr_;
-    const size_t vl  = __riscv_vsetvlmax_e32m1();
+    const size_t vl  = __riscv_vsetvl_e32m1(8); // 8-wide winograd rows, any VLEN
     const size_t vl6 = __riscv_vsetvl_e32m1(6);
     float tmp[8][8], tmp2[8][8];
 
