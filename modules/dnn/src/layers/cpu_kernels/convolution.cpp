@@ -1865,6 +1865,58 @@ void convBlockMR1_F32(int np, const float* a, const float* b, float *c, const fl
     }
      else
         convBlockMR1NoSIMD(np, a, b, c, bias, init_c, minval, maxval, ifMinMaxAct, outLen, convNR);
+#elif CV_RVV
+{
+    // LMUL=1 kernel: vlanes = VLEN/32 (8 at VLEN=256), so the convNR==24 tile is 3 vectors.
+    // OpenCV's scalable v_float32 is LMUL=2 (16 lanes at VLEN=256) and does not divide 24,
+    // hence native LMUL=1 intrinsics here; vfmacc.vf broadcasts a[p] without an extra register.
+    // Like the NEON MR1 kernel, all convNR outputs are stored even for partial outLen:
+    // the caller redirects partial stripes into a CONV_NR-sized buffer and copies outLen back.
+    const int vl = (int)__riscv_vsetvlmax_e32m1();
+    if (convNR == 3 * vl)
+    {
+        vfloat32m1_t c0 = __riscv_vfmv_v_f_f32m1(bias, vl), c1 = c0, c2 = c0;
+        if (outLen > 2 * vl)
+        {
+            for (int p = 0; p < np; p++, a++, b += convNR)
+            {
+                c0 = __riscv_vfmacc_vf_f32m1(c0, a[0], __riscv_vle32_v_f32m1(b,          vl), vl);
+                c1 = __riscv_vfmacc_vf_f32m1(c1, a[0], __riscv_vle32_v_f32m1(b + vl,     vl), vl);
+                c2 = __riscv_vfmacc_vf_f32m1(c2, a[0], __riscv_vle32_v_f32m1(b + 2 * vl, vl), vl);
+            }
+        }
+        else if (outLen > vl)
+        {
+            for (int p = 0; p < np; p++, a++, b += convNR)
+            {
+                c0 = __riscv_vfmacc_vf_f32m1(c0, a[0], __riscv_vle32_v_f32m1(b,      vl), vl);
+                c1 = __riscv_vfmacc_vf_f32m1(c1, a[0], __riscv_vle32_v_f32m1(b + vl, vl), vl);
+            }
+        }
+        else
+        {
+            for (int p = 0; p < np; p++, a++, b += convNR)
+                c0 = __riscv_vfmacc_vf_f32m1(c0, a[0], __riscv_vle32_v_f32m1(b, vl), vl);
+        }
+        if (init_c)
+        {
+            c0 = __riscv_vfadd_vv_f32m1(c0, __riscv_vle32_v_f32m1(c,          vl), vl);
+            c1 = __riscv_vfadd_vv_f32m1(c1, __riscv_vle32_v_f32m1(c + vl,     vl), vl);
+            c2 = __riscv_vfadd_vv_f32m1(c2, __riscv_vle32_v_f32m1(c + 2 * vl, vl), vl);
+        }
+        if (ifMinMaxAct)
+        {
+            c0 = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(c0, minval, vl), maxval, vl);
+            c1 = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(c1, minval, vl), maxval, vl);
+            c2 = __riscv_vfmin_vf_f32m1(__riscv_vfmax_vf_f32m1(c2, minval, vl), maxval, vl);
+        }
+        __riscv_vse32_v_f32m1(c,          c0, vl);
+        __riscv_vse32_v_f32m1(c + vl,     c1, vl);
+        __riscv_vse32_v_f32m1(c + 2 * vl, c2, vl);
+        return;
+    }
+    convBlockMR1NoSIMD(np, a, b, c, bias, init_c, minval, maxval, ifMinMaxAct, outLen, convNR);
+}
 #else
     convBlockMR1NoSIMD(np, a, b, c, bias, init_c, minval, maxval, ifMinMaxAct, outLen, convNR);
 #endif
