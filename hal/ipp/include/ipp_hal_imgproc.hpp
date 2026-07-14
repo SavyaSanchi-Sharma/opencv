@@ -52,13 +52,6 @@ int ipp_hal_warpPerspective(int src_type, const uchar *src_data, size_t src_step
 
 #endif // IPP_VERSION_X100 >= 202600
 
-int ipp_hal_remap32f(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height,
-    uchar *dst_data, size_t dst_step, int dst_width, int dst_height,
-    float* mapx, size_t mapx_step, float* mapy, size_t mapy_step,
-    int interpolation, int border_type, const double border_value[4]);
-#undef cv_hal_remap32f
-#define cv_hal_remap32f ipp_hal_remap32f
-
 #if defined(HAVE_IPP_IW)
 int ipp_hal_resize(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height,
                    uchar *dst_data, size_t dst_step, int dst_width, int dst_height,
@@ -76,6 +69,13 @@ int ipp_hal_boxFilter(const uchar* src_data, size_t src_step, uchar* dst_data, s
 #undef  cv_hal_boxFilter
 #define cv_hal_boxFilter ipp_hal_boxFilter
 #endif // defined(HAVE_IPP_IW) && !DISABLE_IPP_BOX_FILTER
+
+int ipp_hal_remap32f(int src_type, const uchar *src_data, size_t src_step, int src_width, int src_height,
+    uchar *dst_data, size_t dst_step, int dst_width, int dst_height,
+    float* mapx, size_t mapx_step, float* mapy, size_t mapy_step,
+    int interpolation, int border_type, const double border_value[4]);
+#undef cv_hal_remap32f
+#define cv_hal_remap32f ipp_hal_remap32f
 
 #if defined(HAVE_IPP_IW) && !DISABLE_IPP_FILTER2D
 int ipp_hal_filter2D(const uchar * src_data, size_t src_step, int src_type,
@@ -174,6 +174,42 @@ int ipp_hal_cvtLabtoBGR(const uchar * src_data, size_t src_step, uchar * dst_dat
 #define cv_hal_cvtLabtoBGR ipp_hal_cvtLabtoBGR
 #endif // !IPP_DISABLE_LAB_RGB
 
-#endif //IPP_VERSION_X100 >= 700
+int ipp_hal_cvtRGBAtoMultipliedRGBA(const uchar * src_data, size_t src_step, uchar * dst_data, size_t dst_step, int width, int height);
+#undef cv_hal_cvtRGBAtoMultipliedRGBA
+#define cv_hal_cvtRGBAtoMultipliedRGBA ipp_hal_cvtRGBAtoMultipliedRGBA
+
+int ipp_hal_matchTemplate(const uchar* src_data, size_t src_step, int src_width, int src_height,
+                          const uchar* templ_data, size_t templ_step, int templ_width, int templ_height,
+                          float* result_data, size_t result_step, int depth, int cn, int method);
+#undef cv_hal_matchTemplate
+#define cv_hal_matchTemplate ipp_hal_matchTemplate
+
+int ipp_hal_threshold(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                      int width, int height, int depth, int cn, double thresh, double maxValue, int thresholdType);
+#undef cv_hal_threshold
+#define cv_hal_threshold ipp_hal_threshold
+
+int ipp_hal_distanceTransform(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                              int width, int height, int dst_type, int dist_type, int mask_size);
+#undef cv_hal_distanceTransform
+#define cv_hal_distanceTransform ipp_hal_distanceTransform
+
+#endif // IPP_VERSION_X100 >= 700
+
+#define IPP_DISABLE_PERF_CANNY_MT 1 // cv::Canny OpenCV MT performance is better
+
+#if defined(HAVE_IPP_IW)
+int ipp_hal_canny(const uchar* src_data, size_t src_step, uchar* dst_data, size_t dst_step,
+                  int width, int height, int cn,
+                  double lowThreshold, double highThreshold, int ksize, bool L2gradient);
+#undef cv_hal_canny
+#define cv_hal_canny ipp_hal_canny
+
+int ipp_hal_canny_deriv(const short* dx_data, size_t dx_step, const short* dy_data, size_t dy_step,
+                        uchar* dst_data, size_t dst_step, int width, int height, int cn,
+                        double lowThreshold, double highThreshold, bool L2gradient);
+#undef cv_hal_canny_deriv
+#define cv_hal_canny_deriv ipp_hal_canny_deriv
+#endif
 
 #endif //__IPP_HAL_IMGPROC_HPP__

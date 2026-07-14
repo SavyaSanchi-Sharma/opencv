@@ -23,6 +23,10 @@ add_library(ipphal STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sum_ipp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/color_ipp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/filter_ipp.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/matchtemplate_ipp.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/canny_ipp.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/threshold_ipp.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/distancetransform_ipp.cpp"
 )
 
 #TODO: HAVE_IPP_ICV and HAVE_IPP_IW added as private macro till OpenCV itself is
@@ -49,6 +53,7 @@ target_include_directories(ipphal PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
   ${CMAKE_SOURCE_DIR}/modules/core/include
   ${CMAKE_SOURCE_DIR}/modules/imgproc/include
+  ${CMAKE_SOURCE_DIR}/modules/geometry/include
   ${IPP_INCLUDE_DIRS}
 )
 
