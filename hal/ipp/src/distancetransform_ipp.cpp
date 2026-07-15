@@ -8,7 +8,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
-#include <opencv2/geometry.hpp>
+#include <opencv2/geometry.hpp>  // DistanceTypes (DIST_L1/L2/C) live in the geometry module on 5.x
 
 #include <climits>
 #include <cmath>
