@@ -67,7 +67,7 @@ using std::min;
 using namespace cv::dnn::ocl4dnn;
 #endif
 
-#if CV_CUDA4DNN
+#ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/pooling.hpp"
 #include "../cuda4dnn/primitives/average_pooling.hpp"
 #include "../cuda4dnn/primitives/roi_pooling.hpp"
@@ -374,7 +374,7 @@ public:
         }
     }
 
-#if CV_CUDA4DNN
+#ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(
         void *context_,
         InputArrayOfArrays inputs_,
