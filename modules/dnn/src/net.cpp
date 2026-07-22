@@ -142,6 +142,10 @@ void Net::finalizeNet()
         return;
     }
 #endif
+    // New graph engine: explicitly select per-op executors for the chosen backend/target now,
+    // so the first forward() isn't slowed by it.
+    if (impl->mainGraph)
+        impl->finalize();
 }
 
 void Net::setInputsNames(const std::vector<String>& inputBlobNames)
@@ -476,9 +480,9 @@ const std::string& Net::argName(Arg arg) const { return argData(arg).name; }
 
 ArgKind Net::argKind(Arg arg) const { return argData(arg).kind; }
 
-Mat& Net::argTensor(Arg arg) const {
+Mat Net::argTensor(Arg arg) const {
     CV_Assert(impl);
-    return impl->argTensor(arg);
+    return impl->argTensor(arg).getMat(ACCESS_READ);
 }
 
 Arg Net::getArg(const std::string& name)

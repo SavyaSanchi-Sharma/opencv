@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/stream.hpp"
 #include "../csl/tensor.hpp"
 
@@ -32,17 +38,14 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<cuda::GpuMatND>& inputs,
+            const std::vector<cuda::GpuMatND>& outputs,
             csl::Workspace& workspace) override
         {
             CV_Assert(inputs.size() == 1 && outputs.size() == 1);
 
-            auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
-            auto input = input_wrapper->getView();
-
-            auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
-            auto output = output_wrapper->getSpan();
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
 
             std::size_t inner_size = input.size_range(2, input.rank());
             kernels::scaleN_with_biasN<T>(stream, output, input, inner_size, weightsTensor, biasTensor);

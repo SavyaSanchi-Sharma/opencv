@@ -18,6 +18,7 @@
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/core/cuda.hpp>
 
 #include <cstddef>
 #include <memory>
@@ -177,6 +178,22 @@ namespace cv { namespace dnn {
             if (temp.data != destMat.data)
                 temp.copyTo(destMat);
         }
+
+        /** @brief builds a read-only TensorView<T> over the device memory of a GpuMatND (no copy) */
+        template <class T>
+        TensorView<T> viewOf(const cuda::GpuMatND& g) {
+            using const_ptr = typename TensorView<T>::const_pointer;
+            return TensorView<T>(const_ptr(reinterpret_cast<const T*>(g.getDevicePtr())),
+                                 std::begin(g.size), std::end(g.size));
+        }
+
+        /** @brief builds a writable TensorSpan<T> over the device memory of a GpuMatND (no copy) */
+        template <class T>
+        TensorSpan<T> spanOf(const cuda::GpuMatND& g) {
+            using ptr = typename TensorSpan<T>::pointer;
+            return TensorSpan<T>(ptr(reinterpret_cast<T*>(g.getDevicePtr())),
+                                 std::begin(g.size), std::end(g.size));
+        }
     }} /* namespace cuda4dnn::csl */
 
     /** base class for CUDA operation nodes (for all supported targets) */
@@ -185,10 +202,25 @@ namespace cv { namespace dnn {
         CUDABackendNode() : BackendNode(DNN_BACKEND_CUDA) { }
         virtual ~CUDABackendNode() { }
 
+        /** classic-engine entry point (wrapper-based).
+         *
+         * The default adapts the wrappers to GpuMatND headers and dispatches to the GpuMatND
+         * overload, so ops ported to the new graph engine only implement the GpuMatND forward.
+         * Ops not yet ported keep overriding this method directly.
+         */
         virtual void forward(
             const std::vector<cv::Ptr<BackendWrapper>>& inputs,
             const std::vector<cv::Ptr<BackendWrapper>>& outputs,
-            cuda4dnn::csl::Workspace& workspace) = 0;
+            cuda4dnn::csl::Workspace& workspace);
+
+        /** new graph-engine entry point (wrapper-free): operates directly on GpuMatND device tensors */
+        virtual void forward(
+            const std::vector<cuda::GpuMatND>& inputs,
+            const std::vector<cuda::GpuMatND>& outputs,
+            cuda4dnn::csl::Workspace& workspace)
+        {
+            CV_Error(Error::StsNotImplemented, "GpuMatND CUDA forward is not implemented for this operation");
+        }
 
         virtual std::size_t get_workspace_memory_in_bytes() const noexcept { return 0; }
     };
@@ -229,7 +261,7 @@ namespace cv { namespace dnn {
 
     template <template <class> class NodeType, class ...Args>
     cv::Ptr<BackendNode> make_cuda_node_with_type(int targetId, int hostMatType, Args&& ...args) {
-        CV_CheckType(hostMatType, hostMatType == CV_32F || hostMatType == CV_8S || hostMatType == CV_8U || hostMatType == CV_32S || hostMatType == CV_64S, "");
+        CV_CheckType(hostMatType, hostMatType == CV_32F || hostMatType == CV_16F || hostMatType == CV_8S || hostMatType == CV_8U || hostMatType == CV_32S || hostMatType == CV_64S, "");
 
         if (hostMatType == CV_8S)
             return Ptr<BackendNode>(new NodeType<int8_t>(std::forward<Args>(args)...));
@@ -239,6 +271,8 @@ namespace cv { namespace dnn {
             return Ptr<BackendNode>(new NodeType<int32_t>(std::forward<Args>(args)...));
         else if (hostMatType == CV_64S)
             return Ptr<BackendNode>(new NodeType<int64_t>(std::forward<Args>(args)...));
+        else if (hostMatType == CV_16F)  // device tensor already stored as half (FP16 target)
+            return Ptr<BackendNode>(new NodeType<half>(std::forward<Args>(args)...));
         else if (hostMatType == CV_32F)
         {
             if (targetId == DNN_TARGET_CUDA_FP16)
@@ -252,7 +286,7 @@ namespace cv { namespace dnn {
 
     template <template <class, class> class NodeType, class T_INDEX, class ...Args>
     cv::Ptr<BackendNode> make_cuda_node_with_indices(int targetId, int hostMatType, Args&& ...args) {
-        CV_CheckType(hostMatType, hostMatType == CV_32F || hostMatType == CV_8S || hostMatType == CV_8U || hostMatType == CV_32S || hostMatType == CV_64S, "");
+        CV_CheckType(hostMatType, hostMatType == CV_32F || hostMatType == CV_16F || hostMatType == CV_8S || hostMatType == CV_8U || hostMatType == CV_32S || hostMatType == CV_64S, "");
 
         if (hostMatType == CV_8S)
             return Ptr<BackendNode>(new NodeType<int8_t, T_INDEX>(std::forward<Args>(args)...));
@@ -262,6 +296,8 @@ namespace cv { namespace dnn {
             return Ptr<BackendNode>(new NodeType<int32_t, T_INDEX>(std::forward<Args>(args)...));
         else if (hostMatType == CV_64S)
             return Ptr<BackendNode>(new NodeType<int64_t, T_INDEX>(std::forward<Args>(args)...));
+        else if (hostMatType == CV_16F)  // device tensor already stored as half (FP16 target)
+            return Ptr<BackendNode>(new NodeType<half, T_INDEX>(std::forward<Args>(args)...));
         else if (hostMatType == CV_32F)
         {
             if (targetId == DNN_TARGET_CUDA_FP16)
@@ -298,6 +334,15 @@ namespace cv { namespace dnn {
         virtual void setStream(cuda4dnn::csl::Stream stream, cuda4dnn::csl::Stream h2d_stream) noexcept = 0;
 
         virtual void update(const MatShape& shape, std::size_t offset) = 0;
+
+        /** @brief returns a GpuMatND header over the device memory (no copy, no synchronization)
+         *
+         * The header borrows the device memory and is only valid while this wrapper (and its
+         * device tensor) is alive. Host<->device synchronization is the caller's responsibility
+         * (see copyToDevice()/setDeviceDirty()); this accessor must stay side-effect free so it
+         * can be used at init time before any stream is attached.
+         */
+        virtual cuda::GpuMatND getDeviceMatND() = 0;
     };
 
     namespace cuda4dnn { namespace detail {
@@ -461,6 +506,18 @@ namespace cv { namespace dnn {
         using tensor_span_type = cuda4dnn::csl::TensorSpan<value_type>;
         using tensor_view_type = cuda4dnn::csl::TensorView<value_type>;
 
+        GenericCUDABackendWrapper(UMat& m)
+            : CUDABackendWrapper(TargetID)
+        {
+            CV_Assert(m.allocator == cv::cuda::getCudaAllocator());
+            shape = cv::dnn::shape(m);
+            hostMatDepth = m.depth();
+            offset = 0;
+
+            shared_block = std::make_shared<shared_block_type>();
+            shared_block->boundUMat = m;
+        }
+
         /* Pre-conditions:
          * - there must be no other instance of `GenericCUDABackendWrapper` which wraps the host memory used by `m`
          * - the host memory must remain allocated throughout the lifetime of this object
@@ -518,6 +575,10 @@ namespace cv { namespace dnn {
             }
         }
 
+        static Ptr<BackendWrapper> create(UMat& m) {
+            return Ptr<BackendWrapper>(new GenericCUDABackendWrapper(m));
+        }
+
         static Ptr<BackendWrapper> create(Mat& m) {
             return Ptr<BackendWrapper>(new GenericCUDABackendWrapper(m));
         }
@@ -527,6 +588,14 @@ namespace cv { namespace dnn {
         }
 
         void copyToHost() override {
+            if (!shared_block->boundUMat.empty()) {
+                if (shared_block->boundUMat.u->hostCopyObsolete())
+                {
+                    shared_block->stream.synchronize();
+                    shared_block->boundUMat.getMat(ACCESS_READ);
+                }
+                return;
+            }
             if (shared_block->device_dirty) {
                 CV_Assert(offset == 0); /* we cannot track each piece of the memory separately */
 
@@ -570,11 +639,23 @@ namespace cv { namespace dnn {
         }
 
         void setHostDirty() override {
+            if (!shared_block->boundUMat.empty()) {
+                shared_block->boundUMat.u->markDeviceCopyObsolete(true);
+                return;
+            }
             shared_block->device_dirty = false;
             shared_block->host_dirty = true;
         }
 
         void copyToDevice() override {
+            if (!shared_block->boundUMat.empty()) {
+                if (shared_block->boundUMat.u->deviceCopyObsolete())
+                {
+                    shared_block->stream.synchronize();
+                    shared_block->boundUMat.u->currAllocator->unmap(shared_block->boundUMat.u);
+                }
+                return;
+            }
             if (shared_block->host_dirty) {
                 CV_Assert(offset == 0); /* we cannot track each piece of the memory separately */
 
@@ -591,6 +672,10 @@ namespace cv { namespace dnn {
         }
 
         void setDeviceDirty() override {
+            if (!shared_block->boundUMat.empty()) {
+                shared_block->boundUMat.u->markHostCopyObsolete(true);
+                return;
+            }
             shared_block->device_dirty = true;
             shared_block->host_dirty = false;
         }
@@ -606,7 +691,8 @@ namespace cv { namespace dnn {
 
         void update(const MatShape& shape_, std::size_t offset_) override {
             std::size_t total = shape_.total();
-            if (offset_ + total > shared_block->device.size()) {
+            std::size_t capacity = !shared_block->boundUMat.empty() ? shared_block->boundUMat.total() : shared_block->device.size();
+            if (offset_ + total > capacity) {
                 CV_Error(Error::BadOffset, "shape and offset provided can potentially leads to OOB access");
             }
             shape = shape_;
@@ -617,6 +703,8 @@ namespace cv { namespace dnn {
             CV_Assert(offset == 0); /* we cannot track each piece of the memory separately */
             copyToHost();
             setHostDirty();
+            if (!shared_block->boundUMat.empty())
+                return shared_block->boundUMat.getMat(ACCESS_RW);
             return shared_block->host;
         }
 
@@ -638,12 +726,27 @@ namespace cv { namespace dnn {
          */
         tensor_span_type getSpan() noexcept {
             setDeviceDirty();
+            if (!shared_block->boundUMat.empty())
+                return tensor_span_type(cuda4dnn::csl::DevicePtr<DEVICE_T>(reinterpret_cast<DEVICE_T*>(shared_block->boundUMat.u->handle) + offset),
+                                        std::begin(shape), std::end(shape));
             return tensor_span_type(shared_block->device.get() + offset, std::begin(shape), std::end(shape));
         }
 
         tensor_view_type getView() noexcept {
             copyToDevice();
+            if (!shared_block->boundUMat.empty())
+                return tensor_view_type(cuda4dnn::csl::DevicePtr<DEVICE_T>(reinterpret_cast<DEVICE_T*>(shared_block->boundUMat.u->handle) + offset),
+                                        std::begin(shape), std::end(shape));
             return tensor_view_type(shared_block->device.get() + offset, std::begin(shape), std::end(shape));
+        }
+
+        cuda::GpuMatND getDeviceMatND() override {
+            DEVICE_T* ptr = !shared_block->boundUMat.empty()
+                ? reinterpret_cast<DEVICE_T*>(shared_block->boundUMat.u->handle) + offset
+                : shared_block->device.get().get() + offset;
+            // Report the host element type (e.g. CV_32F even for an FP16 device buffer): the type is
+            // only consumed by initCUDA(), while the compute reinterprets the pointer per its own T.
+            return cuda::GpuMatND(shape, hostMatDepth, static_cast<void*>(ptr));
         }
 
     private:
@@ -672,6 +775,8 @@ namespace cv { namespace dnn {
 
             cuda4dnn::csl::Event d2h_event;
             cuda4dnn::csl::Stream d2h_stream;
+
+            cv::UMat boundUMat;
         };
 
         std::shared_ptr<shared_block_type> shared_block;
@@ -696,6 +801,25 @@ namespace cv { namespace dnn {
 
     template <class T>
     using GetCUDABackendWrapperType = typename GetCUDABackendWrapperType_<T>::type;
+
+    inline void CUDABackendNode::forward(
+        const std::vector<cv::Ptr<BackendWrapper>>& inputs,
+        const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+        cuda4dnn::csl::Workspace& workspace)
+    {
+        std::vector<cuda::GpuMatND> inGpu(inputs.size()), outGpu(outputs.size());
+        for (size_t i = 0; i < inputs.size(); i++) {
+            auto w = inputs[i].dynamicCast<CUDABackendWrapper>();
+            w->copyToDevice();               // host->device if needed (mirrors getView())
+            inGpu[i] = w->getDeviceMatND();
+        }
+        for (size_t i = 0; i < outputs.size(); i++) {
+            auto w = outputs[i].dynamicCast<CUDABackendWrapper>();
+            w->setDeviceDirty();             // op writes the device buffer (mirrors getSpan())
+            outGpu[i] = w->getDeviceMatND();
+        }
+        forward(inGpu, outGpu, workspace);
+    }
 
 #endif
 }} /* namespace cv::dnn */

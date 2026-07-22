@@ -32,35 +32,35 @@ struct ModelFusionAttention
         return it->second[0];
     }
 
-    bool isReshape(const vector<Ptr<Layer>>& prog, int idx) const
+    bool isReshape(const vector<Ptr<LayerInfo>>& prog, int idx) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
             return false;
         return dynamic_cast<Reshape2Layer*>(prog[idx].get()) != nullptr;
     }
 
-    bool isTranspose(const vector<Ptr<Layer>>& prog, int idx) const
+    bool isTranspose(const vector<Ptr<LayerInfo>>& prog, int idx) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
             return false;
         return dynamic_cast<TransposeLayer*>(prog[idx].get()) != nullptr;
     }
 
-    bool isSoftmax(const vector<Ptr<Layer>>& prog, int idx) const
+    bool isSoftmax(const vector<Ptr<LayerInfo>>& prog, int idx) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
             return false;
         return prog[idx]->type == "Softmax";
     }
 
-    bool isMatMul(const vector<Ptr<Layer>>& prog, int idx) const
+    bool isMatMul(const vector<Ptr<LayerInfo>>& prog, int idx) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
             return false;
         return dynamic_cast<MatMulLayer*>(prog[idx].get()) != nullptr;
     }
 
-    static bool isProjCandidate(const Ptr<Layer>& l)
+    static bool isProjCandidate(const Ptr<LayerInfo>& l)
     {
         if (l->blobs.empty() || l->inputs.size() != 1) return false;
         if (dynamic_cast<MatMulLayer*>(l.get()))
@@ -74,7 +74,7 @@ struct ModelFusionAttention
 
     // Returns the projection weight in [K, N] (input_hidden, output_hidden)
     // layout, transposing if the source is a Gemm with trans_b.
-    static Mat getProjWeight(const Ptr<Layer>& l)
+    static Mat getProjWeight(const Ptr<LayerInfo>& l)
     {
         const Mat& W = l->blobs[0];
         GemmLayer* g = dynamic_cast<GemmLayer*>(l.get());
@@ -86,7 +86,7 @@ struct ModelFusionAttention
         return W;
     }
 
-    bool isScalarBinOp(const vector<Ptr<Layer>>& prog, int idx,
+    bool isScalarBinOp(const vector<Ptr<LayerInfo>>& prog, int idx,
                        NaryEltwiseLayer::OPERATION op, float* val) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
@@ -99,7 +99,7 @@ struct ModelFusionAttention
         for (int k = 0; k < 2; k++) {
             Arg inp = inputs[k];
             if (netimpl->isConstArg(inp)) {
-                Mat t = netimpl->argTensor(inp);
+                Mat t = netimpl->argTensor(inp).getMat(ACCESS_READ);
                 if (t.total() == 1 && t.type() == CV_32F) {
                     *val = t.at<float>(0);
                     return true;
@@ -109,18 +109,18 @@ struct ModelFusionAttention
         return false;
     }
 
-    bool isScalarMul(const vector<Ptr<Layer>>& prog, int idx, float* val) const
+    bool isScalarMul(const vector<Ptr<LayerInfo>>& prog, int idx, float* val) const
     {
         return isScalarBinOp(prog, idx, NaryEltwiseLayer::OPERATION::PROD, val);
     }
 
-    bool isScalarDiv(const vector<Ptr<Layer>>& prog, int idx, float* val) const
+    bool isScalarDiv(const vector<Ptr<LayerInfo>>& prog, int idx, float* val) const
     {
         return isScalarBinOp(prog, idx, NaryEltwiseLayer::OPERATION::DIV, val);
     }
 
     // True if `arg` is produced by the dynamic scale chain Sqrt<-Cast<-Div(1,.)<-Sqrt<-Cast<-Slice<-Shape; visited ops are appended to `chain_ops`.
-    bool isRuntimeQKScaleChain(const vector<Ptr<Layer>>& prog, Arg arg,
+    bool isRuntimeQKScaleChain(const vector<Ptr<LayerInfo>>& prog, Arg arg,
                                 std::set<int>& chain_ops) const
     {
         const std::vector<std::string> expected = {
@@ -133,7 +133,7 @@ struct ModelFusionAttention
             if (it == producer_.end()) return false;
             int idx = it->second;
             if (idx < 0 || idx >= (int)prog.size() || !prog[idx]) return false;
-            const Ptr<Layer>& l = prog[idx];
+            const Ptr<LayerInfo>& l = prog[idx];
             if (want == "NaryEltwise") {
                 NaryEltwiseLayer* elt = dynamic_cast<NaryEltwiseLayer*>(l.get());
                 if (!elt || elt->op != NaryEltwiseLayer::OPERATION::DIV) return false;
@@ -143,7 +143,7 @@ struct ModelFusionAttention
                 bool runtime_seen = false;
                 for (Arg in : l->inputs) {
                     if (netimpl->isConstArg(in)) {
-                        Mat t = netimpl->argTensor(in);
+                        Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
                         if (t.total() != 1) return false;
                         float v = 0.f;
                         if      (t.type() == CV_32F) v = t.at<float>(0);
@@ -171,7 +171,7 @@ struct ModelFusionAttention
 
     // Accept Add op with exactly two inputs; identify the non-constant runtime
     // input (the mask tensor). Returns false if the Add doesn't match.
-    bool isMaskAdd(const vector<Ptr<Layer>>& prog, int idx, Arg* out_mask) const
+    bool isMaskAdd(const vector<Ptr<LayerInfo>>& prog, int idx, Arg* out_mask) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
             return false;
@@ -186,11 +186,11 @@ struct ModelFusionAttention
 
     // Extract a scalar integer from a const-valued arg, possibly wrapped in an
     // Unsqueeze of a scalar const. Returns -1 if extraction fails.
-    int extractConstInt(const vector<Ptr<Layer>>& prog, Arg a) const
+    int extractConstInt(const vector<Ptr<LayerInfo>>& prog, Arg a) const
     {
         auto readScalar = [&](Arg x) -> int {
             if (!netimpl->isConstArg(x)) return -1;
-            Mat t = netimpl->argTensor(x);
+            Mat t = netimpl->argTensor(x).getMat(ACCESS_READ);
             if (t.total() != 1) return -1;
             if (t.type() == CV_64S) return (int)t.at<int64_t>(0);
             if (t.type() == CV_32S) return (int)t.at<int32_t>(0);
@@ -207,7 +207,7 @@ struct ModelFusionAttention
         return -1;
     }
 
-    void collectShapeChain(const vector<Ptr<Layer>>& prog, int concat_idx,
+    void collectShapeChain(const vector<Ptr<LayerInfo>>& prog, int concat_idx,
                            std::set<int>& chain) const
     {
         if (concat_idx < 0 || concat_idx >= (int)prog.size() || !prog[concat_idx])
@@ -238,7 +238,7 @@ struct ModelFusionAttention
     }
 
     template <class Pred>
-    int findMatchingConsumer(const vector<Ptr<Layer>>& prog, Arg out,
+    int findMatchingConsumer(const vector<Ptr<LayerInfo>>& prog, Arg out,
                              Pred pred, std::set<int>* extra_shape_ops) const
     {
         auto it = consumers_.find(out.idx);
@@ -258,7 +258,7 @@ struct ModelFusionAttention
         return matched;
     }
 
-    int followProjChain(const vector<Ptr<Layer>>& prog,
+    int followProjChain(const vector<Ptr<LayerInfo>>& prog,
                         int proj_matmul_idx,
                         int* out_reshape_idx,
                         int* out_num_heads,
@@ -268,7 +268,7 @@ struct ModelFusionAttention
         if (proj_matmul_idx < 0) return -1;
         Arg proj_out = prog[proj_matmul_idx]->outputs[0];
         int reshape_idx = findMatchingConsumer(prog, proj_out,
-            [](Layer* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
+            [](LayerInfo* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
             extra_ops_to_remove);
         if (!isReshape(prog, reshape_idx)) return -1;
 
@@ -278,7 +278,7 @@ struct ModelFusionAttention
 
         int num_heads = -1;
         if (netimpl->isConstArg(shape_arg)) {
-            Mat shape_mat = netimpl->argTensor(shape_arg);
+            Mat shape_mat = netimpl->argTensor(shape_arg).getMat(ACCESS_READ);
             if (shape_mat.total() != 4) return -1;
             const int64_t* shape_data = shape_mat.ptr<int64_t>();
             num_heads = static_cast<int>(shape_data[2]);
@@ -311,9 +311,9 @@ struct ModelFusionAttention
 
     // Combined-QKV attention: QKV proj -> Reshape ->
     // Transpose -> 3 Gathers -> QK^T -> Softmax(no mask) -> *V.
-    bool tryFuseCombinedQKV(const vector<Ptr<Layer>>& prog, int qkv_matmul_idx,
+    bool tryFuseCombinedQKV(const vector<Ptr<LayerInfo>>& prog, int qkv_matmul_idx,
                             std::set<int>& removed_ops,
-                            vector<std::pair<int, Ptr<Layer>>>& replacements)
+                            vector<std::pair<int, Ptr<LayerInfo>>>& replacements)
     {
         if (qkv_matmul_idx < 0 || qkv_matmul_idx >= (int)prog.size() || !prog[qkv_matmul_idx])
             return false;
@@ -346,7 +346,7 @@ struct ModelFusionAttention
                 Mat b_candidate;
                 for (Arg in : prog[next]->inputs) {
                     if (netimpl->isConstArg(in)) {
-                        Mat t = netimpl->argTensor(in);
+                        Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
                         if (t.type() == CV_32F && (int)t.total() == total_hidden)
                             b_candidate = t;
                     }
@@ -370,7 +370,7 @@ struct ModelFusionAttention
         int num_heads = -1, head_dim = -1;
         Arg shape_arg = rinputs[1];
         if (netimpl->isConstArg(shape_arg)) {
-            Mat sh = netimpl->argTensor(shape_arg);
+            Mat sh = netimpl->argTensor(shape_arg).getMat(ACCESS_READ);
             if (sh.total() != 5) return false;
             const int64_t* sd = sh.ptr<int64_t>();
             if ((int)sd[2] != 3) return false;
@@ -411,7 +411,7 @@ struct ModelFusionAttention
             if (!g || g->axis != 0 || prog[c]->inputs.size() < 2) return false;
             Arg idx_arg = prog[c]->inputs[1];
             if (!netimpl->isConstArg(idx_arg)) return false;
-            Mat t = netimpl->argTensor(idx_arg);
+            Mat t = netimpl->argTensor(idx_arg).getMat(ACCESS_READ);
             if (t.total() != 1) return false;
             int v;
             if      (t.type() == CV_64S) v = (int)t.at<int64_t>(0);
@@ -456,7 +456,7 @@ struct ModelFusionAttention
         int out_trans_idx = singleConsumer(prog[av_matmul_idx]->outputs[0]);
         if (!isTranspose(prog, out_trans_idx)) return false;
         int out_reshape_idx = findMatchingConsumer(prog, prog[out_trans_idx]->outputs[0],
-            [](Layer* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
+            [](LayerInfo* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
             &extra_ops);
         if (!isReshape(prog, out_reshape_idx)) return false;
 
@@ -487,7 +487,7 @@ struct ModelFusionAttention
         attn_params.blobs.push_back(W_qkv);
         if (has_bias) attn_params.blobs.push_back(bias_qkv);
 
-        Ptr<Layer> attn_layer = LayerFactory::createLayerInstance(attn_params.type, attn_params);
+        Ptr<LayerInfo> attn_layer = LayerFactory::createLayerInstance(attn_params.type, attn_params);
         CV_Assert(attn_layer);
         Arg shared_input = prog[qkv_matmul_idx]->inputs[0];
         attn_layer->inputs  = { shared_input };
@@ -514,7 +514,7 @@ struct ModelFusionAttention
 
     // CLIP-branch trace: arg -> [Transpose3D(K^T)] -> Reshape3D -> Transpose ->
     // Reshape4D -> [Mul(Q scale)] -> [Add(bias)] -> proj_MatMul.
-    int traceClipBranch(const vector<Ptr<Layer>>& prog, Arg arg,
+    int traceClipBranch(const vector<Ptr<LayerInfo>>& prog, Arg arg,
                         bool is_q_branch, bool is_k_branch,
                         Mat& out_W, Mat& out_bias, int& out_num_heads,
                         float& out_q_scale,
@@ -567,7 +567,7 @@ struct ModelFusionAttention
         Arg shape_arg_r4d = prog[r4d_idx]->inputs[1];
         int num_heads = -1;
         if (netimpl->isConstArg(shape_arg_r4d)) {
-            Mat shape_mat = netimpl->argTensor(shape_arg_r4d);
+            Mat shape_mat = netimpl->argTensor(shape_arg_r4d).getMat(ACCESS_READ);
             if (shape_mat.total() != 4) return -1;
             if (shape_mat.type() == CV_64S)
                 num_heads = static_cast<int>(shape_mat.ptr<int64_t>()[2]);
@@ -601,7 +601,7 @@ struct ModelFusionAttention
             bool got_scale = false, got_runtime = false;
             for (Arg in : prog[mul_idx]->inputs) {
                 if (netimpl->isConstArg(in)) {
-                    Mat t = netimpl->argTensor(in);
+                    Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
                     if (t.total() != 1) return -1;
                     if      (t.type() == CV_32F) out_q_scale = t.at<float>(0);
                     else if (t.type() == CV_64F) out_q_scale = (float)t.at<double>(0);
@@ -640,7 +640,7 @@ struct ModelFusionAttention
                 }
             }
             if (!got_bias || !got_runtime2) return -1;
-            out_bias = netimpl->argTensor(bias_arg).clone();
+            out_bias = netimpl->argTensor(bias_arg).getMat(ACCESS_READ).clone();
             ops_consumed.insert(next_idx);
             mm_idx = stepProducer(matmul_out_arg);
         } else {
@@ -660,9 +660,9 @@ struct ModelFusionAttention
 
     // 3 separate q/k/v projections, Q scaled, K^T at
     // the QK^T matmul, output reshaped+transposed back to (B,S,H*D).
-    bool tryFuseClipAttention(const vector<Ptr<Layer>>& prog, int softmax_idx,
+    bool tryFuseClipAttention(const vector<Ptr<LayerInfo>>& prog, int softmax_idx,
                               std::set<int>& removed_ops,
-                              vector<std::pair<int, Ptr<Layer>>>& replacements)
+                              vector<std::pair<int, Ptr<LayerInfo>>>& replacements)
     {
         if (softmax_idx < 0 || softmax_idx >= (int)prog.size() || !prog[softmax_idx])
             return false;
@@ -782,7 +782,7 @@ struct ModelFusionAttention
         attn_params.blobs.push_back(W_qkv);
         if (!bias_qkv.empty()) attn_params.blobs.push_back(bias_qkv);
 
-        Ptr<Layer> attn_layer =
+        Ptr<LayerInfo> attn_layer =
             LayerFactory::createLayerInstance(attn_params.type, attn_params);
         if (!attn_layer) return false;
         attn_layer->inputs  = { shared_input };
@@ -804,7 +804,7 @@ struct ModelFusionAttention
 
     bool fuseGraph(Ptr<Graph>& graph)
     {
-        const vector<Ptr<Layer>>& prog = graph->prog();
+        const vector<Ptr<LayerInfo>>& prog = graph->prog();
         size_t nops = prog.size();
 
         producer_.clear();
@@ -885,7 +885,7 @@ struct ModelFusionAttention
                 Arg k_tr_out = prog[transpose_idx[k_slot]]->outputs[0];
                 // Tolerate a Shape consumer alongside the Mul/MatMul: the runtime-scale chain (Shape->Slice->Cast->Sqrt...) branches off the Q/K transpose.
                 int k_next = findMatchingConsumer(prog, k_tr_out,
-                    [](Layer* L) {
+                    [](LayerInfo* L) {
                         return dynamic_cast<NaryEltwiseLayer*>(L) != nullptr ||
                                dynamic_cast<MatMulLayer*>(L) != nullptr;
                     },
@@ -939,7 +939,7 @@ struct ModelFusionAttention
 
                     if (vit_style) {
                         int q_next = findMatchingConsumer(prog, q_tr_out,
-                            [](Layer* L) {
+                            [](LayerInfo* L) {
                                 return dynamic_cast<NaryEltwiseLayer*>(L) != nullptr ||
                                        dynamic_cast<MatMulLayer*>(L) != nullptr;
                             },
@@ -1020,7 +1020,7 @@ struct ModelFusionAttention
 
                     Arg out_tr_out = prog[out_transpose_idx]->outputs[0];
                     int out_reshape_idx = findMatchingConsumer(prog, out_tr_out,
-                        [](Layer* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
+                        [](LayerInfo* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
                         &extra_ops);
                     if (!isReshape(prog, out_reshape_idx)) continue;
 
@@ -1094,7 +1094,7 @@ struct ModelFusionAttention
                     if (has_bias)
                         attn_params.blobs.push_back(bias_qkv);
 
-                    Ptr<Layer> attn_layer = LayerFactory::createLayerInstance(
+                    Ptr<LayerInfo> attn_layer = LayerFactory::createLayerInstance(
                         attn_params.type, attn_params);
                     CV_Assert(attn_layer);
 
@@ -1157,7 +1157,7 @@ struct ModelFusionAttention
         }
 
         if (modified) {
-            vector<Ptr<Layer>> newprog;
+            vector<Ptr<LayerInfo>> newprog;
             std::sort(attention_replacements_.begin(), attention_replacements_.end(),
                       [](auto& a, auto& b) { return a.first < b.first; });
 
@@ -1183,7 +1183,7 @@ struct ModelFusionAttention
 private:
     std::map<int, int> producer_;
     std::map<int, vector<int>> consumers_;
-    vector<std::pair<int, Ptr<Layer>>> attention_replacements_;
+    vector<std::pair<int, Ptr<LayerInfo>>> attention_replacements_;
 };
 
 void Net::Impl::fuseAttention()

@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/cudnn.hpp"
 #include "../csl/tensor.hpp"
 #include "../csl/tensor_ops.hpp"
@@ -224,14 +230,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<cuda::GpuMatND>& inputs,
+            const std::vector<cuda::GpuMatND>& outputs,
             csl::Workspace& workspace) override
         {
             CV_Assert(inputs.size() == 1 && outputs.size() == 1);
 
-            auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
-            auto input = input_wrapper->getView();
+            auto input = csl::viewOf<T>(inputs[0]);
 
             if (!transformedInput.empty())
             {
@@ -239,8 +244,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 input = csl::TensorView<T>(transformedInput);
             }
 
-            auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
-            auto output = output_wrapper->getSpan();
+            auto output = csl::spanOf<T>(outputs[0]);
 
             pooler.pool(input, output);
         }

@@ -373,16 +373,18 @@ public:
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(
         void *context_,
-        const std::vector<Ptr<BackendWrapper>>& inputs,
-        const std::vector<Ptr<BackendWrapper>>& outputs
+        InputArrayOfArrays inputs_,
+        InputArrayOfArrays outputs_
     ) override
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         if (type == ROI)
             return make_cuda_node<cuda4dnn::ROIPoolingOp>(preferableTarget, std::move(context->stream), spatialScale);
 
-        auto input_wrapper = inputs[0].dynamicCast<CUDABackendWrapper>();
-        auto input_shape = input_wrapper->getShape();
+        std::vector<cuda::GpuMatND> inputs, outputs;
+        inputs_.getGpuMatNDVector(inputs);
+        outputs_.getGpuMatNDVector(outputs);
+        MatShape input_shape = inputs[0].size;
 
         /* storing max indices is a special case and we deal with it separately */
         if (computeMaxIdx) {
@@ -412,29 +414,16 @@ public:
 
             config.input_shape.assign(std::begin(input_shape), std::end(input_shape));
 
-            int indicesType = outputs[1]->getHostMatDepth();
+            int indicesType = CV_MAT_DEPTH(outputs[1].type());
             CV_CheckType(indicesType, indicesType == CV_32S || indicesType == CV_64S, "Unsupported indices type");
 
             if (indicesType == CV_32S)
-                return make_cuda_node_with_indices<cuda4dnn::MaxPoolingOp, int32_t>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), config);
+                return make_cuda_node_with_indices<cuda4dnn::MaxPoolingOp, int32_t>(preferableTarget, CV_MAT_DEPTH(inputs[0].type()), std::move(context->stream), config);
             else if (indicesType == CV_64S)
-                return make_cuda_node_with_indices<cuda4dnn::MaxPoolingOp, int64_t>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), config);
+                return make_cuda_node_with_indices<cuda4dnn::MaxPoolingOp, int64_t>(preferableTarget, CV_MAT_DEPTH(inputs[0].type()), std::move(context->stream), config);
 
             CV_Error(Error::BadDepth, "Unsupported indices type");
             return Ptr<BackendNode>();
-        }
-
-        if (input_shape.size() == 3)
-        {
-            // Pool1D
-            // We add an extra dim for input tensor, because CuDNN support pooling only with 2 and 3 spatial dimensions
-            input_shape.insert(std::end(input_shape) - 1, 1);
-
-            // Do the similar thing for the other parameters
-            pads_begin.insert(std::begin(pads_begin), 0);
-            pads_end.insert(std::begin(pads_end), 0);
-            strides.insert(std::begin(strides), 1);
-            kernel_size.insert(std::begin(kernel_size), 1);
         }
 
         PoolingConfiguration config;
@@ -1262,10 +1251,7 @@ public:
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size());
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-            CV_CheckType(inputs[0], inputs[0] == CV_16F, "");
-        else
-            CV_CheckType(inputs[0], inputs[0] == CV_32F, "");
+        CV_CheckType(inputs[0], inputs[0] == CV_16F || inputs[0] == CV_32F, "");
 
         outputs.push_back(inputs[0]);
         if (type == MAX && requiredOutputs == 2) {
