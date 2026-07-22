@@ -1334,7 +1334,14 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
     const ArgData& adata = args.at(inp.idx);
     MatAllocator* bufAlloc = Mat::getDefaultAllocator();
 #ifdef HAVE_CUDA
-    if (graph->opBackend(0) == DNN_BACKEND_CUDA)
+    bool graphOnCuda = false;
+    {
+        const std::vector<Ptr<LayerInfo> >& gprog = graph->prog();
+        for (size_t k = 0; k < gprog.size(); k++) {
+            if (gprog[k] && graph->opBackend((int)k) == DNN_BACKEND_CUDA) { graphOnCuda = true; break; }
+        }
+    }
+    if (graphOnCuda)
         bufAlloc = tensorAllocator();
 #endif
     /*
@@ -1367,7 +1374,7 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
                                          typeToString(adata.type).c_str()));
         }
 #ifdef HAVE_CUDA
-        if (graph->opBackend(0) == DNN_BACKEND_CUDA && preferableTarget == DNN_TARGET_CUDA_FP16 && adata_type == CV_32F)
+        if (graphOnCuda && preferableTarget == DNN_TARGET_CUDA_FP16 && adata_type == CV_32F)
             adata_type = CV_16F;
 #endif
 
@@ -1438,10 +1445,15 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
     MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
     for (size_t i = 0; i < inputs.size(); i++) {
         UMat& t = netimpl->argTensor(inputs[i]);
-        if (t.u && t.u->currAllocator != cudaAlloc) {
+        int devType = (netimpl->preferableTarget == DNN_TARGET_CUDA_FP16 && t.type() == CV_32F) ? CV_16F : t.type();
+        bool needConv = t.type() != devType;
+        if (t.u && (t.u->currAllocator != cudaAlloc || needConv)) {
             UMat cudaT;
             cudaT.allocator = cudaAlloc;
-            t.getMat(ACCESS_READ).copyTo(cudaT);
+            if (needConv)
+                t.getMat(ACCESS_READ).convertTo(cudaT, devType);
+            else
+                t.getMat(ACCESS_READ).copyTo(cudaT);
             t = cudaT;
         }
     }
@@ -1721,7 +1733,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 }
             } else {
                 UMat& cur = __tensors__.at(out.idx);
-                if (cur.u != m.u) {
+                if (cur.u != m.u || cur.shape() != m.shape() || cur.type() != m.type()) {
                     UMat freshT;
                     rehomeAllocator(freshT, Mat::getDefaultAllocator());
                     m.copyTo(freshT);
