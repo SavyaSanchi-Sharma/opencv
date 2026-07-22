@@ -124,9 +124,9 @@ struct Net::Impl : public detail::NetImplBase
     size_t totalLayers;
     std::vector<std::string> dimnames_vec;
     std::vector<ArgData> args;
-    std::vector<Mat> __tensors__;
+    std::vector<UMat> __tensors__;
     std::vector<int> bufidxs;
-    std::vector<Mat> buffers;
+    std::vector<UMat> buffers;
     std::vector<Mat> scratchBufs;
     std::vector<Ptr<Graph> > allgraphs;
     KVCacheManager kvCacheManager;
@@ -143,6 +143,21 @@ struct Net::Impl : public detail::NetImplBase
     bool enableFP16, haveFP16;
     bool prepared; // need to rerun graph transformations/optimizations
     bool finalizeLayers; // need to initialize each layer
+    bool finalized = false; // executors have been selected for the current backend/target
+
+    // Post-fusion (pre block-layout) snapshot so finalize() can re-run from a clean
+    // state on a backend/target change; useBlockLayout() is destructive and must
+    // run after backend assignment (see deviceOp handling in graph_block_layout.cpp).
+    struct FusedGraphSnapshot {
+        Ptr<Graph> graph;
+        std::vector<Ptr<LayerInfo> > prog;
+        std::vector<std::vector<Arg> > inputs;
+        std::vector<std::vector<Arg> > outputs;
+    };
+    bool fusedSnapshotValid = false;
+    std::vector<FusedGraphSnapshot> fusedSnapshot;
+    std::vector<Ptr<BackendWrapper> > argWrappers;
+    std::vector<const void*> argWrapperData;
     TracingMode tracingMode;
     ProfilingMode profilingMode;
     std::vector<int64_t> dimvalues;
@@ -408,11 +423,13 @@ struct Net::Impl : public detail::NetImplBase
     Arg getArg(const std::string& name);
     bool haveArg(const std::string& name) const;
 
-    Arg newConstArg(const std::string& name, const Mat& m);
+    Arg newConstArg(const std::string& name, const UMat& m);
+    UMat toArgTensor(const Mat& m) const;
+    MatAllocator* tensorAllocator() const;
     Arg newConstScalarArg(const std::string& name, int type, const void* value);
     Arg newArg(const std::string& name, ArgKind kind, bool allowEmptyName=false);
     bool isConstArg(Arg arg) const;
-    Mat& argTensor(Arg arg) const;
+    UMat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
@@ -420,12 +437,21 @@ struct Net::Impl : public detail::NetImplBase
     int findDim(const std::string& name, bool insert=false);
 
     void prepareForInference();
+    void finalize();
+    // Selects executors for a single graph (recursing into subgraphs).
+    void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA);
+    // Save/restore the fused graph so finalize() is re-entrant across backend changes.
+    void saveFusedSnapshot();
+    void restoreFusedSnapshot();
+#ifdef HAVE_CUDA
+    Ptr<BackendWrapper> getCudaArgWrapper(Arg arg, UMat& t);
+#endif
 
     // pre-allocates memory for output tensors.
     // if useBufferPool==true, the method uses 'buffers'
     // for outputs (according to bufidxs)
     // instead of allocating fresh outputs
-    void allocateLayerOutputs(const Ptr<Layer>& layer,
+    void allocateLayerOutputs(const Ptr<LayerInfo>& layer,
                               const std::vector<int>& inpTypes,
                               const std::vector<MatShape>& inpShapes,
                               std::vector<int>& outTypes,
@@ -436,7 +462,8 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<MatShape>& tempShapes,
                               std::vector<Mat>& temps, // [TODO] ditto
                               std::vector<Mat>& globalTemps,
-                              bool useBufferPool
+                              bool useBufferPool,
+                              int opBackend
                               );
 
     // set input of the model before running it
@@ -523,9 +550,9 @@ struct Net::Impl : public detail::NetImplBase
 
 };  // Net::Impl
 
-inline Net::Impl* getNetImpl(const Layer* layer)
+inline Net::Impl* getNetImpl(const LayerInfo* op)
 {
-    return reinterpret_cast<Net::Impl*>(layer->netimpl);
+    return reinterpret_cast<Net::Impl*>(op->netimpl);
 }
 
 Net readNetFromONNX2(const String&);

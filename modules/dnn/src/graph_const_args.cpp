@@ -30,20 +30,20 @@ struct ConstArgs
     {
         CV_Assert(usecounts[inp.idx] > 0);
         if (--usecounts[inp.idx] == 0 && netimpl->isConstArg(inp)) {
-            netimpl->__tensors__[inp.idx] = Mat(); // deallocate unused tensor
+            netimpl->__tensors__[inp.idx] = UMat(); // deallocate unused tensor
         }
     }
 
     void processGraph(Ptr<Graph>& graph)
     {
-        const std::vector<Ptr<Layer> >& prog = graph->prog();
+        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
         size_t i, nops = prog.size();
         std::vector<Arg> removed_args;
         std::vector<Arg> saved_tail_inputs;
 
         for (i = 0; i < nops; i++) {
-            const Ptr<Layer>& layer = prog[i];
-            Layer* layer_ptr = const_cast<Layer*>(layer.get());
+            const Ptr<LayerInfo>& layer = prog[i];
+            LayerInfo* layer_ptr = const_cast<LayerInfo*>(layer.get());
             std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
             if (subgraphs) {
                 for (Ptr<Graph>& g: *subgraphs) {
@@ -68,25 +68,30 @@ struct ConstArgs
             Conv2Layer* conv = dynamic_cast<Conv2Layer*>(layer_ptr);
             ConvTranspose2Layer* deconv = dynamic_cast<ConvTranspose2Layer*>(layer_ptr);
             BatchNorm2Layer* bn = dynamic_cast<BatchNorm2Layer*>(layer_ptr);
+            ChannelsPReLULayer* prelu = dynamic_cast<ChannelsPReLULayer*>(layer_ptr);
             //ActivationLayer* activ = dynamic_cast<ActivationLayer*>(layer_ptr);
 
             if (tail_const) {
                 if (conv) {
                     // convolution with constant weights and bias
                     conv->setWeights(netimpl->__tensors__[inputs[1]],
-                                     ninputs > 2 ? netimpl->__tensors__[inputs[2]] : Mat(),
+                                     ninputs > 2 ? netimpl->__tensors__[inputs[2]] : UMat(),
                                      netimpl->defaultC0, netimpl->accuracy);
                     conv->inputs.resize(1);
                     unuse_tail = true;
                 } else if (deconv) {
                     // deconvolution with constant weights and bias
                     deconv->setWeights(netimpl->__tensors__[inputs[1]],
-                                       ninputs > 2 ? netimpl->__tensors__[inputs[2]] : Mat(),
+                                       ninputs > 2 ? netimpl->__tensors__[inputs[2]] : UMat(),
                                        netimpl->defaultC0, netimpl->accuracy);
                     deconv->inputs.resize(1);
                     unuse_tail = true;
                 } else if (bn && bn->freezeScaleBias()) {
                     // batch norm with constant parameters
+                    unuse_tail = true;
+                } else if (prelu && ninputs == 2) {
+                    prelu->setSlope(netimpl->__tensors__[inputs[1].idx].getMat(ACCESS_READ));
+                    prelu->inputs.resize(1);
                     unuse_tail = true;
                 }/* else if (activ && dynamic_cast<ReLU6Layer>(activ)) {
                     // [TODO] ...

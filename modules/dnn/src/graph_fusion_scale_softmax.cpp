@@ -29,7 +29,7 @@ struct ModelFusionScaleSoftmax
     bool extractScalar(Arg a, float& out) const
     {
         if (!netimpl->isConstArg(a)) return false;
-        Mat t = netimpl->argTensor(a);
+        Mat t = netimpl->argTensor(a).getMat(ACCESS_READ);
         if (t.total() != 1) return false;
         if (t.type() == CV_32F) { out = t.ptr<float>()[0]; return true; }
         if (t.type() == CV_64F) { out = (float)t.ptr<double>()[0]; return true; }
@@ -40,7 +40,7 @@ struct ModelFusionScaleSoftmax
 
     bool fuseGraph(Ptr<Graph>& graph)
     {
-        const vector<Ptr<Layer>>& prog = graph->prog();
+        const vector<Ptr<LayerInfo>>& prog = graph->prog();
         size_t nops = prog.size();
         bool modified = false;
 
@@ -70,7 +70,7 @@ struct ModelFusionScaleSoftmax
         vector<bool> dropped(nops, false);
 
         for (size_t i = 0; i < nops; i++) {
-            const Ptr<Layer>& layer = prog[i];
+            const Ptr<LayerInfo>& layer = prog[i];
             if (!layer || dropped[i]) continue;
 
             SoftmaxLayer* sm = dynamic_cast<SoftmaxLayer*>(layer.get());
@@ -83,7 +83,7 @@ struct ModelFusionScaleSoftmax
             int prod_idx = it->second;
             if (prod_idx < 0 || dropped[prod_idx]) continue;
 
-            const Ptr<Layer>& pl = prog[prod_idx];
+            const Ptr<LayerInfo>& pl = prog[prod_idx];
             NaryEltwiseLayer* elt = dynamic_cast<NaryEltwiseLayer*>(pl.get());
             if (!elt) continue;
             const auto op = elt->op;
@@ -123,7 +123,7 @@ struct ModelFusionScaleSoftmax
         }
 
         if (modified) {
-            vector<Ptr<Layer>> newprog;
+            vector<Ptr<LayerInfo>> newprog;
             newprog.reserve(nops);
             for (size_t i = 0; i < nops; i++) {
                 if (!dropped[i] && prog[i])
