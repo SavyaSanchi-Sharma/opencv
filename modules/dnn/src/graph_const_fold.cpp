@@ -97,7 +97,6 @@ struct ConstFolding
                 if (!layer->dynamicOutputShapes())
                     netimpl->allocateLayerOutputs(layer, inpTypes, inpShapes, outTypes,
                                                   outShapes, outOrigData, outMats, tempTypes, tempShapes, tempMats,
-<<<<<<< HEAD
                                                   netimpl->scratchBufs, false, DNN_BACKEND_OPENCV);
                 Ptr<Layer> execLayer = layer.dynamicCast<Layer>();
                 CV_Assert(execLayer);  // const-folded ops are CPU-executable (monolithic) layers
