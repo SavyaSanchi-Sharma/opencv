@@ -113,6 +113,7 @@ void registerCudaCommonExecs()
     CV_DNN_REGISTER_EXEC_CLASS(Gelu,           DNN_BACKEND_CUDA, CUDALegacyExec);
     CV_DNN_REGISTER_EXEC_CLASS(GeluApproximation, DNN_BACKEND_CUDA, CUDALegacyExec);
     CV_DNN_REGISTER_EXEC_CLASS(Reciprocal,     DNN_BACKEND_CUDA, CUDALegacyExec);
+    CV_DNN_REGISTER_EXEC_CLASS(Reshape2, DNN_BACKEND_CUDA, CUDALegacyExec);
 }
 
 
