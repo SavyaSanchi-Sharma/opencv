@@ -24,5 +24,4 @@ bin/
 build
 node_modules
 CMakeSettings.json
-xcuserdata/
-build_debug/
+xcuserdata/s
