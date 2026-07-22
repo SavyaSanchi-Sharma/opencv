@@ -90,6 +90,21 @@ struct Net::Impl : public detail::NetImplBase
     // Inheritance support
     Ptr<Net::Impl> basePtr_;
 
+#ifdef HAVE_CUDA
+    struct CudaInfo_t
+    {
+        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt, cuda4dnn::csl::Stream d2h_stream_)
+            : context(std::move(ctxt))
+            , d2h_stream(std::move(d2h_stream_))
+        {}
+        cuda4dnn::csl::CSLContext context;
+        cuda4dnn::csl::Stream d2h_stream;
+        cuda4dnn::csl::Workspace workspace;
+    };
+
+    std::unique_ptr<CudaInfo_t> cudaInfo;
+#endif
+
     Ptr<DataLayer> netInputLayer;
     std::vector<LayerPin> blobsToKeep;
     MapIdToLayerData layers;
@@ -281,19 +296,6 @@ struct Net::Impl : public detail::NetImplBase
 #endif
 
 #ifdef HAVE_CUDA
-    struct CudaInfo_t
-    {
-        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt, cuda4dnn::csl::Stream d2h_stream_)
-            : context(std::move(ctxt))
-            , d2h_stream(std::move(d2h_stream_))
-        {}
-        cuda4dnn::csl::CSLContext context;
-        cuda4dnn::csl::Stream d2h_stream;
-        cuda4dnn::csl::Workspace workspace;
-    };
-
-    std::unique_ptr<CudaInfo_t> cudaInfo;
-
     void initCUDABackend(const std::vector<LayerPin>& blobsToKeep_);
 #endif
 
