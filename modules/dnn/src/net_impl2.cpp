@@ -507,7 +507,7 @@ bool Net::Impl::haveArg(const std::string& name) const
 UMat Net::Impl::toArgTensor(const Mat& m) const
 {
     UMat u;
-    u.allocator = tensorAllocator();
+    u.allocator = Mat::getDefaultAllocator();
     m.copyTo(u);
     return u;
 }
@@ -754,9 +754,34 @@ void Net::Impl::finalize()
             auto d2h_stream = cuda4dnn::csl::Stream(true);
             cudaInfo = std::unique_ptr<CudaInfo_t>(new CudaInfo_t(std::move(context), std::move(d2h_stream)));
         }
+    }
+#endif
+
+    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: finalize() backend=%d target=%d useCUDA=%d over %zu graph(s)",
+                preferableBackend, preferableTarget, (int)useCUDA, allgraphs.size()));
+
+    for (const Ptr<Graph>& g : allgraphs)
+        finalizeGraph(g, useCUDA);
+    useBlockLayout();
+    assignBuffers();
+    totalLayers = updateGraphOfs(mainGraph, 0, true);
+
+#ifdef HAVE_CUDA
+    if (useCUDA) {
+        std::vector<bool> constUsedByCuda(args.size(), false);
+        for (const Ptr<Graph>& g : allgraphs) {
+            const std::vector<Ptr<LayerInfo> >& prog = g->prog();
+            for (size_t opidx = 0; opidx < prog.size(); opidx++) {
+                const Ptr<LayerInfo>& op = prog[opidx];
+                if (!op || g->opBackend((int)opidx) != DNN_BACKEND_CUDA)
+                    continue;
+                for (const Arg& inp : op->inputs)
+                    constUsedByCuda[inp.idx] = true;
+            }
+        }
         MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
         for (size_t i = 0; i < args.size(); i++) {
-            if (args[i].kind != DNN_ARG_CONST)
+            if (args[i].kind != DNN_ARG_CONST || !constUsedByCuda[i])
                 continue;
             UMat& t = __tensors__.at(i);
             if (t.empty() || !t.u || t.u->currAllocator == cudaAlloc)
@@ -770,15 +795,6 @@ void Net::Impl::finalize()
         }
     }
 #endif
-
-    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: finalize() backend=%d target=%d useCUDA=%d over %zu graph(s)",
-                preferableBackend, preferableTarget, (int)useCUDA, allgraphs.size()));
-
-    for (const Ptr<Graph>& g : allgraphs)
-        finalizeGraph(g, useCUDA);
-    useBlockLayout();
-    assignBuffers();
-    totalLayers = updateGraphOfs(mainGraph, 0, true);
 
     for (const Ptr<Graph>& g : allgraphs)
         finalizeGraph(g, useCUDA);
@@ -1315,6 +1331,11 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
     }
     Arg inp = gr_inputs[idx];
     const ArgData& adata = args.at(inp.idx);
+    MatAllocator* bufAlloc = Mat::getDefaultAllocator();
+#ifdef HAVE_CUDA
+    if (graph->opBackend(0) == DNN_BACKEND_CUDA)
+        bufAlloc = tensorAllocator();
+#endif
     /*
      [TODO] add more detailed shape check
      if (adata.shape.dims != mshape.dims) {
@@ -1352,7 +1373,7 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
         UMat& inp_t = argTensor(inp);
         if (inp_t.shape() != mshape || inp_t.type() != adata_type)
             finalizeLayers = true;
-        rehomeAllocator(inp_t, tensorAllocator());
+        rehomeAllocator(inp_t, bufAlloc);
         inp_t.fit(mshape, adata_type);
 
         if (adata.type == CV_16BF && mtype == CV_16U)
@@ -1372,7 +1393,7 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
     } else if (adata.kind == DNN_ARG_TEMP) {
         int bufidx = bufidxs.at(inp.idx);
         UMat& buf = buffers.at(bufidx);
-        rehomeAllocator(buf, tensorAllocator());
+        rehomeAllocator(buf, bufAlloc);
         buf.fit(mshape, mtype); // minimize reallocations
         m.copyTo(buf);
     } else {
@@ -1407,6 +1428,11 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
 {
     Ptr<Layer> exec = gimpl->exec_[opidx];
     CV_Assert(exec && netimpl->cudaInfo);
+
+    for (size_t i = 0; i < outputs.size(); i++) {
+        if (netimpl->argTensor(outputs[i]).total() == 0)
+            return;
+    }
 
     std::vector<cuda::GpuMatND> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
@@ -1677,7 +1703,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                                 (!m.u || m.u->data == outOrigData[i].first),
                                 (!m.u || m.u->size == outOrigData[i].second));
                 } else {
-                    rehomeAllocator(buf, tensorAllocator());
+                    rehomeAllocator(buf, Mat::getDefaultAllocator());
                     buf.fit(m.shape(), m.type());
                     m.copyTo(buf);
                 }
@@ -1685,7 +1711,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 UMat& cur = __tensors__.at(out.idx);
                 if (cur.u != m.u) {
                     UMat freshT;
-                    rehomeAllocator(freshT, tensorAllocator());
+                    rehomeAllocator(freshT, Mat::getDefaultAllocator());
                     m.copyTo(freshT);
                     cur = freshT;
                 }
