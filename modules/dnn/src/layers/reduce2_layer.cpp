@@ -104,7 +104,7 @@ public:
         CV_Assert(!inps.empty());
         outs.resize(1);
         const MatShape& inp0 = inps[0];
-        if (inp0.empty()) {
+        if (inp0.dims < 0) {
             outs[0] = MatShape();
             return false;
         }
