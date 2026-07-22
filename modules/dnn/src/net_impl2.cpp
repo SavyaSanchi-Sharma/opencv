@@ -674,6 +674,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
             exec = LayerFactory::createExec(op->type, DNN_BACKEND_OPENCV, op, nullptr);
             if (!exec)
                 exec = op.dynamicCast<Layer>();
+            exec->preferableTarget=DNN_TARGET_CPU;
             backend = DNN_BACKEND_OPENCV;
         }
         CV_Assert(exec);
@@ -1366,7 +1367,7 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
                                          typeToString(adata.type).c_str()));
         }
 #ifdef HAVE_CUDA
-        if (preferableTarget == DNN_TARGET_CUDA_FP16 && adata_type == CV_32F)
+        if (graph->opBackend(0) == DNN_BACKEND_CUDA && preferableTarget == DNN_TARGET_CUDA_FP16 && adata_type == CV_32F)
             adata_type = CV_16F;
 #endif
 
@@ -1434,18 +1435,29 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
             return;
     }
 
-    std::vector<cuda::GpuMatND> inpG(inputs.size()), outG(outputs.size());
+    MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
+    for (size_t i = 0; i < inputs.size(); i++) {
+        UMat& t = netimpl->argTensor(inputs[i]);
+        if (t.u && t.u->currAllocator != cudaAlloc) {
+            UMat cudaT;
+            cudaT.allocator = cudaAlloc;
+            t.getMat(ACCESS_READ).copyTo(cudaT);
+            t = cudaT;
+        }
+    }
+
+    std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
         Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(inputs[i], netimpl->argTensor(inputs[i]))
                                         .dynamicCast<CUDABackendWrapper>();
         cw->copyToDevice();
-        inpG[i] = cw->getDeviceMatND();
+        inpG[i] = cw->getDeviceUMat();
     }
     for (size_t i = 0; i < outputs.size(); i++) {
         Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(outputs[i], netimpl->argTensor(outputs[i]))
                                         .dynamicCast<CUDABackendWrapper>();
         cw->setDeviceDirty();
-        outG[i] = cw->getDeviceMatND();
+        outG[i] = cw->getDeviceUMat();
     }
     exec->forwardCUDA(inpG, outG, &netimpl->cudaInfo->workspace);
 }
