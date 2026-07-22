@@ -75,14 +75,14 @@ struct ConstArgs
                 if (conv) {
                     // convolution with constant weights and bias
                     conv->setWeights(netimpl->__tensors__[inputs[1]],
-                                     ninputs > 2 ? netimpl->__tensors__[inputs[2]] : UMat(),
+                                     ninputs > 2 ? netimpl->__tensors__[inputs[2]] : Mat(),
                                      netimpl->defaultC0, netimpl->accuracy);
                     conv->inputs.resize(1);
                     unuse_tail = true;
                 } else if (deconv) {
                     // deconvolution with constant weights and bias
                     deconv->setWeights(netimpl->__tensors__[inputs[1]],
-                                       ninputs > 2 ? netimpl->__tensors__[inputs[2]] : UMat(),
+                                       ninputs > 2 ? netimpl->__tensors__[inputs[2]] : Mat(),
                                        netimpl->defaultC0, netimpl->accuracy);
                     deconv->inputs.resize(1);
                     unuse_tail = true;
