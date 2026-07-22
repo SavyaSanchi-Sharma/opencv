@@ -7,6 +7,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/batch_norm.hpp"
+#endif
 
 namespace cv {
 namespace dnn {
@@ -355,8 +359,36 @@ public:
 
     bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        return backendId == DNN_BACKEND_OPENCV
+#ifdef HAVE_CUDA
+               || backendId == DNN_BACKEND_CUDA
+#endif
+               ;
     }
+
+#ifdef HAVE_CUDA
+    // Channel-wise scale+shift on CUDA; reused by the new graph engine via CUDALegacyExec.
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        Mat scale_, bias_;
+        if (inputs.size() == 1) {
+            getScaleBias(scale_, bias_);  // already frozen by graph_const_args
+        } else {
+            CV_Assert(inputs.size() == 5);
+            auto netimpl_ = getNetImpl(this);
+            Mat sc = netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ);
+            Mat bs = netimpl_->argTensor(inputs[2]).getMat(ACCESS_READ);
+            Mat mn = netimpl_->argTensor(inputs[3]).getMat(ACCESS_READ);
+            Mat vr = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
+            BatchNorm2Layer::getScaleBias(sc, bs, mn, vr, epsilon, scale_, bias_);
+        }
+        return make_cuda_node<cuda4dnn::BatchNormOp>(
+            preferableTarget, std::move(context->stream), scale_, bias_);
+    }
+#endif
 
     MatShape getOutShape(const MatShape& inpShape) const
     {
@@ -466,10 +498,10 @@ public:
             !netimpl_->isConstArg(inputs[3]) ||
             !netimpl_->isConstArg(inputs[4]))
             return false;
-        Mat scale_ = netimpl_->argTensor(inputs[1]);
-        Mat bias_ = netimpl_->argTensor(inputs[2]);
-        Mat mean_ = netimpl_->argTensor(inputs[3]);
-        Mat var_ = netimpl_->argTensor(inputs[4]);
+        Mat scale_ = netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ);
+        Mat bias_ = netimpl_->argTensor(inputs[2]).getMat(ACCESS_READ);
+        Mat mean_ = netimpl_->argTensor(inputs[3]).getMat(ACCESS_READ);
+        Mat var_ = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
         BatchNorm2Layer::getScaleBias(scale_, bias_, mean_, var_, epsilon, scale, bias);
         inputs.resize(1);
         return true;
