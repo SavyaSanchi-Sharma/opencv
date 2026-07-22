@@ -627,6 +627,9 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
     g->execBackend_.assign(nops, DNN_BACKEND_OPENCV);
 
 #ifdef HAVE_CUDA
+    // Whole-graph CUDA gate: run on CUDA only if *every* op has a CUDA executor; if any op is
+    // unsupported (or the graph has control-flow subgraphs) run the entire graph on CPU. This
+    // avoids partial CPU<->CUDA execution and its host/device coherence hazards for now.
     std::vector<Ptr<Layer> > cudaExecs;
     bool graphOnCuda = false;
     if (useCUDA && cudaInfo) {
@@ -1508,7 +1511,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             setGraphInput(graph, i, m);
         }
     }
-
     for (size_t opidx = 0; opidx < nops; opidx++) {
         const Ptr<LayerInfo>& op = prog.at(opidx);
         if (!op) // in theory we shouldn't have any 'nops' at this stage, but just in case we skip them.
