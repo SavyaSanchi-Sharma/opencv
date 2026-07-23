@@ -11,6 +11,7 @@
 #include <cudnn.h>
 #elif defined(HAVE_CUDNNJIT)
 #include <cudnn_graph.h>
+#include <cudnn_ops.h>
 #endif
 
 #include <cstddef>

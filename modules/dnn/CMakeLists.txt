@@ -51,18 +51,18 @@ endif()
 ocv_option(OPENCV_DNN_CUDA "Build with CUDA support"
     HAVE_CUDA
     AND HAVE_CUBLAS
-    AND HAVE_CUDNN
+    AND (HAVE_CUDNN OR HAVE_CUDNNJIT)
 )
 
 if(OPENCV_DNN_CUDA)
-  if(HAVE_CUDA AND HAVE_CUBLAS AND HAVE_CUDNN)
+  if(HAVE_CUDA AND HAVE_CUBLAS AND (HAVE_CUDNN OR HAVE_CUDNNJIT))
     ocv_target_compile_definitions(${the_module} PRIVATE "CV_CUDA4DNN=1")
   else()
     if(NOT HAVE_CUDA)
       message(SEND_ERROR "DNN: CUDA backend requires CUDA Toolkit. Please resolve dependency or disable OPENCV_DNN_CUDA=OFF")
     elseif(NOT HAVE_CUBLAS)
       message(SEND_ERROR "DNN: CUDA backend requires cuBLAS. Please resolve dependency or disable OPENCV_DNN_CUDA=OFF")
-    elseif(NOT HAVE_CUDNN)
+    elseif(NOT HAVE_CUDNN AND NOT HAVE_CUDNNJIT)
       message(SEND_ERROR "DNN: CUDA backend requires cuDNN. Please resolve dependency or disable OPENCV_DNN_CUDA=OFF")
     endif()
   endif()
@@ -461,7 +461,7 @@ else()
   set(sources_options EXCLUDE_OPENCL)
 endif()
 
-if(OPENCV_DNN_CUDA AND HAVE_CUDA AND HAVE_CUBLAS AND HAVE_CUDNN)
+if(OPENCV_DNN_CUDA AND HAVE_CUDA AND HAVE_CUBLAS AND (HAVE_CUDNN OR HAVE_CUDNNJIT))
   list(APPEND include_dirs ${CUDA_TOOLKIT_INCLUDE} ${CUDNN_INCLUDE_DIRS})
   if(HAVE_CUDNNJIT)
     list(APPEND include_dirs ${CUDNNJIT_INCLUDE_DIRS})
