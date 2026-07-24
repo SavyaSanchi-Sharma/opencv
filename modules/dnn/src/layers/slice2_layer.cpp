@@ -5,7 +5,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
-//#include "../op_cuda.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/slice.hpp"
+#endif
 //#include "../op_inf_engine.hpp"
 //#include "../ie_ngraph.hpp"
 //#include "../op_webnn.hpp"
@@ -58,8 +61,56 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+        #ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA){
+            if (dynamicOutputShapes())
+              return false;               // starts/ends/steps must be resolvable once, at init
+            if (inputs.size() <= 4)
+                return true;                // no steps input -> implicit step=1 everywhere
+            Net::Impl* netimpl_ = getNetImpl(this);
+            Mat stepsTensor = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
+            std::vector<int> steps_;
+            tensorToIntVec(stepsTensor, steps_);
+            for (int s : steps_) if (s != 1) return false;
+            return true;
+        }
+        #endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+    #ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,InputArrayOfArrays inputs_,InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> ins;
+        inputs_.getUMatVector(ins);
+        MatShape inpShape = cv::dnn::shape(ins[0]);
+
+        std::vector<int> tempStarts, tempEnds, tempAxes;
+        const std::vector<int> *starts_ = &starts, *ends_ = &ends, *axes_ = &axes;
+        if (inputs.size() > 1) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            tensorToIntVec(netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ), tempStarts); starts_ = &tempStarts;
+            tensorToIntVec(netimpl_->argTensor(inputs[2]).getMat(ACCESS_READ), tempEnds);   ends_ = &tempEnds;
+            if (inputs.size() > 3) {
+                tensorToIntVec(netimpl_->argTensor(inputs[3]).getMat(ACCESS_READ), tempAxes);
+                axes_ = &tempAxes;
+            }
+        }
+        int allStarts[MatShape::MAX_DIMS], allEnds[MatShape::MAX_DIMS], allSteps[MatShape::MAX_DIMS];
+        getOutShape(inpShape, *starts_, *ends_, *axes_, {}, allStarts, allEnds, allSteps);
+
+        std::vector<std::size_t> offsets_i;
+        for (int i = 0; i < inpShape.dims; ++i)
+            offsets_i.push_back((std::size_t)allStarts[i]);
+        std::vector<std::vector<std::size_t>> offsets{ std::move(offsets_i) };  // Slice2 always has exactly 1 output
+
+        if (ins[0].type() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), std::move(offsets));
+        return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, ins[0].type(), std::move(context->stream),
+        std::move(offsets));
+
+    }
+    #endif
 
     MatShape getOutShape(const MatShape& inpShape,
                          const std::vector<int>& starts_,

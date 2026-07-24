@@ -461,6 +461,11 @@ ArgKind Net::Impl::argKind(Arg arg) const
     return argData(arg).kind;
 }
 
+int Net::Impl::argType(Arg arg) const
+{
+    return argData(arg).type;
+}
+
 UMat& Net::Impl::argTensor(Arg arg) const
 {
     const ArgData& adata = argData(arg);
@@ -641,7 +646,11 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
                 continue;
             if (op->subgraphs()) { graphOnCuda = false; break; }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
-            if (!e) { graphOnCuda = false; break; }
+            if (!e) {
+                CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has NO CUDA exec -> whole graph on CPU",
+                                             op->name.c_str(), op->type.c_str()));
+                graphOnCuda = false; break;
+            }
             cudaExecs[i] = e;
         }
         if (!graphOnCuda) {

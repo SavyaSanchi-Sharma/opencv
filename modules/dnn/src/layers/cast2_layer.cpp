@@ -7,6 +7,10 @@
 #include "../ie_ngraph.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/cast.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -159,9 +163,34 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // Only int64 -> fp32 is implemented (the pattern ONNX ArgMax->Cast graphs
+            // need); the input's type is known statically once shape/type inference
+            // has run, so we can gate this precisely instead of discovering an
+            // unsupported pair inside initCUDA (which has no graceful fallback).
+            Net::Impl* netimpl_ = getNetImpl(this);
+            int inType = (netimpl_ && inputs.size() == 1) ? netimpl_->argType(inputs[0]) : -1;
+            CV_LOG_INFO(NULL, cv::format("DNN/Cast2 supportBackend: '%s' hasToParam=%d toCvDepth_=%d inputs.size()=%zu inType=%d (CV_64S=%d)",
+                                         name.c_str(), (int)hasToParam, toCvDepth_, inputs.size(), inType, CV_64S));
+            if (!hasToParam || toCvDepth_ != CV_32F || inputs.size() != 1)
+                return false;
+            return netimpl_ && inType == CV_64S;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return Ptr<BackendNode>(new cuda4dnn::CastInt64ToFp32Op(std::move(context->stream)));
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                 const int requiredOutputs,
