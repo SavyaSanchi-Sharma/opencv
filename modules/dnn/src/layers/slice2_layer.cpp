@@ -71,7 +71,7 @@ public:
             Mat stepsTensor = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
             std::vector<int> steps_;
             tensorToIntVec(stepsTensor, steps_);
-            for (int s : steps_) if (s != 1) return false;
+            for (int s : steps_) if (s <= 0) return false;   // negative strides not yet supported by the CUDA kernel
             return true;
         }
         #endif
@@ -85,8 +85,8 @@ public:
         inputs_.getUMatVector(ins);
         MatShape inpShape = cv::dnn::shape(ins[0]);
 
-        std::vector<int> tempStarts, tempEnds, tempAxes;
-        const std::vector<int> *starts_ = &starts, *ends_ = &ends, *axes_ = &axes;
+        std::vector<int> tempStarts, tempEnds, tempAxes, tempSteps;
+        const std::vector<int> *starts_ = &starts, *ends_ = &ends, *axes_ = &axes, *steps_ = &tempSteps;
         if (inputs.size() > 1) {
             Net::Impl* netimpl_ = getNetImpl(this);
             tensorToIntVec(netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ), tempStarts); starts_ = &tempStarts;
@@ -95,19 +95,26 @@ public:
                 tensorToIntVec(netimpl_->argTensor(inputs[3]).getMat(ACCESS_READ), tempAxes);
                 axes_ = &tempAxes;
             }
+            if (inputs.size() > 4) {
+                tensorToIntVec(netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ), tempSteps);
+            }
         }
         int allStarts[MatShape::MAX_DIMS], allEnds[MatShape::MAX_DIMS], allSteps[MatShape::MAX_DIMS];
-        getOutShape(inpShape, *starts_, *ends_, *axes_, {}, allStarts, allEnds, allSteps);
+        getOutShape(inpShape, *starts_, *ends_, *axes_, *steps_, allStarts, allEnds, allSteps);
 
         std::vector<std::size_t> offsets_i;
-        for (int i = 0; i < inpShape.dims; ++i)
+        std::vector<std::size_t> steps_i;
+        for (int i = 0; i < inpShape.dims; ++i) {
             offsets_i.push_back((std::size_t)allStarts[i]);
+            steps_i.push_back((std::size_t)allSteps[i]);
+        }
         std::vector<std::vector<std::size_t>> offsets{ std::move(offsets_i) };  // Slice2 always has exactly 1 output
+        std::vector<std::vector<std::size_t>> steps{ std::move(steps_i) };
 
         if (ins[0].type() == CV_Bool)
-            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), std::move(offsets));
+            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), std::move(offsets), std::move(steps));
         return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, ins[0].type(), std::move(context->stream),
-        std::move(offsets));
+        std::move(offsets), std::move(steps));
 
     }
     #endif

@@ -27,11 +27,23 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             for (auto i : grid_stride_range(n))
                 output[i] = static_cast<float>(input[i]);
         }
+
+        __global__ void cast_fp32_to_int64(const float* input, std::int64_t* output, std::size_t n) {
+            for (auto i : grid_stride_range(n))
+                output[i] = static_cast<std::int64_t>(lrintf(input[i]));
+        }
     }
 
     void cast_int64_to_fp32(const Stream& stream, Span<float> output, View<std::int64_t> input) {
         CV_Assert(output.size() == input.size());
         auto kernel = raw::cast_int64_to_fp32;
+        auto policy = make_policy(kernel, output.size(), 0, stream);
+        launch_kernel(kernel, policy, input.data().get(), output.data().get(), output.size());
+    }
+
+    void cast_fp32_to_int64(const Stream& stream, Span<std::int64_t> output, View<float> input) {
+        CV_Assert(output.size() == input.size());
+        auto kernel = raw::cast_fp32_to_int64;
         auto policy = make_policy(kernel, output.size(), 0, stream);
         launch_kernel(kernel, policy, input.data().get(), output.data().get(), output.size());
     }

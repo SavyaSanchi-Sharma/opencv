@@ -220,6 +220,26 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            csl::WorkspaceAllocator allocator(workspace);
+            convoluter.transpose_convolve(output, input, filtersTensor, allocator.get_instance());
+            if (!biasTensor.empty())
+            {
+                std::size_t inner_size = total(shape(outputs[0]), 2, -1);
+                kernels::biasN<T>(stream, output, output, inner_size, biasTensor);
+            }
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:

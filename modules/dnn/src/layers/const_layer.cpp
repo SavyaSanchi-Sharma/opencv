@@ -176,6 +176,22 @@ public:
         else
             return make_cuda_node_with_type<cuda4dnn::ConstOp>(preferableTarget, blob.type(), std::move(context->stream), blob);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        CV_Assert(blobs.size() == 1);
+        Mat blob = blobs[0];
+        if (blob.type() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::ConstOp>(std::move(context->stream), blob);
+        else
+            return make_cuda_node_with_type<cuda4dnn::ConstOp>(preferableTarget, blob.type(), std::move(context->stream), blob);
+    }
 #endif
 };
 

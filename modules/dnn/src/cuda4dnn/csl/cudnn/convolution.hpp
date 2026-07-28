@@ -273,7 +273,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             CUDA4DNN_CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithmMaxCount(handle.get(), &requestedAlgoCount));
             std::vector<cudnnConvolutionFwdAlgoPerf_t> results(requestedAlgoCount);
             CUDA4DNN_CHECK_CUDNN(
-                cudnnGetConvolutionForwardAlgorithm_v7(
+                cudnnFindConvolutionForwardAlgorithm(
                     handle.get(),
                     inputDesc.get(), filterDesc.get(), convDesc.get(), outputDesc.get(),
                     requestedAlgoCount,

@@ -7,6 +7,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/quantize_dequantize.hpp"
+#endif
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -341,8 +345,35 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // Only block_size == 0 (per-tensor/per-axis), int8/uint8 -> fp32 is
+            // implemented; initCUDA has no graceful fallback so gate precisely here.
+            if (block_size != 0 || getOutType() != CV_32F)
+                return false;
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || inputs.size() < 2)
+                return false;
+            int inType = netimpl_->argType(inputs[0]);
+            int scType = netimpl_->argType(inputs[1]);
+            return (inType == CV_8U || inType == CV_8S) && scType == CV_32F;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        int inType = inputs_arr.getUMat(0).depth();
+        if (inType == CV_8S)
+            return Ptr<BackendNode>(new cuda4dnn::DequantizeLinearOp<int8_t>(std::move(context->stream), axis));
+        return Ptr<BackendNode>(new cuda4dnn::DequantizeLinearOp<uint8_t>(std::move(context->stream), axis));
+    }
+#endif
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,

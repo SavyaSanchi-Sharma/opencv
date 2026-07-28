@@ -1089,6 +1089,16 @@ public:
         return (outputs[0][2] == inputs[0][2]) && (outputs[0][3] == inputs[0][3]);
     }
 
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        std::vector<MatShape> inpShapes(inputs.size());
+        for (size_t i = 0; i < inputs.size(); i++)
+            inpShapes[i] = inputs[i].shape();
+        std::vector<MatShape> internals;
+        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
+    }
+
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
         if (backendId == DNN_BACKEND_CUDA)

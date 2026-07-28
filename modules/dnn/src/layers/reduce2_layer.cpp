@@ -159,6 +159,52 @@ public:
         return false;
     }
 
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs_, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_Assert(requiredOutputs == 1);
+        CV_Assert(!inputs_.empty());
+        MatShape inp0 = inputs_[0].shape();
+
+        std::vector<int> axes_;
+        if (!this->axes.empty()) {
+            axes_ = this->axes;
+        } else if (inputs_.size() >= 2) {
+            Mat axesTensor = inputs_[1].getMat(ACCESS_READ);
+            tensorToIntVec(axesTensor, axes_);
+        }
+
+        MatShape shape_output;
+        if (axes_.empty()) {
+            if (noop_with_empty_axes) {
+                shape_output = inp0;
+            } else if (keepdims) {
+                shape_output = inp0;
+                std::fill(shape_output.begin(), shape_output.end(), 1);
+            } else {
+                shape_output = MatShape::scalar();
+            }
+        } else {
+            std::vector<int> norm_axes = axes_;
+            for (size_t i = 0; i < norm_axes.size(); ++i)
+                norm_axes[i] = normalize_axis(norm_axes[i], inp0);
+
+            auto shape_output_ = inp0;
+            for (int axis : norm_axes) shape_output_[axis] = -1;
+            for (size_t i = 0; i < shape_output_.size(); ++i) {
+                if (shape_output_[i] == -1) {
+                    if (keepdims) shape_output.push_back(1);
+                } else {
+                    shape_output.push_back(shape_output_[i]);
+                }
+            }
+            if (shape_output.empty()) shape_output = MatShape::scalar();
+        }
+
+        outputs.resize(1);
+        outputs[0] = shape_output;
+    }
+
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA) {

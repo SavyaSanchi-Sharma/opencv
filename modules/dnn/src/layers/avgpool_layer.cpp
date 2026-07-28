@@ -7,6 +7,10 @@
 #include "../net_impl.hpp"
 #include "conv2_common.hpp"
 #include "opencv2/core/hal/intrin.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/average_pooling.hpp"
+#endif
 
 namespace cv
 {
@@ -444,6 +448,50 @@ public:
         ceil_mode = params.get<bool>("ceil_mode", false);
         count_include_pad = params.get<bool>("count_include_pad", false);
     }
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return kernel_shape.size() >= 1 && kernel_shape.size() <= 3;
+#endif
+        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
+    }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+
+        int nsd = (int)kernel_shape.size();
+        std::vector<int> padBegin(nsd), padEnd(nsd);
+        for (int i = 0; i < nsd; i++)
+            getPadding(pads, i, nsd, auto_pad, kernel_shape[i], padBegin[i], padEnd[i]);
+
+        cuda4dnn::AveragePoolingConfiguration apconfig;
+        for (int i = 0; i < nsd; i++) {
+            apconfig.kernel_shape.push_back(kernel_shape[i]);
+            apconfig.strides.push_back(strides.empty() ? 1 : strides[i]);
+            apconfig.dilations.push_back(dilations.empty() ? 1 : dilations[i]);
+        }
+        apconfig.pads.assign(padBegin.begin(), padBegin.end());
+        apconfig.pads.insert(apconfig.pads.end(), padEnd.begin(), padEnd.end());
+        apconfig.count_include_pad = count_include_pad;
+        apconfig.ceil_mode = ceil_mode;
+
+        MatShape inpShape = inputs_arr.shape(0);
+        MatShape outShape = outputs_arr.shape(0);
+#ifdef HAVE_CUDNNJIT
+        return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream),
+                                                          std::move(context->cudnn_handle), apconfig, inpShape, outShape);
+#else
+        return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream),
+                                                          apconfig, inpShape, outShape);
+#endif
+    }
+#endif
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE
     {

@@ -10,6 +10,7 @@
 #include "../op_cuda.hpp"
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/cast.hpp"
+#include "../cuda4dnn/primitives/reshape.hpp"
 #endif
 
 namespace cv { namespace dnn {
@@ -165,17 +166,17 @@ public:
     {
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA) {
-            // Only int64 -> fp32 is implemented (the pattern ONNX ArgMax->Cast graphs
-            // need); the input's type is known statically once shape/type inference
-            // has run, so we can gate this precisely instead of discovering an
-            // unsupported pair inside initCUDA (which has no graceful fallback).
             Net::Impl* netimpl_ = getNetImpl(this);
             int inType = (netimpl_ && inputs.size() == 1) ? netimpl_->argType(inputs[0]) : -1;
-            CV_LOG_INFO(NULL, cv::format("DNN/Cast2 supportBackend: '%s' hasToParam=%d toCvDepth_=%d inputs.size()=%zu inType=%d (CV_64S=%d)",
-                                         name.c_str(), (int)hasToParam, toCvDepth_, inputs.size(), inType, CV_64S));
-            if (!hasToParam || toCvDepth_ != CV_32F || inputs.size() != 1)
+            if (!hasToParam || inputs.size() != 1 || !netimpl_)
                 return false;
-            return netimpl_ && inType == CV_64S;
+            if (toCvDepth_ == inType)
+                return true;
+            if (toCvDepth_ == CV_32F)
+                return inType == CV_64S;
+            if (toCvDepth_ == CV_64S)
+                return inType == CV_32F;
+            return false;
         }
 #endif
         return backendId == DNN_BACKEND_OPENCV ||
@@ -184,11 +185,16 @@ public:
 
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(void* context_,
-                              InputArrayOfArrays,
+                              InputArrayOfArrays inputs_arr,
                               InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
-        return Ptr<BackendNode>(new cuda4dnn::CastInt64ToFp32Op(std::move(context->stream)));
+        int inDepth = inputs_arr.depth(0);
+        if (toCvDepth_ == inDepth)
+            return make_cuda_node_with_type<cuda4dnn::ReshapeOp>(preferableTarget, inDepth, std::move(context->stream));
+        if (inDepth == CV_64S)
+            return Ptr<BackendNode>(new cuda4dnn::CastInt64ToFp32Op(std::move(context->stream)));
+        return Ptr<BackendNode>(new cuda4dnn::CastFp32ToInt64Op(std::move(context->stream)));
     }
 #endif
 

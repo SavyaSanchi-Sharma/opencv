@@ -285,7 +285,8 @@ public:
         if (backendId == DNN_BACKEND_CUDA) {
             return op == OPERATION::MAX  || op == OPERATION::MIN  || op == OPERATION::SUM ||
                    op == OPERATION::PROD || op == OPERATION::DIV  || op == OPERATION::ADD ||
-                   op == OPERATION::SUB  || op == OPERATION::MOD || op == OPERATION::FMOD;
+                   op == OPERATION::SUB  || op == OPERATION::MOD || op == OPERATION::FMOD ||
+                   op == OPERATION::POW;
         }
         return backendId == DNN_BACKEND_OPENCV;
     }

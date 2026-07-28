@@ -584,6 +584,62 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
     return graph;
 }
 
+void Net::Impl::inferArgTypes()
+{
+    if (!mainGraph)
+        return;
+
+    std::function<void(const Ptr<Graph>&)> visit = [&](const Ptr<Graph>& graph) {
+        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
+        for (const Ptr<LayerInfo>& op : prog) {
+            if (!op)
+                continue;
+
+            size_t ninputs = op->inputs.size();
+            std::vector<MatType> inpTypes(ninputs);
+            bool allKnown = true;
+            for (size_t i = 0; i < ninputs; i++) {
+                Arg in = op->inputs[i];
+                ArgData& adata = args.at(in.idx);
+                if (adata.type < 0 && adata.kind != DNN_ARG_TEMP) {
+                    const UMat& t = argTensor(in);
+                    if (!t.empty())
+                        adata.type = t.type();
+                }
+                inpTypes[i] = adata.type;
+                if (inpTypes[i] < 0)
+                    allKnown = false;
+            }
+
+            const std::vector<Ptr<Graph> >* subs = op->subgraphs();
+            if (subs) {
+                for (const Ptr<Graph>& sub : *subs)
+                    visit(sub);
+                continue;
+            }
+
+            if (!allKnown)
+                continue;
+
+            size_t noutputs = op->outputs.size();
+            std::vector<MatType> outTypes, tempTypes;
+            try {
+                op->getTypes(inpTypes, (int)noutputs, 0, outTypes, tempTypes);
+            } catch (...) {
+                continue;
+            }
+            for (size_t i = 0; i < noutputs && i < outTypes.size(); i++) {
+                Arg out = op->outputs[i];
+                ArgData& adata = args.at(out.idx);
+                if (adata.type < 0)
+                    adata.type = outTypes[i];
+            }
+        }
+    };
+
+    visit(mainGraph);
+}
+
 void Net::Impl::prepareForInference()
 {
 #ifdef HAVE_ONNXRUNTIME
@@ -618,6 +674,7 @@ void Net::Impl::prepareForInference()
         fuseScaleSoftmax();
         fuseBasic();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
+        inferArgTypes();
         prepared = true;
         finalizeLayers = true;
     }
@@ -1568,6 +1625,25 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         if (!dynamicOutShapes) {
             allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
+        } else if (opBackend == DNN_BACKEND_CUDA) {
+            std::vector<UMat> inpUMats(ninputs);
+            for (i = 0; i < ninputs; i++)
+                inpUMats[i] = argTensor(inputs[i]);
+            std::vector<MatShape> dynOutShapes;
+            layer->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
+            CV_Assert(dynOutShapes.size() == noutputs);
+            outMats.resize(noutputs);
+            for (i = 0; i < noutputs; i++) {
+                Arg out = outputs[i];
+                UMat& out_t = argTensor(out);
+                int outType = args.at(out.idx).type;
+                if (outType < 0)
+                    outType = inpUMats[0].type();
+                rehomeAllocator(out_t, tensorAllocator());
+                out_t.fit(dynOutShapes[i], outType);
+                outMats[i] = out_t.getMat(ACCESS_WRITE);
+            }
+            tempMats = scratchBufs;
         } else {
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {

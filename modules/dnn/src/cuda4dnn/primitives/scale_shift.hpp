@@ -154,6 +154,84 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernels::biasN<T>(stream, output, input, inner_size, bias);
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            /* number of batches in the weights/bias
+             * trainable mode: same for all batches
+             * untrainable mode: could be different for different batch samples
+             */
+            std::size_t parameter_batch_size = 1;
+
+            csl::TensorView<T> weights;
+            if (scaleMode == ScaleShiftConfiguration::OpMode::TRAINABLE)
+            {
+                CV_Assert(!weightsTensor.empty());
+                weights = csl::TensorView<T>(weightsTensor);
+            }
+            else if (scaleMode == ScaleShiftConfiguration::OpMode::UNTRAINABLE)
+            {
+                CV_Assert(inputs.size() == 2);
+                weights = csl::viewOf<T>(inputs[1]);
+
+                parameter_batch_size = weights.get_axis_size(0);
+                CV_Assert(parameter_batch_size == input.get_axis_size(0));
+            }
+
+            csl::TensorView<T> bias;
+            if (shiftMode == ScaleShiftConfiguration::OpMode::TRAINABLE)
+            {
+                CV_Assert(!biasTensor.empty());
+                bias = csl::TensorView<T>(biasTensor);
+            }
+            else if (shiftMode == ScaleShiftConfiguration::OpMode::UNTRAINABLE)
+            {
+                CV_Assert(inputs.size() == 2);
+                bias = csl::viewOf<T>(inputs[1]);
+
+                parameter_batch_size = bias.get_axis_size(0);
+                CV_Assert(parameter_batch_size == input.get_axis_size(0));
+            }
+
+            CV_Assert(!weights.empty() || !bias.empty());
+            if (!weights.empty() && !bias.empty())
+            {
+                CV_CheckEQ(weights.size(), bias.size(), "different broadcasting options for weights and bias is not supported");
+            }
+
+            const auto num_parameters = !weights.empty() ? weights.size() : bias.size();
+            const auto mid_size = num_parameters / parameter_batch_size;
+
+            /* the scale shift operation might require broadcasting */
+            const int end_axis = [&] {
+                if (num_parameters == 1) {
+                    return static_cast<int>(axis + 1);
+                }
+                for (int endAxis = axis + 1; endAxis <= input.rank(); endAxis++) {
+                    if (input.size_range(axis, endAxis) == mid_size)
+                        return endAxis;
+                }
+                CV_Assert(0 /* failed to find a broadcast config */);
+            }();
+
+            std::size_t inner_size = input.size_range(end_axis, input.rank());
+
+            if (!weights.empty() && !bias.empty())
+                kernels::scaleN_with_biasN<T>(stream, output, input, inner_size, weights, bias);
+            else if (!weights.empty())
+                kernels::scaleN<T>(stream, output, input, inner_size, weights);
+            else
+                kernels::biasN<T>(stream, output, input, inner_size, bias);
+        }
+
     private:
         csl::Stream stream;
         csl::Tensor<T> weightsTensor, biasTensor;

@@ -433,6 +433,7 @@ struct Net::Impl : public detail::NetImplBase
     bool isConstArg(Arg arg) const;
     UMat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
+    void inferArgTypes();
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
 

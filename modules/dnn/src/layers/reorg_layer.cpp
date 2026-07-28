@@ -235,6 +235,16 @@ public:
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         return make_cuda_node_with_type<cuda4dnn::ReorgOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), reorgStride);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void* context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        return make_cuda_node_with_type<cuda4dnn::ReorgOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), reorgStride);
+    }
 #endif
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,

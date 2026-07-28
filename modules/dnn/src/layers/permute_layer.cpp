@@ -527,6 +527,17 @@ public:
         else
             return make_cuda_node_with_type<cuda4dnn::PermuteOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), _order);
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::PermuteOp>(std::move(context->stream), _order);
+        else
+            return make_cuda_node_with_type<cuda4dnn::PermuteOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), _order);
+    }
 #endif
 
 

@@ -438,7 +438,10 @@ public:
             apconfig.pads.insert(apconfig.pads.end(), std::begin(pads_end), std::end(pads_end));
             apconfig.dilations.assign(nspatial, 1);
             apconfig.count_include_pad = avePoolPaddedArea;
-            return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream), apconfig);
+            MatShape output_shape = cv::dnn::shape(outputs[0]);
+            return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream),
+                                                              std::move(context->cudnn_handle), apconfig,
+                                                              input_shape, output_shape);
         }
 #endif
 

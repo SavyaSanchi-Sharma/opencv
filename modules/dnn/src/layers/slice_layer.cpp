@@ -829,6 +829,26 @@ public:
         else
             return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), std::move(offsets));
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        std::vector<std::vector<std::size_t>> offsets;
+        for (const auto& ranges : finalSliceRanges)
+        {
+            std::vector<std::size_t> offsets_i;
+            for (const auto& range : ranges)
+                offsets_i.push_back(range.start);
+            offsets.push_back(std::move(offsets_i));
+        }
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), std::move(offsets));
+        else
+            return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), std::move(offsets));
+    }
 #endif
 
 private:

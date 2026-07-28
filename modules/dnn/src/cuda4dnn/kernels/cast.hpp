@@ -12,10 +12,11 @@
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
-// Only int64 -> fp32 is implemented -- the one conversion this engine's ONNX
-// graphs actually need so far (a Cast node following ArgMax). Add more pairs
-// as they're actually needed rather than building a general conversion matrix.
+// Only the (source, target) pairs this engine's ONNX graphs actually need are
+// implemented -- add more pairs as they're actually needed rather than
+// building a general conversion matrix.
 void cast_int64_to_fp32(const csl::Stream& stream, csl::Span<float> output, csl::View<std::int64_t> input);
+void cast_fp32_to_int64(const csl::Stream& stream, csl::Span<std::int64_t> output, csl::View<float> input);
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 

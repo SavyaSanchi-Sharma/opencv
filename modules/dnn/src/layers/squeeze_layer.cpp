@@ -132,6 +132,16 @@ public:
         return true;
     }
 
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        std::vector<MatShape> inpShapes(inputs.size());
+        for (size_t i = 0; i < inputs.size(); i++)
+            inpShapes[i] = inputs[i].shape();
+        std::vector<MatShape> internals;
+        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
+    }
+
     void getTypes(const std::vector<MatType>& inputs,
         const int requiredOutputs,
         const int requiredInternals,

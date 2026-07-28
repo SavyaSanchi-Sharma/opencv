@@ -679,8 +679,6 @@ public:
     {
         if (origWeights.empty() || wshape0.dims != 4)  // [Cout, Cin/group, kh, kw] (2D conv)
             return false;
-        if (auto_pad != AUTO_PAD_NONE && auto_pad != AUTO_PAD_VALID)
-            return false;
         return true;
     }
 
@@ -735,8 +733,10 @@ public:
         } else {
             config.padMode = ConvolutionConfiguration::PaddingMode::MANUAL;
             for (int i = 0; i < nspatial; i++) {
-                config.pads_begin.push_back(pads.empty() ? 0 : (size_t)pads[i]);
-                config.pads_end.push_back(pads.empty() ? 0 : (size_t)pads[i + nspatial]);
+                int pad0, pad1;
+                getPadding(pads, i, nspatial, auto_pad, (int)wshape0[2 + i], pad0, pad1);
+                config.pads_begin.push_back((size_t)pad0);
+                config.pads_end.push_back((size_t)pad1);
             }
         }
         config.input_shape.assign(inpShape.begin(), inpShape.end());
