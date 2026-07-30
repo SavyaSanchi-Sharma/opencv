@@ -202,12 +202,14 @@ protected:
     void parseClip                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConcat               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseLoop                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseScan                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseIf                   (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConstant             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConstantOfShape      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConv                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConvTranspose        (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseCumSum               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseCumProd              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDepthSpaceOps        (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDetectionOutput      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parsePriorBox             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -285,6 +287,7 @@ protected:
     // URL: https://github.com/microsoft/onnxruntime/blob/master/docs/ContribOperators.md
     void parseAttention            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseAttentionOnnxAi      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseCausalConvWithState  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSDPA                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDequantizeLinear     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseQuantizeLinear       (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -1719,6 +1722,46 @@ void ONNXImporter2::parseLoop(LayerParams& layerParams,
     *loopLayer->subgraphs() = subgraphs;
 }
 
+void ONNXImporter2::parseScan(LayerParams& layerParams,
+                              const opencv_onnx::NodeProto& node_proto)
+{
+    CV_Assert(layerParams.has("num_scan_inputs"));
+    layerParams.type = "Scan";
+
+    std::vector<Arg> saved_inputs = node_inputs, saved_outputs = node_outputs;
+    std::vector<Ptr<Graph> > subgraphs(1);
+    for (int i = 0; i < node_proto.attribute_size(); ++i)
+    {
+        const auto& attr = node_proto.attribute(i);
+        if (attr.name() == "body")
+        {
+            opencv_onnx::GraphProto body = attr.g();
+            subgraphs[0] = parseGraph(&body, false);
+        }
+    }
+    CV_Assert(!subgraphs[0].empty());
+    node_inputs = saved_inputs;
+    node_outputs = saved_outputs;
+
+    const int num_scan_inputs = layerParams.get<int>("num_scan_inputs");
+    const int n_state = (int)subgraphs[0]->inputs().size() - num_scan_inputs;
+    const int n_scan_out = (int)subgraphs[0]->outputs().size() - n_state;
+    if (n_state >= 0 && n_scan_out > 0)
+    {
+        std::vector<int> scan_output_ranks(n_scan_out);
+        for (int k = 0; k < n_scan_out; ++k)
+        {
+            const Arg& a = subgraphs[0]->outputs()[n_state + k];
+            scan_output_ranks[k] = netimpl->args.at(a.idx).shape.dims;
+        }
+        layerParams.set("scan_output_ranks", DictValue::arrayInt(scan_output_ranks.data(), n_scan_out));
+    }
+
+    addLayer(layerParams, node_proto);
+    Ptr<LayerInfo>& scanLayer = curr_prog.back();
+    *scanLayer->subgraphs() = subgraphs;
+}
+
 void ONNXImporter2::parseIf(LayerParams& layerParams,
                             const opencv_onnx::NodeProto& node_proto)
 {
@@ -2113,6 +2156,22 @@ void ONNXImporter2::parseCumSum(LayerParams& layerParams, const opencv_onnx::Nod
         CV_Assert(axisTensor.total() == 1);
         int axis = axisTensor.at<int>(0);
         layerParams.set("axis", axis);
+        ninputs = 1;
+    }
+    addLayer(layerParams, node_proto, ninputs);
+}
+
+void ONNXImporter2::parseCumProd(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+{
+    int ninputs = node_proto.input_size();
+    CV_Assert(ninputs == 2);
+    layerParams.type = "CumProd";
+    if (net.isConstArg(node_inputs[1]))
+    {
+        Mat axisTensor;
+        net.argTensor(node_inputs[1]).convertTo(axisTensor, CV_32S);
+        CV_Assert(axisTensor.total() == 1);
+        layerParams.set("axis", axisTensor.at<int>(0));
         ninputs = 1;
     }
     addLayer(layerParams, node_proto, ninputs);
@@ -2630,6 +2689,11 @@ void ONNXImporter2::parseSDPA(LayerParams& params, const opencv_onnx::NodeProto&
     addLayer(params, node_proto, 3);
 }
 
+void ONNXImporter2::parseCausalConvWithState(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
+    params.type = "CausalConvWithState";
+    addLayer(params, node_proto);
+}
+
 void ONNXImporter2::parseRoiAlign(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
     layerParams.type = "RoiAlign";
@@ -2693,6 +2757,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     dispatch["GatherElements"] = &ONNXImporter2::parseGatherElements;
     dispatch["Concat"] = &ONNXImporter2::parseConcat;
     dispatch["Loop"] = &ONNXImporter2::parseLoop;
+    dispatch["Scan"] = &ONNXImporter2::parseScan;
     dispatch["If"] = &ONNXImporter2::parseIf;
     dispatch["Resize"] = &ONNXImporter2::parseResize2;
     dispatch["Size"] = &ONNXImporter2::parseSize;
@@ -2722,6 +2787,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     dispatch["DetectionOutput"] = &ONNXImporter2::parseDetectionOutput;
     dispatch["PriorBox"] = &ONNXImporter2::parsePriorBox;
     dispatch["CumSum"] = &ONNXImporter2::parseCumSum;
+    dispatch["CumProd"] = &ONNXImporter2::parseCumProd;
     dispatch["SpaceToDepth"] = dispatch["DepthToSpace"] = &ONNXImporter2::parseDepthSpaceOps;
     dispatch["ScatterElements"] = dispatch["Scatter"] = dispatch["ScatterND"] = &ONNXImporter2::parseScatter;
     dispatch["Tile"] = &ONNXImporter2::parseTile;
@@ -2768,6 +2834,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     //               Opset domain cannot be modified from onnx_graph_simplifier.cpp so this
     //               operator cannot be parsed if only added in buildDispatchMap_COM_MICROSOFT
     dispatch["Attention"] = &ONNXImporter2::parseAttentionOnnxAi;
+    dispatch["CausalConvWithState"] = &ONNXImporter2::parseCausalConvWithState;
 
     domain_dispatch_map[str_domain_ai_onnx] = dispatch;
 }

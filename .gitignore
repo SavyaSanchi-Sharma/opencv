@@ -25,6 +25,3 @@ build
 node_modules
 CMakeSettings.json
 xcuserdata/
-build_debug/
-build_cudnn_full/
-graphify-out/
