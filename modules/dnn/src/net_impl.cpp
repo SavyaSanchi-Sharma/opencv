@@ -5,6 +5,7 @@
 #include "precomp.hpp"
 
 #include "net_impl.hpp"
+#include "opencv2/core/hal/intrin.hpp"
 
 #ifdef HAVE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
@@ -73,10 +74,14 @@ Net::Impl::Impl()
     // onnx_opset = 0;
 
     accuracy = CV_32F;
-    // The block size is a network-wide memory-layout contract, so it must not depend
-    // on the SIMD width of the host: C0 == 8 is the mainstream, well-tested setting.
-    // (Deriving it from vlanes() made the layout hardware-dependent; see the #29493 discussion.)
     defaultC0 = DEFAULT_C0;
+#if CV_SIMD_SCALABLE
+    // RVV: the universal intrinsics use LMUL=2, so the float vector width is
+    // (VLEN/32)*2 (16 at VLEN=256). The blocked-layout kernels fill a full
+    // vector per channel block, so the net-wide block size must match that
+    // width rather than the fixed default of 8 (#28852).
+    defaultC0 = std::max((int)DEFAULT_C0, VTraits<v_float32>::vlanes());
+#endif
     enableFP16 = haveFP16 = false;
     // FP16 is not ready yet in the new DNN engine
     // Ticket: https://github.com/opencv/opencv/issues/26196
@@ -137,9 +142,9 @@ void Net::Impl::clear()
     args = std::vector<ArgData>();
     argnames = NamesHash();
 
-    __tensors__ = std::vector<Mat>();
+    __tensors__ = std::vector<UMat>();
     bufidxs = std::vector<int>();
-    buffers = std::vector<Mat>();
+    buffers = std::vector<UMat>();
 
     mainGraph = Ptr<Graph>();
 
@@ -149,7 +154,7 @@ void Net::Impl::clear()
 
     args.push_back(adata);
     argnames.insert(std::make_pair(std::string(""), 0));
-    __tensors__.push_back(Mat());
+    __tensors__.push_back(UMat());
     bufidxs.push_back(-1);
 
     prepared = false;
@@ -2484,21 +2489,6 @@ std::vector<String> Net::Impl::getUnconnectedOutLayersNames() /*const*/
 }
 
 
-// The new graph engine has no FP16 execution path yet: it runs FP32 on CPU regardless
-// of the requested (e.g. OpenCL FP16) target. Map FP16 input types to FP32 so that
-// shape/FLOPS inference through Layer::getTypes() does not reject them.
-static std::vector<MatType> filterFP16InputTypes(const std::vector<MatType>& types)
-{
-    std::vector<MatType> result = types;
-    for (MatType& t : result)
-    {
-        if (t == CV_16F)
-            t = CV_32F;
-    }
-    return result;
-}
-
-
 int64 Net::Impl::getFLOPSGraph(const Ptr<Graph>& graph,
                                const std::vector<MatShape>& shapeCache,
                                const std::vector<MatType>& typeCache) const
@@ -2558,14 +2548,10 @@ int64 Net::Impl::getFLOPS(const std::vector<MatShape>& netInputShapes,
 {
     if (mainGraph) {
         finalize();
-        // The new graph engine executes in FP32 on CPU regardless of the requested
-        // target, so FP16 input types (e.g. coming from an OpenCL FP16 target) would be
-        // rejected by Layer::getTypes(). Normalize them to FP32 for shape/FLOPS inference.
-        std::vector<MatType> inputTypes = filterFP16InputTypes(netInputTypes);
         LayerShapes shapes;
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
-        tryInferShapes(netInputShapes, inputTypes, shapes, shapeCache, typeCache);
+        tryInferShapes(netInputShapes, netInputTypes, shapes, shapeCache, typeCache);
         return getFLOPSGraph(mainGraph, shapeCache, typeCache);
     }
 
@@ -2592,11 +2578,10 @@ int64 Net::Impl::getFLOPS(
 {
     if (mainGraph) {
         finalize();
-        std::vector<MatType> inputTypes = filterFP16InputTypes(netInputTypes);
         LayerShapes shapes;
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
-        tryInferShapes(netInputShapes, inputTypes, shapes, shapeCache, typeCache);
+        tryInferShapes(netInputShapes, netInputTypes, shapes, shapeCache, typeCache);
 
         CV_Assert(0 <= layerId && layerId < (int)totalLayers);
         int localIdx = layerId;

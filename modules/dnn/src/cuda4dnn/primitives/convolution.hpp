@@ -7,10 +7,22 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN))
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/cudnn.hpp"
 #include "../csl/stream.hpp"
 #include "../csl/tensor.hpp"
 #include "../csl/tensor_ops.hpp"
+
+#ifdef HAVE_CUDNNJIT
+#include "../csl/cudnn/graph.hpp"
+#include "../kernels/permute.hpp"
+#include "../kernels/fill_copy.hpp"
+#endif
 
 #include "../kernels/scale_shift.hpp"
 #include "../kernels/activations.hpp"
@@ -272,7 +284,34 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 }
             }
 
+#ifndef HAVE_CUDNNJIT
             convoluter = csl::Convolution<T>(cudnnHandle, params);
+#endif
+
+#ifdef HAVE_CUDNNJIT
+            {
+                const auto& conv_in = params.input_shape;
+                typename csl::cudnn::ConvolutionGraph<T>::params_type jit_params;
+                jit_params.input_shape  = { static_cast<int64_t>(conv_in[0]), static_cast<int64_t>(conv_in[1]), static_cast<int64_t>(conv_in[2]), static_cast<int64_t>(conv_in[3]) };
+                jit_params.output_shape = { static_cast<int64_t>(output_shape[0]), static_cast<int64_t>(output_shape[1]), static_cast<int64_t>(output_shape[2]), static_cast<int64_t>(output_shape[3]) };
+                jit_params.filter_shape = { static_cast<int64_t>(fshape[0]), static_cast<int64_t>(fshape[1]), static_cast<int64_t>(fshape[2]), static_cast<int64_t>(fshape[3]) };
+                jit_params.padding  = { static_cast<int64_t>(params.padding[0]), static_cast<int64_t>(params.padding[1]) };
+                jit_params.stride   = { static_cast<int64_t>(params.stride[0]), static_cast<int64_t>(params.stride[1]) };
+                jit_params.dilation = { static_cast<int64_t>(params.dilation[0]), static_cast<int64_t>(params.dilation[1]) };
+
+                jitConvoluter = csl::cudnn::ConvolutionGraph<T>(cudnnHandle, jit_params);
+
+                jitInputNHWC  = csl::Tensor<T>(conv_in[0], conv_in[2], conv_in[3], conv_in[1]);
+                jitFilterKRSC = csl::Tensor<T>(fshape[0], fshape[2], fshape[3], fshape[1]);
+                jitOutputNHWC = csl::Tensor<T>(output_shape[0], output_shape[2], output_shape[3], output_shape[1]);
+
+                csl::TensorView<T> filter_oihw(filtersTensor.get(), fshape.begin(), fshape.end());
+                if (filter_oihw.size() == 1)
+                    kernels::copy<T>(stream, jitFilterKRSC, filter_oihw);
+                else
+                    kernels::permute<T>(stream, jitFilterKRSC, filter_oihw, {0, 2, 3, 1});
+            }
+#endif
 
             csl::WorkspaceBuilder builder;
             if (!transformed_shape.empty())
@@ -281,13 +320,17 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 auto sz = std::accumulate(std::begin(shape), std::end(shape), 1, std::multiplies<std::size_t>());
                 builder.require<T>(sz);
             }
+#ifdef HAVE_CUDNNJIT
+            builder.require(jitConvoluter.get_workspace_size());
+#else
             builder.require(convoluter.get_workspace_size());
+#endif
             scratch_mem_in_bytes = builder.required_workspace_size();
         }
 
         void forward(
-            const std::vector<cuda::GpuMatND>& inputs,
-            const std::vector<cuda::GpuMatND>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             /* input[0] = conv input, input[1] = bias (from fused eltwise layer) */
@@ -338,7 +381,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (fusion_location == InternalFusionLocation::NATIVE)
             {
+#ifdef HAVE_CUDNNJIT
+                kernels::permute<T>(stream, jitInputNHWC, input, {0, 2, 3, 1});   /* NCHW -> NHWC */
+                jitConvoluter.convolve(cudnnHandle, jitInputNHWC.get(), jitFilterKRSC.get(), jitOutputNHWC.get(), conv_scratchpad);
+                kernels::permute<T>(stream, output, jitOutputNHWC, {0, 3, 1, 2});  /* NHWC -> NCHW */
+#else
                 convoluter.convolve(output, input, filtersTensor, conv_scratchpad);
+#endif
 
                 if (fusion_mode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM ||
                     fusion_mode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM_THEN_ACTIVATION ||
@@ -584,6 +633,11 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
         std::vector<std::size_t> transformed_shape;
         csl::TensorTransform<T> inputTransformer;
+
+#ifdef HAVE_CUDNNJIT
+        csl::cudnn::ConvolutionGraph<T> jitConvoluter;
+        csl::Tensor<T> jitInputNHWC, jitFilterKRSC, jitOutputNHWC;
+#endif
 
         std::size_t scratch_mem_in_bytes;
 

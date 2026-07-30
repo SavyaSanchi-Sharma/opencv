@@ -272,7 +272,7 @@ CV__DNN_INLINE_NS_BEGIN
      * %LayerInfo during Net::finalizeNet().
      *
      * Each operation type registers a `static Ptr<LayerInfo> create(const LayerParams&)` factory
-     * via @ref CV_DNN_REGISTER_OP_CLASS.
+     * via @ref CV_DNN_REGISTER_OP_CLASS_STATIC.
      */
     class CV_EXPORTS_W LayerInfo
     {
@@ -1058,7 +1058,7 @@ CV__DNN_INLINE_NS_BEGIN
         bool haveArg(const std::string& name) const;
 
         bool isConstArg(Arg arg) const;
-        Mat& argTensor(Arg arg) const;
+        Mat argTensor(Arg arg) const;
         int argType(Arg arg) const;
 
         int findDim(const std::string& name, bool insert=false);

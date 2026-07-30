@@ -417,8 +417,7 @@ public:
             }
             else if (!baseIsFloat && expIsFloat)
             {
-                // ONNX Pow output type follows the base (X): integer base -> integer output.
-                out_type = inputs[0];
+                out_type = CV_32F;
             }
             else
             {
@@ -432,10 +431,7 @@ public:
         for (auto input : inputs)
         {
             CV_CheckTypeEQ(inputs[0], input, "All inputs should have equal types");
-            if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-                CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
-            else
-                CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
+            CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
         }
 
         if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL || op == OPERATION::LESS || op == OPERATION::LESS_EQUAL)
@@ -928,6 +924,9 @@ public:
         inputs_arr.getMatVector(inputs);
         outputs_arr.getMatVector(outputs);
 
+        if (outputs[0].total() == 0)
+            return;
+
         if (inputs.size() == 1) {
             inputs[0].copyTo(outputs[0]);
             return;
@@ -1325,8 +1324,8 @@ public:
     ) override
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
-        std::vector<cuda::GpuMatND> inputs;
-        inputs_.getGpuMatNDVector(inputs);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
 
         cuda4dnn::EltwiseOpType op_ = cuda4dnn::EltwiseOpType::SUM;
         switch (op) {
