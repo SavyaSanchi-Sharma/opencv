@@ -67,17 +67,36 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
     };
 
     template <class T>
-    BackendDescriptor makeTensorDescriptor(int64_t uid, const std::array<int64_t, 4>& dim, const std::array<int64_t, 4>& stride) {
+    BackendDescriptor makeTensorDescriptor(int64_t uid, const std::vector<int64_t>& dim, const std::vector<int64_t>& stride) {
         BackendDescriptor desc(CUDNN_BACKEND_TENSOR_DESCRIPTOR);
         cudnnDataType_t dtype = detail::get_data_type<T>();
         int64_t alignment = 16;
+        int64_t rank = static_cast<int64_t>(dim.size());
         desc.set(CUDNN_ATTR_TENSOR_DATA_TYPE,      CUDNN_TYPE_DATA_TYPE, 1, &dtype);
-        desc.set(CUDNN_ATTR_TENSOR_DIMENSIONS,     CUDNN_TYPE_INT64, 4, dim.data());
-        desc.set(CUDNN_ATTR_TENSOR_STRIDES,        CUDNN_TYPE_INT64, 4, stride.data());
+        desc.set(CUDNN_ATTR_TENSOR_DIMENSIONS,     CUDNN_TYPE_INT64, rank, dim.data());
+        desc.set(CUDNN_ATTR_TENSOR_STRIDES,        CUDNN_TYPE_INT64, rank, stride.data());
         desc.set(CUDNN_ATTR_TENSOR_UNIQUE_ID,      CUDNN_TYPE_INT64, 1, &uid);
         desc.set(CUDNN_ATTR_TENSOR_BYTE_ALIGNMENT, CUDNN_TYPE_INT64, 1, &alignment);
         desc.finalize();
         return desc;
+    }
+
+    /** channel-last (NHWC / NDHWC / ...) strides for a tensor whose logical axis order is
+     *  [N, C, spatial...], so the descriptor's dimensions stay in that order while the
+     *  physical layout has C as the fastest-varying axis.
+     */
+    inline std::vector<int64_t> channelLastStrides(const std::vector<int64_t>& shape) {
+        const int64_t rank = static_cast<int64_t>(shape.size());
+        CV_Assert(rank >= 3);
+        std::vector<int64_t> stride(rank);
+        stride[1] = 1;
+        int64_t running = shape[1];
+        for (int64_t k = rank - 1; k >= 2; k--) {
+            stride[k] = running;
+            running *= shape[k];
+        }
+        stride[0] = running;
+        return stride;
     }
 
     /** JIT-compiled forward convolution (NHWC data, KRSC filter) built on the cuDNN graph engine.
@@ -88,10 +107,10 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
     class ConvolutionGraph {
     public:
         struct params_type {
-            std::array<int64_t, 4> input_shape;   /* N, C, H, W */
-            std::array<int64_t, 4> output_shape;  /* N, C, H, W */
-            std::array<int64_t, 4> filter_shape;  /* OC, IC, KH, KW */
-            std::array<int64_t, 2> padding, stride, dilation;
+            std::vector<int64_t> input_shape;   /* N, C, spatial... */
+            std::vector<int64_t> output_shape;  /* N, C, spatial... */
+            std::vector<int64_t> filter_shape;  /* OC, IC, kernel... */
+            std::vector<int64_t> padding, stride, dilation; /* one entry per spatial dim */
         };
 
         ConvolutionGraph() = default;
@@ -105,10 +124,19 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             const auto& o = params.output_shape;
             const auto& f = params.filter_shape;
 
-            /* NHWC strides: {C*H*W, 1, W*C, C} */
-            const std::array<int64_t, 4> xStride = { i[1] * i[2] * i[3], 1, i[3] * i[1], i[1] };
-            const std::array<int64_t, 4> yStride = { o[1] * o[2] * o[3], 1, o[3] * o[1], o[1] };
-            const std::array<int64_t, 4> wStride = { f[1] * f[2] * f[3], 1, f[3] * f[1], f[1] };
+            const int64_t rank = static_cast<int64_t>(i.size());
+            CV_Assert(o.size() == static_cast<std::size_t>(rank));
+            CV_Assert(f.size() == static_cast<std::size_t>(rank));
+
+            const int64_t spatial_dims = rank - 2;
+            CV_Assert(params.padding.size() == static_cast<std::size_t>(spatial_dims));
+            CV_Assert(params.stride.size() == static_cast<std::size_t>(spatial_dims));
+            CV_Assert(params.dilation.size() == static_cast<std::size_t>(spatial_dims));
+
+            /* channel-last strides, e.g. NHWC: {C*H*W, 1, W*C, C} */
+            const std::vector<int64_t> xStride = channelLastStrides(i);
+            const std::vector<int64_t> yStride = channelLastStrides(o);
+            const std::vector<int64_t> wStride = channelLastStrides(f);
 
             xDesc = makeTensorDescriptor<T>('x', i, xStride);
             yDesc = makeTensorDescriptor<T>('y', o, yStride);
@@ -118,14 +146,13 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             {
                 cudnnDataType_t comp = CUDNN_DATA_FLOAT;
                 cudnnConvolutionMode_t mode = CUDNN_CROSS_CORRELATION;
-                int64_t spatial_dims = 2;
                 convDesc.set(CUDNN_ATTR_CONVOLUTION_COMP_TYPE,      CUDNN_TYPE_DATA_TYPE,        1, &comp);
                 convDesc.set(CUDNN_ATTR_CONVOLUTION_CONV_MODE,      CUDNN_TYPE_CONVOLUTION_MODE, 1, &mode);
                 convDesc.set(CUDNN_ATTR_CONVOLUTION_SPATIAL_DIMS,   CUDNN_TYPE_INT64, 1, &spatial_dims);
-                convDesc.set(CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS,   CUDNN_TYPE_INT64, 2, params.padding.data());
-                convDesc.set(CUDNN_ATTR_CONVOLUTION_POST_PADDINGS,  CUDNN_TYPE_INT64, 2, params.padding.data());
-                convDesc.set(CUDNN_ATTR_CONVOLUTION_DILATIONS,      CUDNN_TYPE_INT64, 2, params.dilation.data());
-                convDesc.set(CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, 2, params.stride.data());
+                convDesc.set(CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS,   CUDNN_TYPE_INT64, spatial_dims, params.padding.data());
+                convDesc.set(CUDNN_ATTR_CONVOLUTION_POST_PADDINGS,  CUDNN_TYPE_INT64, spatial_dims, params.padding.data());
+                convDesc.set(CUDNN_ATTR_CONVOLUTION_DILATIONS,      CUDNN_TYPE_INT64, spatial_dims, params.dilation.data());
+                convDesc.set(CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, spatial_dims, params.stride.data());
                 convDesc.finalize();
             }
 
