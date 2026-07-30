@@ -54,12 +54,9 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
         float* out = (float*)out_ + nc0*planesize;
         const float INITVAL = -FLT_MAX;
 
-    #if CV_SIMD
+    #if CV_SIMD || CV_SIMD_SCALABLE
         int nlanes = VTraits<v_float32>::vlanes();
         v_float32 s_min = vx_setall_f32(INITVAL);
-        // RVV (CV_SIMD_SCALABLE) disabled for the m1 switch: with the fixed C0=8 the
-        // block is narrower than the register at VLEN>=512, tripping this assert. Runs
-        // scalar on RVV; re-enable via v_setvlmax<v_float32>(C0) (#29493, cf #29180).
         CV_Assert(C0 == nlanes || C0 == nlanes*2 || C0 % (nlanes*4) == 0);
     #endif
 
@@ -72,13 +69,13 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
                         y0 >= inner_y0 && y0 < inner_y1 ? inner_x0 : W;
                     int yi_ = y0*SY - padY0;
 
-                #if !(CV_SIMD)
+                #if !(CV_SIMD || CV_SIMD_SCALABLE)
                     for (int c = 0; c < C0*W; c++)
                         out[c] = INITVAL;
                 #endif
 
                     for(;;) {
-                    #if CV_SIMD
+                    #if CV_SIMD || CV_SIMD_SCALABLE
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;
@@ -143,7 +140,7 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
                             break;
                         x1 = inner_x1;
 
-                    #if CV_SIMD
+                    #if CV_SIMD || CV_SIMD_SCALABLE
                         if (nlanes == C0) {
                             for (; x0 < x1; x0++) {
                                 int xi_ = x0*SX - padX0;
@@ -497,9 +494,9 @@ public:
                               InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
-        std::vector<cuda::GpuMatND> inputs;
-        inputs_.getGpuMatNDVector(inputs);
-        MatShape inShape = inputs[0].size;
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        MatShape inShape = cv::dnn::shape(inputs[0]);
         const int nspatial = (int)kernel_shape.size();
 
         cuda4dnn::PoolingConfiguration config;

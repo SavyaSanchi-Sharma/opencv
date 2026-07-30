@@ -7,7 +7,13 @@
 
 #include "../pointer.hpp"
 
+#ifdef HAVE_CUDNN
 #include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#include <cudnn_ops.h>
+#include <cudnn_cnn.h>
+#endif
 
 #include <cstddef>
 #include <array>

@@ -107,7 +107,9 @@ void GpuMatND::setFields(MatShape _size, int _type, StepArray _step)
     {
         step = StepArray(dims);
 
-        step.back() = elemSize();
+        if (dims > 0)
+            step.back() = elemSize();
+
         for (int _i = dims - 2; _i >= 0; --_i)
         {
             const size_t i = _i;
@@ -126,7 +128,7 @@ void GpuMatND::setFields(MatShape _size, int _type, StepArray _step)
     }
 
     CV_Assert(size.size() == step.size());
-    CV_Assert(step.back() == elemSize());
+    CV_Assert(dims == 0 || step.back() == elemSize());
 }
 
 #ifndef HAVE_CUDA
