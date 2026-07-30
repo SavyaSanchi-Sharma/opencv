@@ -5,6 +5,7 @@
 #include "precomp.hpp"
 
 #include "net_impl.hpp"
+#include "opencv2/core/hal/intrin.hpp"
 
 #ifdef HAVE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
@@ -73,9 +74,6 @@ Net::Impl::Impl()
     // onnx_opset = 0;
 
     accuracy = CV_32F;
-    // The block size is a network-wide memory-layout contract, so it must not depend
-    // on the SIMD width of the host: C0 == 8 is the mainstream, well-tested setting.
-    // (Deriving it from vlanes() made the layout hardware-dependent; see the #29493 discussion.)
     defaultC0 = DEFAULT_C0;
     enableFP16 = haveFP16 = false;
     // FP16 is not ready yet in the new DNN engine
@@ -137,9 +135,9 @@ void Net::Impl::clear()
     args = std::vector<ArgData>();
     argnames = NamesHash();
 
-    __tensors__ = std::vector<Mat>();
+    __tensors__ = std::vector<UMat>();
     bufidxs = std::vector<int>();
-    buffers = std::vector<Mat>();
+    buffers = std::vector<UMat>();
 
     mainGraph = Ptr<Graph>();
 
@@ -149,7 +147,7 @@ void Net::Impl::clear()
 
     args.push_back(adata);
     argnames.insert(std::make_pair(std::string(""), 0));
-    __tensors__.push_back(Mat());
+    __tensors__.push_back(UMat());
     bufidxs.push_back(-1);
 
     prepared = false;
@@ -887,12 +885,6 @@ void Net::Impl::forwardLayer(LayerData& ld)
                 CV_Assert(!cudaNode.empty());
 
                 cudaNode->forward(ld.inputBlobsWrappers, ld.outputBlobsWrappers, cudaInfo->workspace);
-
-                for (auto id : ld.cudaD2HBackgroundTransfers)
-                {
-                    auto wrapper = ld.outputBlobsWrappers[id].dynamicCast<CUDABackendWrapper>();
-                    wrapper->copyToHostInBackground();
-                }
 #endif
             }
             else if (preferableBackend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
@@ -2489,21 +2481,6 @@ std::vector<String> Net::Impl::getUnconnectedOutLayersNames() /*const*/
 }
 
 
-// The new graph engine has no FP16 execution path yet: it runs FP32 on CPU regardless
-// of the requested (e.g. OpenCL FP16) target. Map FP16 input types to FP32 so that
-// shape/FLOPS inference through Layer::getTypes() does not reject them.
-static std::vector<MatType> filterFP16InputTypes(const std::vector<MatType>& types)
-{
-    std::vector<MatType> result = types;
-    for (MatType& t : result)
-    {
-        if (t == CV_16F)
-            t = CV_32F;
-    }
-    return result;
-}
-
-
 int64 Net::Impl::getFLOPSGraph(const Ptr<Graph>& graph,
                                const std::vector<MatShape>& shapeCache,
                                const std::vector<MatType>& typeCache) const
@@ -2563,14 +2540,10 @@ int64 Net::Impl::getFLOPS(const std::vector<MatShape>& netInputShapes,
 {
     if (mainGraph) {
         finalize();
-        // The new graph engine executes in FP32 on CPU regardless of the requested
-        // target, so FP16 input types (e.g. coming from an OpenCL FP16 target) would be
-        // rejected by Layer::getTypes(). Normalize them to FP32 for shape/FLOPS inference.
-        std::vector<MatType> inputTypes = filterFP16InputTypes(netInputTypes);
         LayerShapes shapes;
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
-        tryInferShapes(netInputShapes, inputTypes, shapes, shapeCache, typeCache);
+        tryInferShapes(netInputShapes, netInputTypes, shapes, shapeCache, typeCache);
         return getFLOPSGraph(mainGraph, shapeCache, typeCache);
     }
 
@@ -2597,11 +2570,10 @@ int64 Net::Impl::getFLOPS(
 {
     if (mainGraph) {
         finalize();
-        std::vector<MatType> inputTypes = filterFP16InputTypes(netInputTypes);
         LayerShapes shapes;
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
-        tryInferShapes(netInputShapes, inputTypes, shapes, shapeCache, typeCache);
+        tryInferShapes(netInputShapes, netInputTypes, shapes, shapeCache, typeCache);
 
         CV_Assert(0 <= layerId && layerId < (int)totalLayers);
         int localIdx = layerId;

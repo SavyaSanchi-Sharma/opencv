@@ -204,6 +204,13 @@ OCV_OPTION(WITH_CUBLAS "Include NVidia Cuda Basic Linear Algebra Subprograms (BL
 OCV_OPTION(WITH_CUDNN "Include NVIDIA CUDA Deep Neural Network (cuDNN) library support" WITH_CUDA
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_CUDNN)
+OCV_OPTION(WITH_CUDNNJIT "Include NVIDIA CUDA Deep Neural Network (cuDNN) Just In Time Interpretation library support" OFF
+  VISIBLE_IF WITH_CUDA OR WITH_CUDNN
+  VERIFY HAVE_CUDNNJIT)
+if(WITH_CUDNNJIT AND WITH_CUDNN)
+  message(STATUS "DNN: WITH_CUDNNJIT overrides WITH_CUDNN; disabling WITH_CUDNN")
+  set(WITH_CUDNN OFF)
+endif()
 OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" ON
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_NVCUVID)
@@ -1910,6 +1917,10 @@ if(WITH_CUDA OR HAVE_CUDA)
  if(WITH_CUDNN OR HAVE_CUDNN)
     status("")
     status("  cuDNN:" HAVE_CUDNN THEN "YES (ver ${CUDNN_VERSION})" ELSE NO)
+endif()
+
+ if(WITH_CUDNNJIT OR HAVE_CUDNNJIT)
+    status("  cuDNN JIT:" HAVE_CUDNNJIT THEN "YES (ver ${CUDNN_VERSION})" ELSE NO)
 endif()
 
 if(WITH_VULKAN OR HAVE_VULKAN)

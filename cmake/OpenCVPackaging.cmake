@@ -108,6 +108,10 @@ if(HAVE_CUDA)
       #ex: libcudnn7_7.5.1.10-1+cuda10.1_amd64
       #ex: libcudnn7-dev_7.5.1.10-1+cuda10.1_amd64
     endif()
+    if(HAVE_CUDNNJIT)
+      set(CPACK_DEB_libs_PACKAGE_DEPENDS "${CPACK_DEB_libs_PACKAGE_DEPENDS}, libcudnn${CUDNN_VERSION_MAJOR}-cuda-${CUDA_VERSION_MAJOR}")
+      set(CPACK_DEB_dev_PACKAGE_DEPENDS "${CPACK_DEB_dev_PACKAGE_DEPENDS}, libcudnn${CUDNN_VERSION_MAJOR}-dev-cuda-${CUDA_VERSION_MAJOR}")
+    endif()
   endif()
   set(CPACK_COMPONENT_dev_DEPENDS libs)
 endif()

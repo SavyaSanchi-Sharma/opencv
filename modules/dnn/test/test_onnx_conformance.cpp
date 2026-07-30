@@ -554,6 +554,7 @@ static const TestCase testConformanceConfig[] = {
     {"test_pow_bcast_array", 2, 1},
     {"test_pow_bcast_scalar", 2, 1},
     {"test_pow_example", 2, 1},
+    {"test_pow_types_float", 2, 1},
     {"test_pow_types_float32_int32", 2, 1},
     {"test_pow_types_float32_int64", 2, 1},
     {"test_pow_types_float32_uint32", 2, 1},
