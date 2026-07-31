@@ -327,9 +327,36 @@ namespace cv { namespace dnn {
         std::size_t total = shape.total();
         if (offsetElems == 0 && total == buf.total())
             return buf;
-        UMat flat = buf.reshape(1, (int)buf.total());
-        UMat sub = flat.rowRange((int)offsetElems, (int)(offsetElems + total));
-        return sub.reshape(1, shape);
+
+        if (buf.dims <= 2)
+        {
+            UMat flat = buf.reshape(1, (int)buf.total());
+            UMat sub = flat.rowRange((int)offsetElems, (int)(offsetElems + total));
+            return sub.reshape(1, shape);
+        }
+
+        MatShape bufShape = cv::dnn::shape(buf);
+        CV_Assert(bufShape.size() == shape.size());
+        int axis = -1;
+        for (int i = 0; i < (int)bufShape.size(); i++)
+        {
+            if (bufShape[i] != shape[i])
+            {
+                CV_Assert(axis == -1);
+                axis = i;
+            }
+        }
+        CV_Assert(axis >= 0);
+
+        std::size_t innerStride = 1;
+        for (int i = axis + 1; i < (int)bufShape.size(); i++)
+            innerStride *= (std::size_t)bufShape[i];
+        CV_Assert(innerStride > 0 && offsetElems % innerStride == 0);
+        int start = (int)(offsetElems / innerStride);
+
+        std::vector<Range> ranges(bufShape.size(), Range::all());
+        ranges[axis] = Range(start, start + shape[axis]);
+        return UMat(buf, ranges);
     }
 
     /* base class for all CUDA backend/target wrappers */
@@ -558,6 +585,7 @@ namespace cv { namespace dnn {
             else
                 m.convertTo(u, deviceDepth);
             shared_block->boundUMat = u;
+            shared_block->hostMat = &m;
         }
 
         GenericCUDABackendWrapper(const Ptr<BackendWrapper>& base_, const MatShape& shape_)
@@ -592,7 +620,14 @@ namespace cv { namespace dnn {
             if (shared_block->boundUMat.u->hostCopyObsolete())
             {
                 shared_block->stream.synchronize();
-                shared_block->boundUMat.getMat(ACCESS_READ);
+                Mat refreshed = shared_block->boundUMat.getMat(ACCESS_READ);
+                if (shared_block->hostMat)
+                {
+                    if (refreshed.depth() == shared_block->hostMat->depth())
+                        refreshed.copyTo(*shared_block->hostMat);
+                    else
+                        refreshed.convertTo(*shared_block->hostMat, shared_block->hostMat->depth());
+                }
             }
         }
 
@@ -691,6 +726,7 @@ namespace cv { namespace dnn {
             cuda4dnn::csl::Stream d2h_stream;
 
             cv::UMat boundUMat;
+            cv::Mat* hostMat = nullptr;
         };
 
         std::shared_ptr<shared_block_type> shared_block;

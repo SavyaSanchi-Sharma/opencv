@@ -34,7 +34,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             for (int i = 0; i < outputs.size(); i++)
             {
-                auto input = csl::viewOf<T>(inputs[i < (int)inputs.size() ? i : 0]);
+                auto input = csl::viewOf<T>(inputs[i]);
                 auto output = csl::spanOf<T>(outputs[i]);
 
                 if (input.get() != output.get())

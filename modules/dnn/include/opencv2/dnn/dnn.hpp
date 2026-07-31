@@ -322,10 +322,6 @@ CV__DNN_INLINE_NS_BEGIN
 
         virtual bool dynamicOutputShapes() const;
 
-        virtual void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
-                                                      int requiredOutputs,
-                                                      std::vector<MatShape>& outputs) const;
-
         virtual bool isDataShuffling() const;
 
         virtual void getScaleShift(Mat& scale, Mat& shift) const;

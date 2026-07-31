@@ -461,11 +461,6 @@ ArgKind Net::Impl::argKind(Arg arg) const
     return argData(arg).kind;
 }
 
-int Net::Impl::argType(Arg arg) const
-{
-    return argData(arg).type;
-}
-
 UMat& Net::Impl::argTensor(Arg arg) const
 {
     const ArgData& adata = argData(arg);
@@ -703,11 +698,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
                 continue;
             if (op->subgraphs()) { graphOnCuda = false; break; }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
-            if (!e) {
-                CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has NO CUDA exec -> whole graph on CPU",
-                                             op->name.c_str(), op->type.c_str()));
-                graphOnCuda = false; break;
-            }
+            if (!e) { graphOnCuda = false; break; }
             cudaExecs[i] = e;
         }
         if (!graphOnCuda) {
@@ -1625,25 +1616,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         if (!dynamicOutShapes) {
             allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
-        } else if (opBackend == DNN_BACKEND_CUDA) {
-            std::vector<UMat> inpUMats(ninputs);
-            for (i = 0; i < ninputs; i++)
-                inpUMats[i] = argTensor(inputs[i]);
-            std::vector<MatShape> dynOutShapes;
-            layer->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
-            CV_Assert(dynOutShapes.size() == noutputs);
-            outMats.resize(noutputs);
-            for (i = 0; i < noutputs; i++) {
-                Arg out = outputs[i];
-                UMat& out_t = argTensor(out);
-                int outType = args.at(out.idx).type;
-                if (outType < 0)
-                    outType = inpUMats[0].type();
-                rehomeAllocator(out_t, tensorAllocator());
-                out_t.fit(dynOutShapes[i], outType);
-                outMats[i] = out_t.getMat(ACCESS_WRITE);
-            }
-            tempMats = scratchBufs;
         } else {
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {

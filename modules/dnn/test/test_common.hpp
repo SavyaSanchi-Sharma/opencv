@@ -6,6 +6,7 @@
 #define __OPENCV_TEST_COMMON_HPP__
 
 #include "opencv2/dnn/utils/inference_engine.hpp"
+#include <opencv2/core/utils/configuration.private.hpp>
 #include <string>
 
 #ifdef HAVE_OPENCL

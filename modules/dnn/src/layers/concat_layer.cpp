@@ -125,9 +125,17 @@ public:
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size());
+        bool fp16Target = (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16);
+        MatType commonType = inputs[0];
         for (int i = 1; i < inputs.size(); i++)
-            CV_CheckTypeEQ(inputs[i], inputs[0], "All input types should be equal");
-        outputs.assign(1, inputs[0]);
+        {
+            bool fp16Mix = fp16Target && (inputs[i] == CV_16F || inputs[i] == CV_32F) && (commonType == CV_16F || commonType == CV_32F);
+            if (fp16Mix)
+                commonType = CV_32F;
+            else
+                CV_CheckTypeEQ(inputs[i], commonType, "All input types should be equal");
+        }
+        outputs.assign(1, commonType);
     }
 
 

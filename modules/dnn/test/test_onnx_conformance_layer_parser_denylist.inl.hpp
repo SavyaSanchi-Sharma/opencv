@@ -272,8 +272,8 @@
 "test_reversesequence_batch",  // Issue:: Parser: Can't create layer "onnx_node_output_0!y" of type "ReverseSequence" in function 'getLayerInstance'
 "test_reversesequence_time",  // ---- same as above ---
 "test_rnn_seq_length",  // Issue:: Parser:  Can't create layer "onnx_node_output_1!Y_h" of type "RNN" in function 'getLayerInstance'
-"test_scan9_sum",  // Issue:: Parser: 'Graph' is not supported in function 'getLayerParams'
-"test_scan_sum", // ---- same as above ---
+// Scan edge cases beyond the opset-9+ dataflow the new engine supports:
+"test_scan_sum",  // opset-8 Scan (leading batch dim + sequence_lens, different semantics)
 "test_sequence_insert_at_back",  // Issue:: Parser:  typeProto.has_tensor_type() in function 'populateNet'
 "test_sequence_insert_at_front",  // ---- same as above ---
 "test_sequence_map_add_1_sequence_1_tensor",
@@ -331,3 +331,122 @@
 "test_training_dropout_mask",  // ---- same as above ---
 "test_training_dropout_zero_ratio_mask",  // ---- same as above ---
 "test_unique_length_1", //incorrect output
+
+// ===== ONNX 1.22 additions: ops/dtypes not yet supported by the importer =====
+// BitCast op not supported by the ONNX importer
+"test_bitcast_2d_float32_to_int32",
+"test_bitcast_bool_to_uint8",
+"test_bitcast_float32_to_int32",
+"test_bitcast_float64_to_int64",
+"test_bitcast_int32_to_float32",
+"test_bitcast_int64_to_float64",
+"test_bitcast_int8_to_uint8",
+"test_bitcast_scalar_float32_to_int32",
+"test_bitcast_uint16_to_int16",
+"test_bitcast_uint32_to_int32",
+// INT2/UINT2 (2-bit) dtype not supported
+"test_cast_FLOAT16_to_INT2",
+"test_cast_FLOAT16_to_UINT2",
+"test_cast_FLOAT_to_INT2",
+"test_cast_FLOAT_to_UINT2",
+"test_cast_INT2_to_FLOAT",
+"test_cast_INT2_to_FLOAT16",
+"test_cast_INT2_to_INT8",
+"test_cast_UINT2_to_FLOAT",
+"test_cast_UINT2_to_FLOAT16",
+"test_cast_UINT2_to_UINT8",
+"test_castlike_FLOAT16_to_INT2",
+"test_castlike_FLOAT16_to_INT2_expanded",
+"test_castlike_FLOAT16_to_UINT2",
+"test_castlike_FLOAT16_to_UINT2_expanded",
+"test_castlike_FLOAT_to_INT2",
+"test_castlike_FLOAT_to_INT2_expanded",
+"test_castlike_FLOAT_to_UINT2",
+"test_castlike_FLOAT_to_UINT2_expanded",
+"test_castlike_INT2_to_FLOAT",
+"test_castlike_INT2_to_FLOAT16",
+"test_castlike_INT2_to_FLOAT16_expanded",
+"test_castlike_INT2_to_FLOAT_expanded",
+"test_castlike_INT2_to_INT8",
+"test_castlike_INT2_to_INT8_expanded",
+"test_castlike_UINT2_to_FLOAT",
+"test_castlike_UINT2_to_FLOAT16",
+"test_castlike_UINT2_to_FLOAT16_expanded",
+"test_castlike_UINT2_to_FLOAT_expanded",
+"test_castlike_UINT2_to_UINT8",
+"test_castlike_UINT2_to_UINT8_expanded",
+"test_dequantizelinear_int2",
+"test_dequantizelinear_uint2",
+"test_quantizelinear_int2",
+"test_quantizelinear_uint2",
+// FlexAttention op not supported
+"test_flexattention",
+"test_flexattention_causal_mask",
+"test_flexattention_diff_head_sizes",
+"test_flexattention_double",
+"test_flexattention_fp16",
+"test_flexattention_gqa",
+"test_flexattention_prob_mod",
+"test_flexattention_relative_positional",
+"test_flexattention_scaled",
+"test_flexattention_score_mod",
+"test_flexattention_soft_cap",
+// LinearAttention op not supported
+"test_linear_attention_decode_step",
+"test_linear_attention_decode_step_expanded",
+"test_linear_attention_delta",
+"test_linear_attention_delta_expanded",
+"test_linear_attention_explicit_scale",
+"test_linear_attention_explicit_scale_expanded",
+"test_linear_attention_fp16",
+"test_linear_attention_fp16_expanded",
+"test_linear_attention_gated",
+"test_linear_attention_gated_delta",
+"test_linear_attention_gated_delta_beta_scalar",
+"test_linear_attention_gated_delta_beta_scalar_expanded",
+"test_linear_attention_gated_delta_expanded",
+"test_linear_attention_gated_delta_gqa",
+"test_linear_attention_gated_delta_gqa_expanded",
+"test_linear_attention_gated_delta_mqa",
+"test_linear_attention_gated_delta_mqa_expanded",
+"test_linear_attention_gated_expanded",
+"test_linear_attention_gated_per_head_decay",
+"test_linear_attention_gated_per_head_decay_expanded",
+"test_linear_attention_linear",
+"test_linear_attention_linear_expanded",
+"test_linear_attention_linear_t1_no_past",
+"test_linear_attention_linear_t1_no_past_expanded",
+"test_linear_attention_no_past_explicit_zeros",
+"test_linear_attention_no_past_explicit_zeros_expanded",
+"test_linear_attention_prefill_with_past",
+"test_linear_attention_prefill_with_past_expanded",
+// misc unsupported (expanded subgraphs / new ops)
+"test_castlike_no_saturate_FLOAT_to_FLOAT8E4M3FNUZ_expanded",
+"test_castlike_no_saturate_FLOAT_to_FLOAT8E4M3FN_expanded",
+"test_range_bfloat16_type_positive_delta_expanded",
+"test_range_float16_type_positive_delta_expanded",
+// ===== ONNX 1.22 additions: forward/accuracy not yet supported =====
+// MatMul with 1-D operand not supported (requires >=2D)
+"test_matmul_1d_1d",
+"test_matmul_1d_3d",
+"test_matmul_4d_1d",
+// DFT inverse RFFT not supported
+"test_dft_irfft",
+"test_dft_irfft_opset19",
+// Attention softcap accuracy
+"test_attention_4d_softcap_neginf_mask",
+"test_attention_4d_softcap_neginf_mask_poison",
+// CausalConvWithState fp16 (expanded) accuracy
+"test_causal_conv_with_state_fp16_expanded",
+"test_causal_conv_with_state_silu_fp16_expanded",
+// FlexAttention (expanded) accuracy
+"test_flexattention_causal_mask_expanded_ver26",
+"test_flexattention_diff_head_sizes_expanded_ver26",
+"test_flexattention_double_expanded_ver26",
+"test_flexattention_expanded_ver26",
+"test_flexattention_fp16_expanded_ver26",
+"test_flexattention_gqa_expanded_ver26",
+"test_flexattention_prob_mod_expanded_ver26",
+"test_flexattention_relative_positional_expanded_ver26",
+"test_flexattention_score_mod_expanded_ver26",
+"test_flexattention_soft_cap_expanded_ver26",
