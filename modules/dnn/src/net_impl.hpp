@@ -212,8 +212,6 @@ struct Net::Impl : public detail::NetImplBase
 
     int getLayerId(DictValue& layerDesc) const;
 
-    String getLayerName(int id) const;
-
     LayerData& getLayerData(int id) const;
 
     LayerData& getLayerData(const String& layerName) const;
@@ -438,7 +436,6 @@ struct Net::Impl : public detail::NetImplBase
     bool haveArg(const std::string& name) const;
 
     Arg newConstArg(const std::string& name, const Mat& m);
-    Arg newConstScalarArg(const std::string& name, int type, const void* value);
     Arg newArg(const std::string& name, ArgKind kind, bool allowEmptyName=false);
     bool isConstArg(Arg arg) const;
     Mat& argTensor(Arg arg) const;
@@ -522,10 +519,6 @@ struct Net::Impl : public detail::NetImplBase
 
     ///////////////// various graph transformations ///////////////////////
 
-    // infers all types
-    void inferTypes();
-    // infers all shapes
-    void inferShapes(bool symbolic);
     // sets certain buffer index for each intermediate argument (Arg)
     void assignBuffers();
     // fuse batch norm, add bias and activation to convolution
@@ -543,6 +536,7 @@ struct Net::Impl : public detail::NetImplBase
     void fuseTransposeMatMul();
     // fold a scalar Mul/Div before Softmax into Softmax::scale (CPU only)
     void fuseScaleSoftmax();
+    void fusePointwise();
     // replace constant sub-expressions with their results
 
     void fuseQDQ();

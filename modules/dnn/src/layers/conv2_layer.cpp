@@ -4,6 +4,7 @@
 
 #include "../precomp.hpp"
 #include "../net_impl.hpp"
+#include "../graph_fusion_utils.hpp"
 #include "layers_common.hpp"
 #include "conv2_common.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
@@ -30,7 +31,7 @@ namespace dnn
     Opset's 1 to 22 are covered.
 */
 
-class Conv2LayerImpl : public Conv2Layer
+class Conv2LayerImpl : public Conv2Layer, public EpilogueSink
 {
 public:
     Conv2LayerImpl(const LayerParams& params)
@@ -275,6 +276,162 @@ public:
         return true;
     }
 
+    virtual bool setEpilogue(const PointwiseChain& ch) CV_OVERRIDE
+    {
+        if (ch.absorbed.empty() || ch.stepOperands.size() != ch.absorbed.size())
+            return false;
+        if (ch.absorbed.size() == 1) {
+            if (fuseActivation(ch.absorbed[0].dynamicCast<Layer>()))
+                return true;
+            if (lowerClamp(ch))
+                return true;
+            if (lowerAddBias(ch))
+                return true;
+        }
+        return lowerAffine(ch);
+    }
+
+    bool lowerAffine(const PointwiseChain& ch)
+    {
+        if (fusedBatchNorm || addResidual || inputs.size() > 1)
+            return false;
+        if (fastActivation != FAST_ACTIV_NONE || activationFunc != nullptr || !activ.empty())
+            return false;
+        if (wshape0.empty() || wshape0.dims < 3)
+            return false;
+
+        const int K = wshape0[0];
+        if (!bias.empty() && (bias.dims != 1 || (int)bias.total() != K))
+            return false;
+
+        std::vector<float> scale(K, 1.f), shift(K, 0.f);
+        size_t i = 0;
+        bool affine = false;
+
+        if (i < ch.absorbed.size() && effectiveOpType(ch.absorbed[i]) == "Mul") {
+            if (!perChannelValues(ch, i, K, scale))
+                return false;
+            affine = true;
+            i++;
+        }
+        if (i < ch.absorbed.size() && effectiveOpType(ch.absorbed[i]) == "Add") {
+            if (!perChannelValues(ch, i, K, shift))
+                return false;
+            affine = true;
+            i++;
+        }
+        if (!affine)
+            return false;
+
+        if (i < ch.absorbed.size()) {
+            if (i + 1 != ch.absorbed.size())
+                return false;
+            if (!fuseActivation(ch.absorbed[i].dynamicCast<Layer>()) && !lowerClamp(ch))
+                return false;
+        }
+
+        fusedScale.fit(1, &K, CV_32F);
+        fusedBias.fit(1, &K, CV_32F);
+        float* fs = fusedScale.ptr<float>();
+        float* fb = fusedBias.ptr<float>();
+        const float* b = bias.empty() ? nullptr : bias.ptr<float>();
+        for (int k = 0; k < K; k++) {
+            fs[k] = scale[k];
+            fb[k] = (b ? b[k] * scale[k] : 0.f) + shift[k];
+        }
+        fusedBatchNorm = true;
+        return true;
+    }
+
+    bool perChannelValues(const PointwiseChain& ch, size_t i, int K, std::vector<float>& out) const
+    {
+        const EpOperand& o = ch.stepOperands[i];
+        if (!o.hasSide)
+            return false;
+        if (o.bufId < 0) {
+            std::fill(out.begin(), out.end(), o.scalar);
+            return true;
+        }
+        if (o.bufId >= (int)ch.constBufs.size())
+            return false;
+
+        const Mat& c = ch.constBufs[o.bufId];
+        if (c.empty() || c.type() != CV_32F || !c.isContinuous() || (int)c.total() != K)
+            return false;
+
+        const int nspatial = wshape0.dims - 2;
+        const int ax = c.dims - nspatial - 1;
+        if (ax < 0)
+            return false;
+        for (int d = 0; d < c.dims; d++) {
+            if (c.size[d] != (d == ax ? K : 1))
+                return false;
+        }
+
+        const float* p = c.ptr<float>();
+        std::copy(p, p + K, out.begin());
+        return true;
+    }
+
+    bool lowerAddBias(const PointwiseChain& ch)
+    {
+        if (ch.stepOperands.empty() || wshape0.empty() || wshape0.dims < 3)
+            return false;
+        if (effectiveOpType(ch.absorbed[0]) != "Add")
+            return false;
+
+        const EpOperand& o = ch.stepOperands[0];
+        if (!o.hasSide)
+            return false;
+
+        const int K = wshape0[0];
+        if (!bias.empty() && (bias.dims != 1 || (int)bias.total() != K))
+            return false;
+
+        Mat flat;
+        if (o.bufId < 0) {
+            flat.create(1, &K, CV_32F);
+            flat.setTo(o.scalar);
+        } else {
+            if (o.bufId >= (int)ch.constBufs.size())
+                return false;
+            const Mat& c = ch.constBufs[o.bufId];
+            if (c.empty() || c.type() != CV_32F || !c.isContinuous() || (int)c.total() != K)
+                return false;
+
+            const int nspatial = wshape0.dims - 2;
+            const int ax = c.dims - nspatial - 1;
+            if (ax < 0)
+                return false;
+            for (int d = 0; d < c.dims; d++) {
+                if (c.size[d] != (d == ax ? K : 1))
+                    return false;
+            }
+            flat = Mat(1, &K, CV_32F, (void*)c.ptr<float>());
+        }
+        return fuseAddBias(flat);
+    }
+
+    bool lowerClamp(const PointwiseChain& ch)
+    {
+        if (fastActivation != FAST_ACTIV_NONE || activationFunc != nullptr || !activ.empty())
+            return false;
+        if (ch.epSteps != (int)ch.absorbed.size())
+            return false;
+
+        const std::vector<EpNode>& nodes = ch.ep.nodes();
+        int out = ch.ep.outputNode;
+        if (out < 0 || out >= (int)nodes.size() || nodes[out].op != EpOP::CLAMP)
+            return false;
+        if (nodes[out].scalar != 0.f)
+            return false;
+
+        fastActivation = FAST_ACTIV_CLIP;
+        activParams.assign(2, 0.f);
+        activParams[1] = nodes[out].scalar2;
+        return true;
+    }
+
     virtual bool fuseAddResidual(Arg residual) CV_OVERRIDE
     {
         if (activ.empty() && fastActivation == FAST_ACTIV_NONE &&
@@ -441,7 +598,7 @@ public:
         // MLAS 1x1 SGEMM path. Skipped for small spatial: the gather/scatter
         // tax exceeds MLAS's SGEMM speedup over the in-place NCHWc8 kernel.
         if (mlas1x1Enabled() && inptype == CV_32F &&
-            !activationFunc && !addResidual && inpshape.back() == 8)
+            !addResidual && inpshape.back() == 8)
         {
             const int ndims = inpshape.dims;
             int HW = 1;
@@ -606,11 +763,6 @@ public:
                 }
             }
         });
-        if (activationFunc) {
-            float* dst = out;
-            int total = K1 * HW * 8;
-            activationFunc(dst, dst, total, activParams.data());
-        }
     }
 
     // Chunked 1x1 SGEMM-as-conv: gather NCHWc8 -> SGEMM -> scatter+activate
@@ -668,6 +820,11 @@ public:
                 scatterAndActivate(scratch_C_.ptr<float>(), M, p_start,
                                    C1_out, HW, out_n);
             }
+        }
+
+        if (activationFunc) {
+            float* dst = out.ptr<float>();
+            activationFunc(dst, dst, (int)out.total(), activParams.data());
         }
     }
 

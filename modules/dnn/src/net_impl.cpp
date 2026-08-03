@@ -325,13 +325,6 @@ int Net::Impl::getLayerId(DictValue& layerDesc) const
 }
 
 
-String Net::Impl::getLayerName(int id) const
-{
-    MapIdToLayerData::const_iterator it = layers.find(id);
-    return (it != layers.end()) ? it->second.name : "(unknown layer)";
-}
-
-
 LayerData& Net::Impl::getLayerData(int id) const
 {
     MapIdToLayerData::const_iterator it = layers.find(id);

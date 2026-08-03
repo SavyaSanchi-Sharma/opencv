@@ -6,6 +6,7 @@
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/epilogue_apply.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 // OpenVINO backend
@@ -26,12 +27,20 @@ using namespace cv::dnn::cuda4dnn;
 
 namespace cv { namespace dnn {
 
-class MatMulLayerImpl CV_FINAL : public MatMulLayer {
+class MatMulLayerImpl CV_FINAL : public MatMulLayer, public EpilogueSink {
 #ifdef HAVE_OPENCL
     UMat weight_umat, bias_umat;
 #endif
+    std::vector<EpStep> epilogueSteps;
 
  public:
+    virtual bool setEpilogue(const PointwiseChain& ch) CV_OVERRIDE
+    {
+        if (!epilogueSteps.empty())
+            return false;
+        return epLower(ch, epilogueSteps);
+    }
+
     MatMulLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
 
@@ -307,10 +316,15 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
+
+        epApply(epilogueSteps, Y);
     }
 
 #ifdef HAVE_OPENCL
     bool forward_ocl(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, InputArrayOfArrays internals) {
+        if (!epilogueSteps.empty())
+            return false;
+
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
 

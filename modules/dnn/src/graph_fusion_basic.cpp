@@ -64,7 +64,6 @@ struct ModelFusionBasic
 
             for(;;) {
                 BatchNorm2Layer* bn = dynamic_cast<BatchNorm2Layer*>(layer_ptr);
-                ActivationLayer* activ = dynamic_cast<ActivationLayer*>(layer_ptr);
                 NaryEltwiseLayer* elemwise = dynamic_cast<NaryEltwiseLayer*>(layer_ptr);
 
                 // merge convolution and batch norm
@@ -110,22 +109,6 @@ struct ModelFusionBasic
                             conv->fuseAddResidual(residual)) {
                             fused_layer_idx = conv_layer_idx;
                             removed_args.push_back(conv_out);
-                            break;
-                        }
-                    }
-                }
-
-                // merge convolution and activation
-                if (activ && ninputs == 1 &&
-                    usecounts.at(inputs[0].idx) == 1) {
-                    Arg activ_inp = inputs[0];
-                    int conv_layer_idx = producer_of.at(activ_inp.idx);
-                    Conv2Layer* conv = getLayer<Conv2Layer>(newprog, conv_layer_idx);
-                    if (conv) {
-                        bool ok = conv->fuseActivation(layer.dynamicCast<Layer>());
-                        if (ok) {
-                            fused_layer_idx = conv_layer_idx;
-                            removed_args.push_back(activ_inp);
                             break;
                         }
                     }
