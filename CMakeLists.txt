@@ -204,7 +204,7 @@ OCV_OPTION(WITH_CUBLAS "Include NVidia Cuda Basic Linear Algebra Subprograms (BL
 OCV_OPTION(WITH_CUDNN "Include NVIDIA CUDA Deep Neural Network (cuDNN) library support" WITH_CUDA
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_CUDNN)
-OCV_OPTION(WITH_CUDNNJIT "Include NVIDIA CUDA Deep Neural Network (cuDNN) Just In Time Interpretation library support" WITH_CUDA
+OCV_OPTION(WITH_CUDNNJIT "Include NVIDIA CUDA Deep Neural Network (cuDNN) Just In Time Interpretation library support" OFF
   VISIBLE_IF WITH_CUDA OR WITH_CUDNN
   VERIFY HAVE_CUDNNJIT)
 OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" ON

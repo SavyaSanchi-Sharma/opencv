@@ -486,7 +486,7 @@ public:
 
         MatShape inpShape = inputs_arr.shape(0);
         MatShape outShape = outputs_arr.shape(0);
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream),
                                                           std::move(context->cudnn_handle), apconfig, inpShape, outShape);
 #else

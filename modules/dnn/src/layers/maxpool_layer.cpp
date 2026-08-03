@@ -10,6 +10,7 @@
 #include "../op_cuda.hpp"
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/pooling.hpp"
+#include "../cuda4dnn/primitives/max_pooling.hpp"
 #endif
 
 namespace cv
@@ -498,6 +499,23 @@ public:
         inputs_.getUMatVector(inputs);
         MatShape inShape = cv::dnn::shape(inputs[0]);
         const int nspatial = (int)kernel_shape.size();
+
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+        {
+            cuda4dnn::MaxPoolConfiguration mpconfig;
+            mpconfig.kernel_shape.assign(kernel_shape.begin(), kernel_shape.end());
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.strides.push_back(strides.empty() ? 1 : (int64_t)strides[i]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.pads.push_back(pads.empty() ? 0 : (int64_t)pads[i]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.pads.push_back(pads.empty() ? 0 : (int64_t)pads[i + nspatial]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.dilations.push_back(dilations.empty() ? 1 : (int64_t)dilations[i]);
+            mpconfig.storage_order = storage_order;
+            return make_cuda_node<cuda4dnn::MaxPoolOp>(preferableTarget, std::move(context->stream), mpconfig);
+        }
+#endif
 
         cuda4dnn::PoolingConfiguration config;
         config.poolMode = cuda4dnn::PoolingConfiguration::PoolingMode::MAX;

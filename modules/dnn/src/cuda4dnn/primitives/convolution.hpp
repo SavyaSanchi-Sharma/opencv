@@ -18,7 +18,7 @@
 #include "../csl/tensor.hpp"
 #include "../csl/tensor_ops.hpp"
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
 #include "../csl/cudnn/graph.hpp"
 #include "../kernels/permute.hpp"
 #include "../kernels/fill_copy.hpp"
@@ -284,11 +284,11 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 }
             }
 
-#ifndef HAVE_CUDNNJIT
+#if !defined(HAVE_CUDNNJIT) || defined(HAVE_CUDNN)
             convoluter = csl::Convolution<T>(cudnnHandle, params);
 #endif
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
             {
                 const auto& conv_in = params.input_shape;
                 CV_Assert(conv_in.size() == rank);
@@ -355,7 +355,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 auto sz = std::accumulate(std::begin(shape), std::end(shape), 1, std::multiplies<std::size_t>());
                 builder.require<T>(sz);
             }
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
             builder.require(jitConvoluter.get_workspace_size());
 #else
             builder.require(convoluter.get_workspace_size());
@@ -416,7 +416,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (fusion_location == InternalFusionLocation::NATIVE)
             {
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
                 kernels::permute<T>(stream, jitInputNHWC, input, jitNchwToNhwcOrder);   /* NCHW/NCDHW -> NHWC/NDHWC */
                 jitConvoluter.convolve(cudnnHandle, jitInputNHWC.get(), jitFilterKRSC.get(), jitOutputNHWC.get(), conv_scratchpad);
                 kernels::permute<T>(stream, output, jitOutputNHWC, jitNhwcToNchwOrder);  /* NHWC/NDHWC -> NCHW/NCDHW */
@@ -669,7 +669,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         std::vector<std::size_t> transformed_shape;
         csl::TensorTransform<T> inputTransformer;
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         csl::cudnn::ConvolutionGraph<T> jitConvoluter;
         csl::Tensor<T> jitInputNHWC, jitFilterKRSC, jitOutputNHWC;
         std::vector<std::size_t> jitNchwToNhwcOrder, jitNhwcToNchwOrder;

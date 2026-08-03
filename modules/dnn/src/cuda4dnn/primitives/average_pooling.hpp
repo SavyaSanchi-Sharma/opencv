@@ -13,7 +13,7 @@
 
 #include "../kernels/average_pooling.hpp"
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
 #include "../csl/cudnn.hpp"
 #include "../csl/cudnn/graph.hpp"
 #include "../csl/workspace.hpp"
@@ -42,13 +42,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     class AveragePoolingOp final : public CUDABackendNode {
     public:
         AveragePoolingOp(csl::Stream stream_,
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
                          csl::cudnn::Handle cudnnHandle_,
 #endif
                          const AveragePoolingConfiguration& config,
                          const MatShape& input_shape, const MatShape& output_shape)
             : stream(std::move(stream_)),
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
               cudnnHandle(std::move(cudnnHandle_)),
 #endif
               kernel_shape(config.kernel_shape),
@@ -57,7 +57,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
               dilations(config.dilations),
               count_include_pad(config.count_include_pad)
         {
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
             bool no_dilation = std::all_of(dilations.begin(), dilations.end(),
                                            [](std::int64_t d) { return d == 1; });
             if (!config.ceil_mode && no_dilation && kernel_shape.size() == 2 &&
@@ -88,7 +88,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 #endif
         }
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         std::size_t get_workspace_memory_in_bytes() const noexcept override
         {
             return useJit ? jitResampler.get_workspace_size() : 0;
@@ -105,7 +105,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
             if (useJit) {
                 kernels::permute<T>(stream, jitInputNHWC, input, {0, 2, 3, 1});
                 csl::WorkspaceAllocator allocator(workspace);
@@ -128,7 +128,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
     private:
         csl::Stream stream;
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         csl::cudnn::Handle cudnnHandle;
         bool useJit = false;
         csl::cudnn::ResampleGraph<T> jitResampler;
