@@ -739,6 +739,13 @@ static EpilogueSink* sinkOf(const Ptr<Layer>& l)
     return dynamic_cast<EpilogueSink*>(l.get());
 }
 
+static EpilogueSink* sink(const Ptr<Layer>& l)
+{
+    EpilogueSink* s = sinkOf(l);
+    CV_Assert(s != nullptr);
+    return s;
+}
+
 static Ptr<Layer> mkConv()
 {
     LayerParams lp;
@@ -791,10 +798,10 @@ TEST(EpilogueLowering, MatMulAcceptsActivationChain)
     Ptr<Layer> tanh = TanHLayer::create(lp);
 
     Ptr<Layer> one = mkMatMul();
-    EXPECT_TRUE(sinkOf(one)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    EXPECT_TRUE(sink(one)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
 
     Ptr<Layer> two = mkMatMul();
-    EXPECT_TRUE(sinkOf(two)->setEpilogue(
+    EXPECT_TRUE(sink(two)->setEpilogue(
         mkChain({gelu, tanh}, {{"Gelu", EpOperand()}, {"Tanh", EpOperand()}})));
 }
 
@@ -803,8 +810,8 @@ TEST(EpilogueLowering, MatMulRefusesWhenAlreadyFused)
     LayerParams lp;
     Ptr<Layer> gelu = GeluLayer::create(lp);
     Ptr<Layer> mm = mkMatMul();
-    EXPECT_TRUE(sinkOf(mm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
-    EXPECT_FALSE(sinkOf(mm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    EXPECT_TRUE(sink(mm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    EXPECT_FALSE(sink(mm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
 }
 
 TEST(EpilogueLowering, MatMulIsAnAnchor)
@@ -820,7 +827,7 @@ TEST(EpilogueLowering, ConvAcceptsSingleRelu)
     Ptr<Layer> relu = ReLULayer::create(lp);
 
     ASSERT_NE(sinkOf(conv), nullptr);
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(mkChain({relu}, {{"Relu", EpOperand()}})));
+    EXPECT_TRUE(sink(conv)->setEpilogue(mkChain({relu}, {{"Relu", EpOperand()}})));
 }
 
 TEST(EpilogueLowering, ConvRejectsSecondActivation)
@@ -830,7 +837,7 @@ TEST(EpilogueLowering, ConvRejectsSecondActivation)
     Ptr<Layer> a = ReLULayer::create(lp);
     Ptr<Layer> b = TanHLayer::create(lp);
 
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(
+    EXPECT_FALSE(sink(conv)->setEpilogue(
         mkChain({a, b}, {{"Relu", EpOperand()}, {"Tanh", EpOperand()}})));
 }
 
@@ -840,10 +847,10 @@ TEST(EpilogueLowering, ConvRejectsClampWithNonZeroLowerBound)
     Ptr<Layer> clip = ClipLayer::create(lp);
 
     Ptr<Layer> ok = mkConv();
-    EXPECT_TRUE(sinkOf(ok)->setEpilogue(mkChain({clip}, {{"Clip", clipOp(0.f, 6.f)}})));
+    EXPECT_TRUE(sink(ok)->setEpilogue(mkChain({clip}, {{"Clip", clipOp(0.f, 6.f)}})));
 
     Ptr<Layer> bad = mkConv();
-    EXPECT_FALSE(sinkOf(bad)->setEpilogue(mkChain({clip}, {{"Clip", clipOp(-1.f, 6.f)}})));
+    EXPECT_FALSE(sink(bad)->setEpilogue(mkChain({clip}, {{"Clip", clipOp(-1.f, 6.f)}})));
 }
 
 TEST(EpilogueLowering, ConvFoldsPerChannelAddIntoBias)
@@ -852,13 +859,13 @@ TEST(EpilogueLowering, ConvFoldsPerChannelAddIntoBias)
     ch.constBufs.push_back(perChanConst(8, 2, 0.25f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_TRUE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvFoldsScalarAddIntoBias)
 {
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(mkChain({mkAdd()}, {{"Add", scalarOp(0.5f)}})));
+    EXPECT_TRUE(sink(conv)->setEpilogue(mkChain({mkAdd()}, {{"Add", scalarOp(0.5f)}})));
 }
 
 TEST(EpilogueLowering, ConvRejectsAddOnWrongAxis)
@@ -868,7 +875,7 @@ TEST(EpilogueLowering, ConvRejectsAddOnWrongAxis)
     ch.constBufs.push_back(Mat(4, sz, CV_32F, Scalar(0.25f)));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvRejectsAddWithWrongChannelCount)
@@ -877,7 +884,7 @@ TEST(EpilogueLowering, ConvRejectsAddWithWrongChannelCount)
     ch.constBufs.push_back(perChanConst(4, 2, 0.25f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvRejectsAddBeforeWeightsAreSet)
@@ -886,7 +893,7 @@ TEST(EpilogueLowering, ConvRejectsAddBeforeWeightsAreSet)
     ch.constBufs.push_back(perChanConst(8, 2, 0.25f));
 
     Ptr<Layer> conv = mkConv();
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 static Ptr<Layer> mkMul()
@@ -907,7 +914,7 @@ TEST(EpilogueLowering, ConvFoldsMulAddClipChain)
     ch.constBufs.push_back(perChanConst(8, 2, 0.5f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_TRUE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvFoldsMulThenAdd)
@@ -918,7 +925,7 @@ TEST(EpilogueLowering, ConvFoldsMulThenAdd)
     ch.constBufs.push_back(perChanConst(8, 2, 0.5f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_TRUE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvRejectsAddBeforeMul)
@@ -929,7 +936,7 @@ TEST(EpilogueLowering, ConvRejectsAddBeforeMul)
     ch.constBufs.push_back(perChanConst(8, 2, 2.0f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvRejectsAffineWithTrailingNonActivation)
@@ -942,7 +949,7 @@ TEST(EpilogueLowering, ConvRejectsAffineWithTrailingNonActivation)
     ch.constBufs.push_back(perChanConst(8, 2, 0.5f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvRejectsAffineOnWrongAxis)
@@ -954,7 +961,7 @@ TEST(EpilogueLowering, ConvRejectsAffineOnWrongAxis)
     ch.constBufs.push_back(perChanConst(8, 2, 0.5f));
 
     Ptr<Layer> conv = mkConvW(8);
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, ConvAffineLeavesStateCleanOnRefusal)
@@ -965,13 +972,13 @@ TEST(EpilogueLowering, ConvAffineLeavesStateCleanOnRefusal)
     bad.constBufs.push_back(perChanConst(8, 2, 2.0f));
 
     Ptr<Layer> conv = mkConvW(8);
-    ASSERT_FALSE(sinkOf(conv)->setEpilogue(bad));
+    ASSERT_FALSE(sink(conv)->setEpilogue(bad));
 
     PointwiseChain good = mkChain({mkMul(), mkAdd()},
                                   {{"Mul", perChannelOp(0)}, {"Add", perChannelOp(1)}});
     good.constBufs.push_back(perChanConst(8, 2, 2.0f));
     good.constBufs.push_back(perChanConst(8, 2, 0.5f));
-    EXPECT_TRUE(sinkOf(conv)->setEpilogue(good));
+    EXPECT_TRUE(sink(conv)->setEpilogue(good));
 }
 
 TEST(EpilogueLowering, ConvRejectsAddAfterResidualFold)
@@ -981,7 +988,7 @@ TEST(EpilogueLowering, ConvRejectsAddAfterResidualFold)
 
     Ptr<Layer> conv = mkConvW(8);
     ASSERT_TRUE(conv.dynamicCast<Conv2Layer>()->fuseAddResidual(Arg(5)));
-    EXPECT_FALSE(sinkOf(conv)->setEpilogue(ch));
+    EXPECT_FALSE(sink(conv)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, GemmAcceptsActivationChain)
@@ -991,23 +998,23 @@ TEST(EpilogueLowering, GemmAcceptsActivationChain)
     Ptr<Layer> tanh = TanHLayer::create(lp);
 
     Ptr<Layer> one = mkGemm();
-    EXPECT_TRUE(sinkOf(one)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    EXPECT_TRUE(sink(one)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
 
     Ptr<Layer> two = mkGemm();
-    EXPECT_TRUE(sinkOf(two)->setEpilogue(
+    EXPECT_TRUE(sink(two)->setEpilogue(
         mkChain({gelu, tanh}, {{"Gelu", EpOperand()}, {"Tanh", EpOperand()}})));
 }
 
 TEST(EpilogueLowering, GemmAcceptsScalarAdd)
 {
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_TRUE(sinkOf(gemm)->setEpilogue(mkChain({mkAdd()}, {{"Add", scalarOp(1.f)}})));
+    EXPECT_TRUE(sink(gemm)->setEpilogue(mkChain({mkAdd()}, {{"Add", scalarOp(1.f)}})));
 }
 
 TEST(EpilogueLowering, GemmRejectsAddWithoutConstOperand)
 {
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(mkChain({mkAdd()}, {})));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(mkChain({mkAdd()}, {})));
 }
 
 TEST(EpilogueLowering, GemmAcceptsPerColumnBias)
@@ -1017,7 +1024,7 @@ TEST(EpilogueLowering, GemmAcceptsPerColumnBias)
     ch.constBufs.push_back(Mat(2, sz, CV_32F, Scalar(0.5)));
 
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_TRUE(sinkOf(gemm)->setEpilogue(ch));
+    EXPECT_TRUE(sink(gemm)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, GemmRejectsPerRowBias)
@@ -1027,13 +1034,13 @@ TEST(EpilogueLowering, GemmRejectsPerRowBias)
     ch.constBufs.push_back(Mat(2, sz, CV_32F, Scalar(0.5)));
 
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(ch));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, GemmRejectsMissingConstBuffer)
 {
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(mkChain({mkAdd()}, {{"Add", perChannelOp(0)}})));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(mkChain({mkAdd()}, {{"Add", perChannelOp(0)}})));
 }
 
 TEST(EpilogueLowering, GemmAcceptsBiasThenClip)
@@ -1044,7 +1051,7 @@ TEST(EpilogueLowering, GemmAcceptsBiasThenClip)
     ch.constBufs.push_back(Mat(2, sz, CV_32F, Scalar(0.5)));
 
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_TRUE(sinkOf(gemm)->setEpilogue(ch));
+    EXPECT_TRUE(sink(gemm)->setEpilogue(ch));
 }
 
 TEST(EpilogueLowering, SinkRefusesWhenAlreadyFused)
@@ -1053,8 +1060,8 @@ TEST(EpilogueLowering, SinkRefusesWhenAlreadyFused)
     Ptr<Layer> gemm = mkGemm();
     Ptr<Layer> gelu = GeluLayer::create(lp);
 
-    ASSERT_TRUE(sinkOf(gemm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    ASSERT_TRUE(sink(gemm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(mkChain({gelu}, {{"Gelu", EpOperand()}})));
 }
 
 struct InterpOn
@@ -1068,21 +1075,21 @@ TEST(EpilogueInterpTier, MulIsRefusedWhenInterpOff)
 {
     InterpOn off(false);
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
 }
 
 TEST(EpilogueInterpTier, MulIsAcceptedWhenInterpOn)
 {
     InterpOn on(true);
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_TRUE(sinkOf(gemm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
+    EXPECT_TRUE(sink(gemm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
 }
 
 TEST(EpilogueInterpTier, MatMulAlsoGetsTheInterpTier)
 {
     InterpOn on(true);
     Ptr<Layer> mm = mkMatMul();
-    EXPECT_TRUE(sinkOf(mm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
+    EXPECT_TRUE(sink(mm)->setEpilogue(mkChain({mkMul()}, {{"Mul", scalarOp(2.f)}})));
 }
 
 TEST(EpilogueInterpTier, InterpRefusesConstOnNonTrailingAxis)
@@ -1096,7 +1103,7 @@ TEST(EpilogueInterpTier, InterpRefusesConstOnNonTrailingAxis)
     EXPECT_FALSE(epLower(ch, steps));
 
     Ptr<Layer> gemm = mkGemm();
-    EXPECT_FALSE(sinkOf(gemm)->setEpilogue(ch));
+    EXPECT_FALSE(sink(gemm)->setEpilogue(ch));
 }
 
 TEST(EpilogueInterpTier, InterpCoversPrefixAndTierTwoCoversTail)
