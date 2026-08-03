@@ -65,9 +65,6 @@ static double typeMax(int depth)
 class ClipLayerImpl CV_FINAL : public ClipLayer
 {
 public:
-    float minValue, maxValue;
-    bool  hasMin,   hasMax;
-
     ClipLayerImpl(const LayerParams& params)
     {
         setParamsFrom(params);
