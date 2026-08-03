@@ -13,6 +13,8 @@ CV__DNN_INLINE_NS_BEGIN
 
 using std::vector;
 
+EpilogueSink::~EpilogueSink() {}
+
 struct ModelFusionPointwise
 {
     explicit ModelFusionPointwise(Net::Impl* netimpl_) : netimpl(netimpl_) {}

@@ -42,9 +42,9 @@ struct PointwiseChain
     int epSteps = 0;
 };
 
-struct EpilogueSink
+struct CV_EXPORTS EpilogueSink
 {
-    virtual ~EpilogueSink() {}
+    virtual ~EpilogueSink();
     virtual bool setEpilogue(const PointwiseChain& ch) = 0;
 };
 
