@@ -13,17 +13,17 @@ CV__DNN_INLINE_NS_BEGIN
 
 using std::vector;
 
-EpilogueSink::~EpilogueSink() {}
+FusionSink::~FusionSink() {}
 
-struct ModelFusionPointwise
+struct ModelFusionAgnostic
 {
-    explicit ModelFusionPointwise(Net::Impl* netimpl_) : netimpl(netimpl_) {}
+    explicit ModelFusionAgnostic(Net::Impl* netimpl_) : netimpl(netimpl_) {}
 
     void fuse() { fuseGraph(netimpl->mainGraph); }
 
     ConstInfoFn makeConstInfo()
     {
-        return [this](Arg a, EpConstInfo& info) -> bool
+        return [this](Arg a, FusionConstInfo& info) -> bool
         {
             if (!netimpl->isConstArg(a)) return false;
             Mat t = netimpl->argTensor(a);
@@ -44,16 +44,16 @@ struct ModelFusionPointwise
         };
     }
 
-    void collect(const Ptr<Graph>& graph, vector<PointwiseChain>& chains)
+    void collect(const Ptr<Graph>& graph, vector<AgnosticChain>& chains)
     {
         vector<int> usecounts;
         netimpl->useCounts(usecounts);
-        collectPointwiseChains(graph, (int)netimpl->args.size(), usecounts, makeConstInfo(), chains);
+        collectAgnosticChains(graph, (int)netimpl->args.size(), usecounts, makeConstInfo(), chains);
     }
 
-    static bool dumpEnabled() { return epilogueDumpEnabled(); }
+    static bool dumpEnabled() { return fusionDumpEnabled(); }
 
-    static void dumpChain(const vector<Ptr<LayerInfo> >& prog, const PointwiseChain& ch,
+    static void dumpChain(const vector<Ptr<LayerInfo> >& prog, const AgnosticChain& ch,
                           const char* verdict, size_t accepted = 0)
     {
         std::string s;
@@ -61,30 +61,30 @@ struct ModelFusionPointwise
             if (k) s += (k == accepted + 1) ? " | " : " -> ";
             s += effectiveOpType(prog[ch.nodes[k]]);
         }
-        CV_LOG_INFO(NULL, cv::format("[epilogue] %-28s %s", verdict, s.c_str()));
+        CV_LOG_INFO(NULL, cv::format("[fusion] %-28s %s", verdict, s.c_str()));
     }
 
-    static PointwiseChain truncateChain(const PointwiseChain& ch, size_t nsteps)
+    static AgnosticChain truncateChain(const AgnosticChain& ch, size_t nsteps)
     {
         if (nsteps == ch.absorbed.size())
             return ch;
-        PointwiseChain t;
+        AgnosticChain t;
         t.nodes.assign(ch.nodes.begin(), ch.nodes.begin() + nsteps + 1);
         t.absorbed.assign(ch.absorbed.begin(), ch.absorbed.begin() + nsteps);
         t.stepOperands.assign(ch.stepOperands.begin(), ch.stepOperands.begin() + nsteps);
         t.constArgs = ch.constArgs;
         t.constBufs = ch.constBufs;
 
-        const int keep = std::min((int)nsteps, ch.epSteps);
+        const int keep = std::min((int)nsteps, ch.fgSteps);
         if (keep > 0) {
-            EpBuilder b;
-            int cur = b.push(EpOP::INPUT, {});
+            FusionGraphBuilder b;
+            int cur = b.push(FusionOp::INPUT, {});
             for (int k = 0; k < keep && cur >= 0; k++)
-                cur = appendNode(b, cur, effectiveOpType(ch.absorbed[k]), ch.stepOperands[k]);
+                cur = appendFusionNode(b, cur, effectiveOpType(ch.absorbed[k]), ch.stepOperands[k]);
             if (cur >= 0) {
                 b.g.outputNode = cur;
-                t.ep = b.g;
-                t.epSteps = keep;
+                t.fg = b.g;
+                t.fgSteps = keep;
             }
         }
         return t;
@@ -104,7 +104,7 @@ struct ModelFusionPointwise
             }
         }
 
-        vector<PointwiseChain> chains;
+        vector<AgnosticChain> chains;
         collect(graph, chains);
         if (chains.empty()) return;
 
@@ -112,9 +112,9 @@ struct ModelFusionPointwise
         vector<bool> dropped(nops, false);
         int nfused = 0;
 
-        for (PointwiseChain& ch : chains) {
+        for (AgnosticChain& ch : chains) {
             const Ptr<LayerInfo>& anchor = prog[ch.nodes[0]];
-            EpilogueSink* sink = dynamic_cast<EpilogueSink*>(anchor.get());
+            FusionSink* sink = dynamic_cast<FusionSink*>(anchor.get());
             if (!sink) {
                 if (dumpEnabled()) dumpChain(prog, ch, "refused(no-sink)");
                 continue;
@@ -126,8 +126,8 @@ struct ModelFusionPointwise
 
             size_t accepted = 0;
             for (size_t n = ch.absorbed.size(); n >= 1; n--) {
-                PointwiseChain t = truncateChain(ch, n);
-                if (sink->setEpilogue(t)) { accepted = n; break; }
+                AgnosticChain t = truncateChain(ch, n);
+                if (sink->setFusion(t)) { accepted = n; break; }
             }
             if (accepted == 0) {
                 if (dumpEnabled()) dumpChain(prog, ch, "refused(lowering)");
@@ -155,19 +155,19 @@ struct ModelFusionPointwise
         }
         graph->setProg(newprog);
 
-        CV_LOG_DEBUG(NULL, cv::format("fusePointwise: fused %d chain(s) in graph '%s'",
+        CV_LOG_DEBUG(NULL, cv::format("fuseAgnostic: fused %d chain(s) in graph '%s'",
                                       nfused, graph->name().c_str()));
     }
 
     Net::Impl* netimpl;
 };
 
-void Net::Impl::fusePointwise()
+void Net::Impl::fuseAgnostic()
 {
-    if (!getEpilogueFusionEnabled())
+    if (!getAgnosticFusionEnabled())
         return;
 
-    ModelFusionPointwise pass(this);
+    ModelFusionAgnostic pass(this);
     pass.fuse();
 }
 
@@ -201,18 +201,18 @@ bool graphInputShape(Net& net, MatShape& shape)
     return true;
 }
 
-void collectPointwiseChainTypes(Net& net, std::vector<std::vector<std::string> >& chains)
+void collectAgnosticChainTypes(Net& net, std::vector<std::vector<std::string> >& chains)
 {
     chains.clear();
     Net::Impl* impl = net.getImpl();
     CV_Assert(impl && impl->mainGraph);
 
-    ModelFusionPointwise pass(impl);
-    vector<PointwiseChain> found;
+    ModelFusionAgnostic pass(impl);
+    vector<AgnosticChain> found;
     pass.collect(impl->mainGraph, found);
 
     const vector<Ptr<LayerInfo> >& prog = impl->mainGraph->prog();
-    for (const PointwiseChain& ch : found) {
+    for (const AgnosticChain& ch : found) {
         std::vector<std::string> types;
         for (int n : ch.nodes)
             types.push_back(effectiveOpType(prog[n]));

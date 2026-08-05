@@ -6,7 +6,7 @@
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
-#include "cpu_kernels/epilogue_apply.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 // OpenVINO backend
@@ -27,18 +27,18 @@ using namespace cv::dnn::cuda4dnn;
 
 namespace cv { namespace dnn {
 
-class MatMulLayerImpl CV_FINAL : public MatMulLayer, public EpilogueSink {
+class MatMulLayerImpl CV_FINAL : public MatMulLayer, public FusionSink {
 #ifdef HAVE_OPENCL
     UMat weight_umat, bias_umat;
 #endif
-    std::vector<EpStep> epilogueSteps;
+    std::vector<FusionStep> fusionSteps;
 
  public:
-    virtual bool setEpilogue(const PointwiseChain& ch) CV_OVERRIDE
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
     {
-        if (!epilogueSteps.empty())
+        if (!fusionSteps.empty())
             return false;
-        return epLower(ch, epilogueSteps);
+        return fusionLower(ch, fusionSteps);
     }
 
     MatMulLayerImpl(const LayerParams& params) {
@@ -317,12 +317,12 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer, public EpilogueSink {
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
 
-        epApply(epilogueSteps, Y);
+        fusionApply(fusionSteps, Y);
     }
 
 #ifdef HAVE_OPENCL
     bool forward_ocl(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, InputArrayOfArrays internals) {
-        if (!epilogueSteps.empty())
+        if (!fusionSteps.empty())
             return false;
 
         std::vector<UMat> inputs;
