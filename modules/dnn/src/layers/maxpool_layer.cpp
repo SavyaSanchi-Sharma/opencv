@@ -516,7 +516,7 @@ public:
         config.roundMode = ceil_mode ? cuda4dnn::PoolingConfiguration::RoundingMode::CEIL
                                      : cuda4dnn::PoolingConfiguration::RoundingMode::FLOOR;
         config.input_shape.assign(inShape.begin(), inShape.end());
-        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->cudnn_handle), config);
+        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config);
     }
 #endif
 

@@ -139,6 +139,7 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<ArgData> args;
     std::vector<UMat> __tensors__;
     std::vector<int> bufidxs;
+    std::unordered_map<int, int> declaredOutputTypes;
     std::vector<UMat> buffers;
     std::vector<Mat> scratchBufs;
     std::vector<Ptr<Graph> > allgraphs;

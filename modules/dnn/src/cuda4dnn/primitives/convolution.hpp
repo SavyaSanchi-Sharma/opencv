@@ -284,10 +284,6 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
 #ifdef HAVE_CUDNNJIT
             {
-                /* hard failure: there is no legacy convoluter in a JIT-only build to fall back to */
-                CV_CheckEQ(groups, static_cast<std::size_t>(1),
-                           "cuDNN JIT convolution does not support grouped or depthwise convolution");
-
                 const auto& conv_in = params.input_shape;
                 CV_Assert(conv_in.size() == rank);
                 CV_Assert(output_shape.size() == rank);

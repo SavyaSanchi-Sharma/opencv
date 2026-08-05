@@ -473,7 +473,7 @@ public:
 
         config.input_shape.assign(std::begin(input_shape), std::end(input_shape));
 
-        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->cudnn_handle), config);
+        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config);
     }
 #endif
 

@@ -16,6 +16,7 @@
 #endif
 
 #include <cstddef>
+#include <cstdlib>
 #include <array>
 #include <algorithm>
 #include <functional>
@@ -77,6 +78,10 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
          */
         UniqueHandle(Stream strm) : stream(std::move(strm)) {
             CV_Assert(stream);
+#ifdef HAVE_CUDNNJIT
+            if (!std::getenv("CUDNN_LIB_CONFIG"))
+                setenv("CUDNN_LIB_CONFIG", "GRAPH_JIT_ONLY", 0);
+#endif
             CUDA4DNN_CHECK_CUDNN(cudnnCreate(&handle));
             try {
                 CUDA4DNN_CHECK_CUDNN(cudnnSetStream(handle, stream.get()));

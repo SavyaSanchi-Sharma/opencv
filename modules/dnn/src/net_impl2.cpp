@@ -640,6 +640,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
             if (!op)
                 continue;
             if (op->subgraphs()) { graphOnCuda = false; break; }
+            if (op->dynamicOutputShapes()) { graphOnCuda = false; break; }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
             if (!e) { graphOnCuda = false; break; }
             cudaExecs[i] = e;
@@ -1893,8 +1894,18 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
 #endif
         const UMat& outm = argTensor(out);
         if (isMainGraph) {
+            auto declared_it = declaredOutputTypes.find(out.idx);
+            int declaredType = declared_it != declaredOutputTypes.end() ? declared_it->second : -1;
+            auto isFloatDepth = [](int d) {
+                return d == CV_32F || d == CV_64F || d == CV_16F || d == CV_16BF;
+            };
+            bool widenToDeclared = declaredType >= 0 && isFloatDepth(CV_MAT_DEPTH(declaredType)) &&
+                                   !isFloatDepth(outm.depth());
             if (outm.size.layout == DATA_LAYOUT_BLOCK) {
                 transformLayout(outm.getMat(ACCESS_READ), outputsVec[i], originalLayout, originalLayout, outm.size.C);
+            } else if (widenToDeclared) {
+                outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_MAT_DEPTH(declaredType), outm.channels()));
+                outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_MAT_DEPTH(declaredType));
             } else if (outm.depth() == CV_16F || outm.depth() == CV_16BF) {
                 outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_32F, outm.channels()));
                 outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_32F);

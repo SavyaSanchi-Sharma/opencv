@@ -417,7 +417,8 @@ public:
             }
             else if (!baseIsFloat && expIsFloat)
             {
-                out_type = CV_32F;
+                // ONNX Pow output type follows the base (X): integer base -> integer output.
+                out_type = inputs[0];
             }
             else
             {
@@ -428,12 +429,11 @@ public:
         }
 
         CV_Assert(inputs.size());
-        bool fp16Target = (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16);
         MatType commonType = inputs[0];
         for (auto input : inputs)
         {
             CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
-            bool fp16Mix = fp16Target && (input == CV_16F || input == CV_32F) && (commonType == CV_16F || commonType == CV_32F);
+            bool fp16Mix = (input == CV_16F && commonType == CV_32F) || (input == CV_32F && commonType == CV_16F);
             if (fp16Mix)
                 commonType = CV_32F;
             else
