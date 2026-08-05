@@ -536,7 +536,7 @@ struct Net::Impl : public detail::NetImplBase
     void fuseTransposeMatMul();
     // fold a scalar Mul/Div before Softmax into Softmax::scale (CPU only)
     void fuseScaleSoftmax();
-    void fusePointwise();
+    void fuseAgnostic();
     // replace constant sub-expressions with their results
 
     void fuseQDQ();

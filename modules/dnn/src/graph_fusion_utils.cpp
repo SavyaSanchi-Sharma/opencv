@@ -13,31 +13,31 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-static std::atomic<bool>& epilogueFusionFlag()
+static std::atomic<bool>& agnosticFusionFlag()
 {
-    static std::atomic<bool> enabled(!utils::getConfigurationParameterBool("OPENCV_DNN_DISABLE_EPILOGUE_FUSION", false));
+    static std::atomic<bool> enabled(!utils::getConfigurationParameterBool("OPENCV_DNN_DISABLE_AGNOSTIC_FUSION", false));
     return enabled;
 }
 
-bool getEpilogueFusionEnabled() { return epilogueFusionFlag().load(); }
+bool getAgnosticFusionEnabled() { return agnosticFusionFlag().load(); }
 
-void setEpilogueFusionEnabled(bool enabled) { epilogueFusionFlag().store(enabled); }
+void setAgnosticFusionEnabled(bool enabled) { agnosticFusionFlag().store(enabled); }
 
-bool epilogueDumpEnabled()
+bool fusionDumpEnabled()
 {
-    static const bool on = utils::getConfigurationParameterBool("OPENCV_DNN_EPILOGUE_DUMP", false);
+    static const bool on = utils::getConfigurationParameterBool("OPENCV_DNN_FUSION_DUMP", false);
     return on;
 }
 
-static std::atomic<bool>& epilogueInterpFlag()
+static std::atomic<bool>& fusionInterpFlag()
 {
-    static std::atomic<bool> on(utils::getConfigurationParameterBool("OPENCV_DNN_EPILOGUE_INTERP", false));
+    static std::atomic<bool> on(utils::getConfigurationParameterBool("OPENCV_DNN_FUSION_INTERP", false));
     return on;
 }
 
-bool epilogueInterpEnabled() { return epilogueInterpFlag().load(); }
+bool fusionInterpEnabled() { return fusionInterpFlag().load(); }
 
-void setEpilogueInterpEnabled(bool enabled) { epilogueInterpFlag().store(enabled); }
+void setFusionInterpEnabled(bool enabled) { fusionInterpFlag().store(enabled); }
 
 OpShape classify(const std::string& opType)
 {
@@ -114,7 +114,7 @@ static int consumerOf(const std::vector<Ptr<LayerInfo> >& prog, Arg a, int from)
     return -1;
 }
 
-static int bufIdFor(PointwiseChain& ch, Arg a)
+static int bufIdFor(AgnosticChain& ch, Arg a)
 {
     for (size_t k = 0; k < ch.constArgs.size(); k++) {
         if (ch.constArgs[k].idx == a.idx) return (int)k;
@@ -124,7 +124,7 @@ static int bufIdFor(PointwiseChain& ch, Arg a)
 }
 
 static bool resolveOperand(const Ptr<LayerInfo>& L, const std::string& opType, Arg cur,
-                           const ConstInfoFn& constInfo, PointwiseChain& ch, EpOperand& oper)
+                           const ConstInfoFn& constInfo, AgnosticChain& ch, FusionOperand& oper)
 {
     if (opType == "Clip") {
         oper.scalar  = -FLT_MAX;
@@ -137,7 +137,7 @@ static bool resolveOperand(const Ptr<LayerInfo>& L, const std::string& opType, A
         for (size_t k = 1; k < L->inputs.size() && k <= 2; k++) {
             Arg a = L->inputs[k];
             if (a.idx == 0) continue;
-            EpConstInfo info;
+            FusionConstInfo info;
             if (!constInfo(a, info) || !info.isScalar) return false;
             if (k == 1) oper.scalar = info.scalar;
             else        oper.scalar2 = info.scalar;
@@ -158,7 +158,7 @@ static bool resolveOperand(const Ptr<LayerInfo>& L, const std::string& opType, A
     if (opType == "Sub" && (L->inputs.empty() || L->inputs[0].idx != cur.idx))
         return false;
 
-    EpConstInfo info;
+    FusionConstInfo info;
     if (!constInfo(side, info)) return false;
 
     oper.hasSide = true;
@@ -171,10 +171,10 @@ static bool resolveOperand(const Ptr<LayerInfo>& L, const std::string& opType, A
     return true;
 }
 
-void collectPointwiseChains(const Ptr<Graph>& g, int nargs,
+void collectAgnosticChains(const Ptr<Graph>& g, int nargs,
                              const std::vector<int>& useCounts,
                              const ConstInfoFn& constInfo,
-                             std::vector<PointwiseChain>& chains)
+                             std::vector<AgnosticChain>& chains)
 {
     chains.clear();
     if (!g) return;
@@ -191,12 +191,12 @@ void collectPointwiseChains(const Ptr<Graph>& g, int nargs,
         if (classify(effectiveOpType(prog[i])) != OpShape::ANCHOR_TEMPLATE) continue;
         if (prog[i]->outputs.size() != 1) continue;
 
-        PointwiseChain ch;
+        AgnosticChain ch;
         ch.nodes.push_back((int)i);
 
-        EpBuilder b;
-        int epCur = b.push(EpOP::INPUT, {});
-        bool epOpen = true;
+        FusionGraphBuilder b;
+        int fgCur = b.push(FusionOp::INPUT, {});
+        bool fgOpen = true;
         Arg curArg = prog[i]->outputs[0];
 
         while (curArg.idx > 0 && curArg.idx < (int)useCounts.size() && useCounts[curArg.idx] == 1) {
@@ -212,21 +212,21 @@ void collectPointwiseChains(const Ptr<Graph>& g, int nargs,
             if (L->subgraphs()) break;
 
             bool appended = false;
-            EpOperand oper;
-            if (epOpen && isMap) {
+            FusionOperand oper;
+            if (fgOpen && isMap) {
                 if (resolveOperand(L, opType, curArg, constInfo, ch, oper)) {
-                    int next = appendNode(b, epCur, opType, oper);
+                    int next = appendFusionNode(b, fgCur, opType, oper);
                     if (next >= 0) {
-                        epCur = next;
-                        ch.epSteps = (int)ch.absorbed.size() + 1;
+                        fgCur = next;
+                        ch.fgSteps = (int)ch.absorbed.size() + 1;
                         appended = true;
                     }
                 }
             }
             if (!appended) {
                 if (!isActiv || L->inputs.size() != 1) break;
-                epOpen = false;
-                oper = EpOperand();
+                fgOpen = false;
+                oper = FusionOperand();
             }
 
             ch.nodes.push_back(j);
@@ -236,9 +236,9 @@ void collectPointwiseChains(const Ptr<Graph>& g, int nargs,
         }
 
         if (ch.nodes.size() > 1) {
-            if (ch.epSteps > 0) {
-                b.g.outputNode = epCur;
-                ch.ep = b.g;
+            if (ch.fgSteps > 0) {
+                b.g.outputNode = fgCur;
+                ch.fg = b.g;
             }
             for (int n : ch.nodes) taken[n] = true;
             chains.push_back(ch);

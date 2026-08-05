@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 #include "opencv2/dnn/dnn.hpp"
-#include "epilogue.hpp"
+#include "fusion_graph.hpp"
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -23,45 +23,45 @@ CV_EXPORTS std::string effectiveOpType(const Ptr<LayerInfo>& l);
 
 CV_EXPORTS void buildProducerOf(const Ptr<Graph>& g, int nargs, std::vector<int>& producerOf);
 
-struct EpConstInfo
+struct FusionConstInfo
 {
     bool isScalar = false;
     float scalar = 0.f;
 };
 
-typedef std::function<bool(Arg, EpConstInfo&)> ConstInfoFn;
+typedef std::function<bool(Arg, FusionConstInfo&)> ConstInfoFn;
 
-struct PointwiseChain
+struct AgnosticChain
 {
     std::vector<int> nodes;
     std::vector<Ptr<LayerInfo> > absorbed;
     std::vector<Arg> constArgs;
     std::vector<Mat> constBufs;
-    std::vector<EpOperand> stepOperands;
-    EpGraph ep;
-    int epSteps = 0;
+    std::vector<FusionOperand> stepOperands;
+    FusionGraph fg;
+    int fgSteps = 0;
 };
 
-struct CV_EXPORTS EpilogueSink
+struct CV_EXPORTS FusionSink
 {
-    virtual ~EpilogueSink();
-    virtual bool setEpilogue(const PointwiseChain& ch) = 0;
+    virtual ~FusionSink();
+    virtual bool setFusion(const AgnosticChain& ch) = 0;
 };
 
-CV_EXPORTS bool getEpilogueFusionEnabled();
-CV_EXPORTS void setEpilogueFusionEnabled(bool enabled);
+CV_EXPORTS bool getAgnosticFusionEnabled();
+CV_EXPORTS void setAgnosticFusionEnabled(bool enabled);
 
-CV_EXPORTS bool epilogueDumpEnabled();
+CV_EXPORTS bool fusionDumpEnabled();
 
-CV_EXPORTS bool epilogueInterpEnabled();
-CV_EXPORTS void setEpilogueInterpEnabled(bool enabled);
+CV_EXPORTS bool fusionInterpEnabled();
+CV_EXPORTS void setFusionInterpEnabled(bool enabled);
 
-CV_EXPORTS void collectPointwiseChains(const Ptr<Graph>& g, int nargs,
+CV_EXPORTS void collectAgnosticChains(const Ptr<Graph>& g, int nargs,
                                         const std::vector<int>& useCounts,
                                         const ConstInfoFn& constInfo,
-                                        std::vector<PointwiseChain>& chains);
+                                        std::vector<AgnosticChain>& chains);
 
-CV_EXPORTS void collectPointwiseChainTypes(Net& net, std::vector<std::vector<std::string> >& chains);
+CV_EXPORTS void collectAgnosticChainTypes(Net& net, std::vector<std::vector<std::string> >& chains);
 
 CV_EXPORTS void graphOpTypes(Net& net, std::vector<std::string>& types);
 

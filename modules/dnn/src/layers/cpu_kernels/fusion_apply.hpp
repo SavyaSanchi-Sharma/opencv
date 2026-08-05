@@ -4,8 +4,8 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-#ifndef __OPENCV_DNN_SRC_LAYERS_CPU_KERNELS_EPILOGUE_APPLY_HPP__
-#define __OPENCV_DNN_SRC_LAYERS_CPU_KERNELS_EPILOGUE_APPLY_HPP__
+#ifndef __OPENCV_DNN_SRC_LAYERS_CPU_KERNELS_FUSION_APPLY_HPP__
+#define __OPENCV_DNN_SRC_LAYERS_CPU_KERNELS_FUSION_APPLY_HPP__
 
 #include "opencv2/core.hpp"
 #include "opencv2/dnn/all_layers.hpp"
@@ -14,7 +14,7 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-struct EpStep
+struct FusionStep
 {
     ActivationFunc fn = nullptr;
     std::vector<float> params;
@@ -22,11 +22,11 @@ struct EpStep
     float scalar = 0.f;
     bool scalarAdd = false;
     bool interp = false;
-    EpGraph g;
+    FusionGraph g;
     std::vector<Mat> bufs;
 };
 
-inline bool epLowerActiv(const Ptr<LayerInfo>& l, EpStep& s)
+inline bool fusionLowerActiv(const Ptr<LayerInfo>& l, FusionStep& s)
 {
     const ActivationLayer* a = dynamic_cast<const ActivationLayer*>(l.get());
     if (!a)
@@ -35,11 +35,11 @@ inline bool epLowerActiv(const Ptr<LayerInfo>& l, EpStep& s)
     return s.fn != nullptr;
 }
 
-inline bool epLowerClip(const PointwiseChain& ch, size_t i, EpStep& s)
+inline bool fusionLowerClip(const AgnosticChain& ch, size_t i, FusionStep& s)
 {
-    if (effectiveOpType(ch.absorbed[i]) != "Clip" || (int)i >= ch.epSteps)
+    if (effectiveOpType(ch.absorbed[i]) != "Clip" || (int)i >= ch.fgSteps)
         return false;
-    const EpOperand& o = ch.stepOperands[i];
+    const FusionOperand& o = ch.stepOperands[i];
     s.params.assign(2, 0.f);
     s.params[0] = o.scalar;
     s.params[1] = o.scalar2;
@@ -47,11 +47,11 @@ inline bool epLowerClip(const PointwiseChain& ch, size_t i, EpStep& s)
     return s.fn != nullptr;
 }
 
-inline bool epLowerBiasAdd(const PointwiseChain& ch, size_t i, EpStep& s)
+inline bool fusionLowerBiasAdd(const AgnosticChain& ch, size_t i, FusionStep& s)
 {
     if (effectiveOpType(ch.absorbed[i]) != "Add")
         return false;
-    const EpOperand& o = ch.stepOperands[i];
+    const FusionOperand& o = ch.stepOperands[i];
     if (!o.hasSide)
         return false;
     if (o.bufId < 0) {
@@ -70,16 +70,16 @@ inline bool epLowerBiasAdd(const PointwiseChain& ch, size_t i, EpStep& s)
     return true;
 }
 
-inline bool epLower(const PointwiseChain& ch, std::vector<EpStep>& out)
+inline bool fusionLower(const AgnosticChain& ch, std::vector<FusionStep>& out)
 {
     if (ch.absorbed.empty() || ch.stepOperands.size() != ch.absorbed.size())
         return false;
 
-    std::vector<EpStep> steps;
+    std::vector<FusionStep> steps;
     size_t i = 0;
     for (; i < ch.absorbed.size(); i++) {
-        EpStep s;
-        if (!epLowerActiv(ch.absorbed[i], s) && !epLowerClip(ch, i, s) && !epLowerBiasAdd(ch, i, s))
+        FusionStep s;
+        if (!fusionLowerActiv(ch.absorbed[i], s) && !fusionLowerClip(ch, i, s) && !fusionLowerBiasAdd(ch, i, s))
             break;
         steps.push_back(s);
     }
@@ -88,14 +88,14 @@ inline bool epLower(const PointwiseChain& ch, std::vector<EpStep>& out)
         return true;
     }
 
-    if ((int)i >= ch.epSteps || ch.ep.empty() || ch.ep.size() > (size_t)EP_MAX_NODES ||
-        !epilogueInterpEnabled())
+    if ((int)i >= ch.fgSteps || ch.fg.empty() || ch.fg.size() > (size_t)FUSION_MAX_NODES ||
+        !fusionInterpEnabled())
         return false;
 
     steps.clear();
-    EpStep s;
+    FusionStep s;
     s.interp = true;
-    s.g = ch.ep;
+    s.g = ch.fg;
     s.bufs = ch.constBufs;
     for (const Mat& m : s.bufs) {
         if (m.empty() || m.type() != CV_32F || !m.isContinuous())
@@ -105,9 +105,9 @@ inline bool epLower(const PointwiseChain& ch, std::vector<EpStep>& out)
     }
     steps.push_back(s);
 
-    for (size_t k = (size_t)ch.epSteps; k < ch.absorbed.size(); k++) {
-        EpStep t;
-        if (!epLowerActiv(ch.absorbed[k], t) && !epLowerClip(ch, k, t) && !epLowerBiasAdd(ch, k, t))
+    for (size_t k = (size_t)ch.fgSteps; k < ch.absorbed.size(); k++) {
+        FusionStep t;
+        if (!fusionLowerActiv(ch.absorbed[k], t) && !fusionLowerClip(ch, k, t) && !fusionLowerBiasAdd(ch, k, t))
             return false;
         steps.push_back(t);
     }
@@ -115,7 +115,7 @@ inline bool epLower(const PointwiseChain& ch, std::vector<EpStep>& out)
     return true;
 }
 
-inline void epApply(const std::vector<EpStep>& steps, Mat& Y)
+inline void fusionApply(const std::vector<FusionStep>& steps, Mat& Y)
 {
     if (steps.empty())
         return;
@@ -128,7 +128,7 @@ inline void epApply(const std::vector<EpStep>& steps, Mat& Y)
 
     const int nch = Y.dims > 0 ? Y.size[Y.dims - 1] : 1;
 
-    for (const EpStep& s : steps) {
+    for (const FusionStep& s : steps) {
         if (s.interp) {
             std::vector<const float*> bp(s.bufs.size());
             for (size_t i = 0; i < s.bufs.size(); i++) {
@@ -139,7 +139,7 @@ inline void epApply(const std::vector<EpStep>& steps, Mat& Y)
                 for (int b = r.start; b < r.end; b++) {
                     size_t st = (size_t)b * BLOCK, en = std::min(st + BLOCK, n);
                     for (size_t k = st; k < en; k++)
-                        p[k] = evalEpilogue(s.g, p[k], bp, nch > 0 ? (int)(k % (size_t)nch) : 0);
+                        p[k] = evalFusionGraph(s.g, p[k], bp, nch > 0 ? (int)(k % (size_t)nch) : 0);
                 }
             });
         } else if (s.fn) {

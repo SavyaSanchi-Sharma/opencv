@@ -31,7 +31,7 @@ namespace dnn
     Opset's 1 to 22 are covered.
 */
 
-class Conv2LayerImpl : public Conv2Layer, public EpilogueSink
+class Conv2LayerImpl : public Conv2Layer, public FusionSink
 {
 public:
     Conv2LayerImpl(const LayerParams& params)
@@ -276,7 +276,7 @@ public:
         return true;
     }
 
-    virtual bool setEpilogue(const PointwiseChain& ch) CV_OVERRIDE
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
     {
         if (ch.absorbed.empty() || ch.stepOperands.size() != ch.absorbed.size())
             return false;
@@ -291,7 +291,7 @@ public:
         return lowerAffine(ch);
     }
 
-    bool lowerAffine(const PointwiseChain& ch)
+    bool lowerAffine(const AgnosticChain& ch)
     {
         if (fusedBatchNorm || addResidual || inputs.size() > 1)
             return false;
@@ -343,9 +343,9 @@ public:
         return true;
     }
 
-    bool perChannelValues(const PointwiseChain& ch, size_t i, int K, std::vector<float>& out) const
+    bool perChannelValues(const AgnosticChain& ch, size_t i, int K, std::vector<float>& out) const
     {
-        const EpOperand& o = ch.stepOperands[i];
+        const FusionOperand& o = ch.stepOperands[i];
         if (!o.hasSide)
             return false;
         if (o.bufId < 0) {
@@ -373,14 +373,14 @@ public:
         return true;
     }
 
-    bool lowerAddBias(const PointwiseChain& ch)
+    bool lowerAddBias(const AgnosticChain& ch)
     {
         if (ch.stepOperands.empty() || wshape0.empty() || wshape0.dims < 3)
             return false;
         if (effectiveOpType(ch.absorbed[0]) != "Add")
             return false;
 
-        const EpOperand& o = ch.stepOperands[0];
+        const FusionOperand& o = ch.stepOperands[0];
         if (!o.hasSide)
             return false;
 
@@ -412,16 +412,16 @@ public:
         return fuseAddBias(flat);
     }
 
-    bool lowerClamp(const PointwiseChain& ch)
+    bool lowerClamp(const AgnosticChain& ch)
     {
         if (fastActivation != FAST_ACTIV_NONE || activationFunc != nullptr || !activ.empty())
             return false;
-        if (ch.epSteps != (int)ch.absorbed.size())
+        if (ch.fgSteps != (int)ch.absorbed.size())
             return false;
 
-        const std::vector<EpNode>& nodes = ch.ep.nodes();
-        int out = ch.ep.outputNode;
-        if (out < 0 || out >= (int)nodes.size() || nodes[out].op != EpOP::CLAMP)
+        const std::vector<FusionNode>& nodes = ch.fg.nodes();
+        int out = ch.fg.outputNode;
+        if (out < 0 || out >= (int)nodes.size() || nodes[out].op != FusionOp::CLAMP)
             return false;
         if (nodes[out].scalar != 0.f)
             return false;

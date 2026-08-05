@@ -18,7 +18,7 @@ using namespace cv::dnn::cuda4dnn;
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
-#include "cpu_kernels/epilogue_apply.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 namespace cv { namespace dnn {
@@ -52,16 +52,16 @@ bool constC(LayerGemmOpMode mode){
 
 
 // Y = alpha * A’ * B’ + beta * C
-class GemmLayerImpl CV_FINAL : public GemmLayer, public EpilogueSink {
+class GemmLayerImpl CV_FINAL : public GemmLayer, public FusionSink {
 public:
-    virtual bool setEpilogue(const PointwiseChain& ch) CV_OVERRIDE
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
     {
-        if (!epilogueSteps.empty())
+        if (!fusionSteps.empty())
             return false;
-        return epLower(ch, epilogueSteps);
+        return fusionLower(ch, fusionSteps);
     }
 
-    std::vector<EpStep> epilogueSteps;
+    std::vector<FusionStep> fusionSteps;
 
     GemmLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
@@ -486,7 +486,7 @@ public:
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
 
-        epApply(epilogueSteps, Y);
+        fusionApply(fusionSteps, Y);
     }
 
 #ifdef HAVE_CUDA
