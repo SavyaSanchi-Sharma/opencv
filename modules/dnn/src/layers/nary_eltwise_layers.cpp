@@ -429,19 +429,21 @@ public:
         }
 
         CV_Assert(inputs.size());
+        MatType commonType = inputs[0];
         for (auto input : inputs)
         {
-            CV_CheckTypeEQ(inputs[0], input, "All inputs should have equal types");
-            if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-                CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
+            CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
+            bool fp16Mix = (input == CV_16F && commonType == CV_32F) || (input == CV_32F && commonType == CV_16F);
+            if (fp16Mix)
+                commonType = CV_32F;
             else
-                CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
+                CV_CheckTypeEQ(commonType, input, "All inputs should have equal types");
         }
 
         if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL || op == OPERATION::LESS || op == OPERATION::LESS_EQUAL)
             outputs.assign(1, CV_Bool);
         else
-            outputs.assign(requiredOutputs, inputs[0]);
+            outputs.assign(requiredOutputs, commonType);
     }
 
     int getLayouts(const std::vector<DataLayout>& actualInputs,
@@ -928,6 +930,9 @@ public:
         inputs_arr.getMatVector(inputs);
         outputs_arr.getMatVector(outputs);
 
+        if (outputs[0].total() == 0)
+            return;
+
         if (inputs.size() == 1) {
             inputs[0].copyTo(outputs[0]);
             return;
@@ -1325,8 +1330,8 @@ public:
     ) override
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
-        std::vector<cuda::GpuMatND> inputs;
-        inputs_.getGpuMatNDVector(inputs);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
 
         cuda4dnn::EltwiseOpType op_ = cuda4dnn::EltwiseOpType::SUM;
         switch (op) {

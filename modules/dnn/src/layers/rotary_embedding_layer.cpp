@@ -315,24 +315,48 @@ class RotaryEmbeddingLayerImpl CV_FINAL : public RotaryEmbeddingLayer   {
             const int batch_size = position_ids.size[0];
             const int seq_len = position_ids.size[1];
             const int seq_len_max = inputs[1].size[0];
-            const int dhalf = rotary_dim / 2;
+            const int dhalf = inputs[1].size[inputs[1].dims - 1];
             const Mat* caches[2] = { &inputs[1], &inputs[2] };
             for (int i = 0; i < 2; ++i)
             {
                 gather(
                     caches[i]->ptr<uchar>(), position_ids.ptr<int64_t>(),
                     batch_size, seq_len, seq_len_max,
-                    dhalf, sizeof(float),
+                    dhalf, caches[i]->elemSize(),
                     internals[i].ptr<uchar>()
                 );
             }
         }
 
+        const bool needConvert = input.depth() != CV_32F;
+        Mat inputF, outputF, cosF, sinF;
+        const float* inPtr;
+        float* outPtr;
+        const float* cosPtr;
+        const float* sinPtr;
+        if (needConvert)
+        {
+            input.convertTo(inputF, CV_32F);
+            cos_cache.convertTo(cosF, CV_32F);
+            sin_cache.convertTo(sinF, CV_32F);
+            outputF.create(output.dims, output.size.p, CV_32F);
+            inPtr = inputF.ptr<const float>();
+            outPtr = outputF.ptr<float>();
+            cosPtr = cosF.ptr<const float>();
+            sinPtr = sinF.ptr<const float>();
+        }
+        else
+        {
+            inPtr = input.ptr<const float>();
+            outPtr = output.ptr<float>();
+            cosPtr = cos_cache.ptr<const float>();
+            sinPtr = sin_cache.ptr<const float>();
+        }
+
         if (interleaved)
         {
             rotate_interleaved(
-                input.ptr<const float>(), output.ptr<float>(),
-                cos_cache.ptr<const float>(), sin_cache.ptr<const float>(),
+                inPtr, outPtr, cosPtr, sinPtr,
                 input.size[0], seq_len, num_heads, dim_head,
                 rotary_dim, is_data_4d
             );
@@ -340,12 +364,14 @@ class RotaryEmbeddingLayerImpl CV_FINAL : public RotaryEmbeddingLayer   {
         else
         {
             rotate(
-                input.ptr<const float>(), output.ptr<float>(),
-                cos_cache.ptr<const float>(), sin_cache.ptr<const float>(),
+                inPtr, outPtr, cosPtr, sinPtr,
                 input.size[0], seq_len, num_heads, dim_head,
                 rotary_dim, is_data_4d
             );
         }
+
+        if (needConvert)
+            outputF.convertTo(output, output.type());
     }
 
  private:

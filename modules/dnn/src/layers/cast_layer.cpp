@@ -22,7 +22,7 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
         return backendId == DNN_BACKEND_OPENCV ||
-               backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
+               backendId == DNN_BACKEND_INFERENCE_ENGINE;
     }
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -41,7 +41,7 @@ public:
         std::vector<MatType>& outputs,
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16 && outputType == CV_32F)
+        if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16) && outputType == CV_32F)
             outputs.assign(1, CV_16F);
         else
             outputs.assign(1, outputType);
