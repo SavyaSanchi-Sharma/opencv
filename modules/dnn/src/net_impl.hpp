@@ -423,10 +423,7 @@ struct Net::Impl : public detail::NetImplBase
     Arg getArg(const std::string& name);
     bool haveArg(const std::string& name) const;
 
-    Arg newConstArg(const std::string& name, const UMat& m);
-    UMat toArgTensor(const Mat& m) const;
-    MatAllocator* tensorAllocator() const;
-    Arg newConstScalarArg(const std::string& name, int type, const void* value);
+    Arg newConstArg(const std::string& name, const Mat& m);
     Arg newArg(const std::string& name, ArgKind kind, bool allowEmptyName=false);
     bool isConstArg(Arg arg) const;
     UMat& argTensor(Arg arg) const;
