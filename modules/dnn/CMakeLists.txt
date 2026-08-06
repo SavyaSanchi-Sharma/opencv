@@ -47,7 +47,6 @@ elseif(CV_GCC OR CV_CLANG)
   ocv_target_compile_options(${the_module} PRIVATE -ffast-math)
   ocv_target_compile_options(${the_module} PRIVATE -fno-finite-math-only)
 endif()
-
 ocv_option(OPENCV_DNN_CUDA "Build with CUDA support"
     HAVE_CUDA
     AND HAVE_CUBLAS

@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/cudnn.hpp"
 #include "../csl/stream.hpp"
 #include "../csl/tensor.hpp"
@@ -210,6 +216,26 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             if (!biasTensor.empty())
             {
                 std::size_t inner_size = total(output_wrapper->getShape(), 2, -1);
+                kernels::biasN<T>(stream, output, output, inner_size, biasTensor);
+            }
+        }
+
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            csl::WorkspaceAllocator allocator(workspace);
+            convoluter.transpose_convolve(output, input, filtersTensor, allocator.get_instance());
+            if (!biasTensor.empty())
+            {
+                std::size_t inner_size = total(shape(outputs[0]), 2, -1);
                 kernels::biasN<T>(stream, output, output, inner_size, biasTensor);
             }
         }

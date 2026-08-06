@@ -3,9 +3,14 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
 #include "layers_common.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/scatter_nd.hpp"
+#endif
 
 #include <algorithm> // for std::max & std::min
 
@@ -44,9 +49,26 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return reduction == REDUCTION::NONE;
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH && reduction == REDUCTION::NONE);
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        CV_Assert(inputs.size() == 3);
+        return make_cuda_node_with_type<cuda4dnn::ScatterNDOp>(preferableTarget, inputs[0].type(), std::move(context->stream));
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,

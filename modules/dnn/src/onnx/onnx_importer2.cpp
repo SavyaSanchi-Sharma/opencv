@@ -743,25 +743,19 @@ Net ONNXImporter2::parseModel()
 bool ONNXImporter2::parseValueInfo(const opencv_onnx::ValueInfoProto& valueInfoProto, ArgData& data)
 {
     CV_Assert(valueInfoProto.has_name());
-    // Subgraph body value-infos may omit type/shape; leave unset, inferred at runtime.
-    if (!valueInfoProto.has_type())
-        return true;
+    CV_Assert(valueInfoProto.has_type());
     const opencv_onnx::TypeProto& typeProto = valueInfoProto.type();
-    if (!typeProto.has_tensor_type())
-        return true;
+    CV_Assert(typeProto.has_tensor_type());
     const opencv_onnx::TypeProto::Tensor& tensor = typeProto.tensor_type();
+    CV_Assert(tensor.has_shape());
+    const opencv_onnx::TensorShapeProto& tensorShape = tensor.shape();
+    auto elem_type = tensor.elem_type();
 
-    if (tensor.has_elem_type()) {
-        auto elem_type = tensor.elem_type();
-        data.type = dataType2cv(elem_type);
-        if (data.type < 0) {
-            CV_Error(Error::StsNotImplemented, format("unsupported datatype '%s'", dataType2str(elem_type).c_str()));
-        }
+    data.type = dataType2cv(elem_type);
+    if (data.type < 0) {
+        CV_Error(Error::StsNotImplemented, format("unsupported datatype '%s'", dataType2str(elem_type).c_str()));
     }
 
-    if (!tensor.has_shape())
-        return true;
-    const opencv_onnx::TensorShapeProto& tensorShape = tensor.shape();
     int dim_size = tensorShape.dim_size();
     CV_CheckGE(dim_size, 0, "");
     MatShape shape(dim_size);

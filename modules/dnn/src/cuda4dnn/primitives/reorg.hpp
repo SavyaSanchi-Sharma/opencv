@@ -65,6 +65,43 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             kernels::permute(stream, output, input, { std::begin(order), std::end(order) });
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            const std::size_t permute_input_shape[] = {
+               input.get_axis_size(0),
+               input.get_axis_size(1) * input.get_axis_size(2) / (stride * stride),
+               stride,
+               input.get_axis_size(3),
+               stride
+            };
+
+            constexpr std::size_t order[] = { 0, 2, 4, 1, 3 };
+
+            const std::size_t permute_output_shape[] = {
+                permute_input_shape[order[0]],
+                permute_input_shape[order[1]],
+                permute_input_shape[order[2]],
+                permute_input_shape[order[3]],
+                permute_input_shape[order[4]]
+            };
+
+            input.unsqueeze();
+            input.reshape(std::begin(permute_input_shape), std::end(permute_input_shape));
+
+            output.unsqueeze();
+            output.reshape(std::begin(permute_output_shape), std::end(permute_output_shape));
+
+            kernels::permute(stream, output, input, { std::begin(order), std::end(order) });
+        }
+
     private:
         csl::Stream stream;
         std::size_t stride;

@@ -482,6 +482,23 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer, public FusionSink {
 
         return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        auto input_B = Mat(), bias = Mat();
+        if (!blobs.empty()) {
+            input_B = blobs.front();
+            if (blobs.size() >= 2) {
+                bias = broadcast_bias;
+            }
+        }
+
+        CV_CheckFalse(helper.empty(), "DNN/MatMul/CUDA: MatMulHelper is not initialized");
+
+        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+    }
 #endif // HAVE_CUDA
 
 #ifdef HAVE_CANN

@@ -166,7 +166,7 @@ public:
 
     static void getDefaultThresholds(int backend, int target, double* l1, double* lInf)
     {
-        bool tf32Tolerant = cv::utils::getConfigurationParameterBool("OPENCV_TEST_DNN_CUDA_TF32", true);
+        bool tf32Tolerant = cv::utils::getConfigurationParameterBool("OPENCV_TEST_DNN_CUDA_TF32", false);
         if (target == DNN_TARGET_CPU_FP16 || target == DNN_TARGET_CUDA_FP16 || target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD
             || (tf32Tolerant && target == DNN_TARGET_CUDA))
         {

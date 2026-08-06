@@ -7,12 +7,11 @@
 
 #include "../pointer.hpp"
 
-#ifdef HAVE_CUDNN
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
 #include <cudnn.h>
 #elif defined(HAVE_CUDNNJIT)
 #include <cudnn_graph.h>
 #include <cudnn_ops.h>
-#include <cudnn_cnn.h>
 #endif
 
 #include <cstddef>

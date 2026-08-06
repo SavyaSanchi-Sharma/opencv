@@ -270,6 +270,171 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         void* cachedPointers[4] = { nullptr, nullptr, nullptr, nullptr };
     };
 
+    /** JIT-compiled forward resample (pooling) built on the cuDNN graph engine.
+     *
+     * Covers CUDNN_RESAMPLE_AVGPOOL_{INCLUDE,EXCLUDE}_PADDING and CUDNN_RESAMPLE_MAXPOOL,
+     * 2 spatial dimensions, no dilation (the resample descriptor has no dilation attribute).
+     * The plan is compiled once at construction and cached; resample() rebinds pointers and executes.
+     */
+    template <class T>
+    class ResampleGraph {
+    public:
+        struct params_type {
+            std::vector<int64_t> input_shape;   /* N, C, H, W */
+            std::vector<int64_t> output_shape;  /* N, C, H, W */
+            std::vector<int64_t> window, stride, padding_pre, padding_post;
+            cudnnResampleMode_t mode;
+        };
+
+        ResampleGraph() = default;
+        ResampleGraph(const ResampleGraph&) = delete;
+        ResampleGraph(ResampleGraph&&) = default;
+        ResampleGraph& operator=(const ResampleGraph&) = delete;
+        ResampleGraph& operator=(ResampleGraph&&) = default;
+
+        ResampleGraph(const Handle& handle, const params_type& params) {
+            const auto& i = params.input_shape;
+            const auto& o = params.output_shape;
+
+            /* the resample descriptor is built for exactly 2 spatial dims (see class doc) */
+            constexpr int64_t spatial_dims = 2;
+            CV_Assert(i.size() == static_cast<std::size_t>(spatial_dims) + 2);
+            CV_Assert(o.size() == static_cast<std::size_t>(spatial_dims) + 2);
+            CV_Assert(params.window.size()       == static_cast<std::size_t>(spatial_dims));
+            CV_Assert(params.stride.size()       == static_cast<std::size_t>(spatial_dims));
+            CV_Assert(params.padding_pre.size()  == static_cast<std::size_t>(spatial_dims));
+            CV_Assert(params.padding_post.size() == static_cast<std::size_t>(spatial_dims));
+
+            /* channel-last strides, i.e. NHWC: {C*H*W, 1, W*C, C} */
+            const std::vector<int64_t> xStride = channelLastStrides(i);
+            const std::vector<int64_t> yStride = channelLastStrides(o);
+
+            xDesc = makeTensorDescriptor<T>('x', i, xStride);
+            yDesc = makeTensorDescriptor<T>('y', o, yStride);
+
+            resampleDesc = BackendDescriptor(CUDNN_BACKEND_RESAMPLE_DESCRIPTOR);
+            {
+                cudnnDataType_t comp = CUDNN_DATA_FLOAT;
+                int64_t nspatial = spatial_dims;
+                cudnnResampleMode_t mode = params.mode;
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_MODE,          CUDNN_TYPE_RESAMPLE_MODE, 1, &mode);
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_COMP_TYPE,     CUDNN_TYPE_DATA_TYPE,     1, &comp);
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_SPATIAL_DIMS,  CUDNN_TYPE_INT64, 1, &nspatial);
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_STRIDES,       CUDNN_TYPE_INT64, spatial_dims, params.stride.data());
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_PRE_PADDINGS,  CUDNN_TYPE_INT64, spatial_dims, params.padding_pre.data());
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_POST_PADDINGS, CUDNN_TYPE_INT64, spatial_dims, params.padding_post.data());
+                resampleDesc.set(CUDNN_ATTR_RESAMPLE_WINDOW_DIMS,   CUDNN_TYPE_INT64, spatial_dims, params.window.data());
+                resampleDesc.finalize();
+            }
+
+            resampleOp = BackendDescriptor(CUDNN_BACKEND_OPERATION_RESAMPLE_FWD_DESCRIPTOR);
+            {
+                cudnnBackendDescriptor_t x = xDesc.get(), y = yDesc.get(), r = resampleDesc.get();
+                resampleOp.set(CUDNN_ATTR_OPERATION_RESAMPLE_FWD_XDESC, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &x);
+                resampleOp.set(CUDNN_ATTR_OPERATION_RESAMPLE_FWD_YDESC, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &y);
+                resampleOp.set(CUDNN_ATTR_OPERATION_RESAMPLE_FWD_DESC,  CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &r);
+                resampleOp.finalize();
+            }
+
+            opGraph = BackendDescriptor(CUDNN_BACKEND_OPERATIONGRAPH_DESCRIPTOR);
+            {
+                cudnnHandle_t h = handle.get();
+                cudnnBackendDescriptor_t op = resampleOp.get();
+                opGraph.set(CUDNN_ATTR_OPERATIONGRAPH_HANDLE, CUDNN_TYPE_HANDLE,             1, &h);
+                opGraph.set(CUDNN_ATTR_OPERATIONGRAPH_OPS,    CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &op);
+                opGraph.finalize();
+            }
+
+            BackendDescriptor heuristics(CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR);
+            {
+                cudnnBackendDescriptor_t g = opGraph.get();
+                cudnnBackendHeurMode_t mode = CUDNN_HEUR_MODE_A;
+                heuristics.set(CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &g);
+                heuristics.set(CUDNN_ATTR_ENGINEHEUR_MODE,            CUDNN_TYPE_HEUR_MODE,          1, &mode);
+                heuristics.finalize();
+            }
+
+            constexpr int max_configs = 32;
+            std::vector<BackendDescriptor> configs;
+            configs.reserve(max_configs);
+            std::array<cudnnBackendDescriptor_t, max_configs> configHandles{};
+            for (int c = 0; c < max_configs; c++) {
+                configs.emplace_back(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR);
+                configHandles[c] = configs.back().get();
+            }
+
+            int64_t returned = 0;
+            CUDA4DNN_CHECK_CUDNN(cudnnBackendGetAttribute(
+                heuristics.get(), CUDNN_ATTR_ENGINEHEUR_RESULTS, CUDNN_TYPE_BACKEND_DESCRIPTOR,
+                max_configs, &returned, configHandles.data()));
+
+            /* keep the first engine config whose plan finalizes (i.e. compiles) */
+            for (int c = 0; c < returned; c++) {
+                BackendDescriptor plan(CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
+                cudnnHandle_t h = handle.get();
+                plan.set(CUDNN_ATTR_EXECUTION_PLAN_HANDLE,        CUDNN_TYPE_HANDLE,             1, &h);
+                plan.set(CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &configHandles[c]);
+                if (cudnnBackendFinalize(plan.get()) == CUDNN_STATUS_SUCCESS) {
+                    engineConfig = std::move(configs[c]);
+                    executionPlan = std::move(plan);
+                    break;
+                }
+            }
+
+            if (!executionPlan)
+                CV_Error(cv::Error::GpuApiCallError, "cuDNN JIT did not produce an execution plan for the resample/pooling operation.");
+
+            int64_t count = 0;
+            CUDA4DNN_CHECK_CUDNN(cudnnBackendGetAttribute(
+                executionPlan.get(), CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, CUDNN_TYPE_INT64,
+                1, &count, &workspace_size));
+        }
+
+        std::size_t get_workspace_size() const noexcept { return static_cast<std::size_t>(workspace_size); }
+
+        void resample(
+            const Handle& handle,
+            DevicePtr<const T> input,
+            DevicePtr<T> output,
+            WorkspaceInstance scratchpad)
+        {
+            CV_Assert(executionPlan);
+
+            void* pointers[2] = { const_cast<T*>(input.get()), output.get() };
+            void* workspace = static_cast<void*>(scratchpad.get());
+
+            if (!variantPack || pointers[0] != cachedPointers[0] || pointers[1] != cachedPointers[1] ||
+                workspace != cachedPointers[2])
+            {
+                int64_t uids[2] = { 'x', 'y' };
+
+                BackendDescriptor newVariantPack(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR);
+                newVariantPack.set(CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS, CUDNN_TYPE_VOID_PTR, 2, pointers);
+                newVariantPack.set(CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS,    CUDNN_TYPE_INT64,    2, uids);
+                newVariantPack.set(CUDNN_ATTR_VARIANT_PACK_WORKSPACE,     CUDNN_TYPE_VOID_PTR, 1, &workspace);
+                newVariantPack.finalize();
+
+                variantPack = std::move(newVariantPack);
+                cachedPointers[0] = pointers[0];
+                cachedPointers[1] = pointers[1];
+                cachedPointers[2] = workspace;
+            }
+
+            CUDA4DNN_CHECK_CUDNN(cudnnBackendExecute(handle.get(), executionPlan.get(), variantPack.get()));
+        }
+
+    private:
+        /* the plan references this chain; all of it must outlive the plan */
+        BackendDescriptor xDesc, yDesc;
+        BackendDescriptor resampleDesc, resampleOp, opGraph;
+        BackendDescriptor engineConfig, executionPlan;
+        int64_t workspace_size = 0;
+
+        /* cached variant pack: rebuilt only when the bound pointers actually change */
+        BackendDescriptor variantPack;
+        void* cachedPointers[3] = { nullptr, nullptr, nullptr };
+    };
+
 }}}}} /* namespace cv::dnn::cuda4dnn::csl::cudnn */
 
 #endif /* HAVE_CUDNNJIT */

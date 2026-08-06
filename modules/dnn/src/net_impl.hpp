@@ -93,10 +93,12 @@ struct Net::Impl : public detail::NetImplBase
 #ifdef HAVE_CUDA
     struct CudaInfo_t
     {
-        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt)
+        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt, cuda4dnn::csl::Stream d2h_stream_)
             : context(std::move(ctxt))
+            , d2h_stream(std::move(d2h_stream_))
         {}
         cuda4dnn::csl::CSLContext context;
+        cuda4dnn::csl::Stream d2h_stream;
         cuda4dnn::csl::Workspace workspace;
     };
 
@@ -139,7 +141,6 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<ArgData> args;
     std::vector<UMat> __tensors__;
     std::vector<int> bufidxs;
-    std::unordered_map<int, int> declaredOutputTypes;
     std::vector<UMat> buffers;
     std::vector<Mat> scratchBufs;
     std::vector<Ptr<Graph> > allgraphs;
@@ -425,10 +426,12 @@ struct Net::Impl : public detail::NetImplBase
     Arg newConstArg(const std::string& name, const UMat& m);
     UMat toArgTensor(const Mat& m) const;
     MatAllocator* tensorAllocator() const;
+    Arg newConstScalarArg(const std::string& name, int type, const void* value);
     Arg newArg(const std::string& name, ArgKind kind, bool allowEmptyName=false);
     bool isConstArg(Arg arg) const;
     UMat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
+    void inferArgTypes();
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
 

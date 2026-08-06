@@ -189,7 +189,10 @@ public:
         CV_Assert(inputs.size());
         for (auto input : inputs)
         {
-            CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_32S || input == CV_64S || input == CV_8S || input == CV_8U || input == CV_Bool, "");
+            if (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
+                CV_CheckType(input, input == CV_16F || input == CV_32S || input == CV_64S || input == CV_8S || input == CV_8U || input == CV_Bool, "");
+            else
+                CV_CheckType(input, input == CV_32F || input == CV_32S || input == CV_64S || input == CV_8S || input == CV_8U || input == CV_Bool, "");
         }
 
         outputs.assign(requiredOutputs, inputs[0]);
@@ -523,6 +526,17 @@ public:
             return make_cuda_node_bool<cuda4dnn::PermuteOp>(std::move(context->stream), _order);
         else
             return make_cuda_node_with_type<cuda4dnn::PermuteOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), _order);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::PermuteOp>(std::move(context->stream), _order);
+        else
+            return make_cuda_node_with_type<cuda4dnn::PermuteOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), _order);
     }
 #endif
 

@@ -209,6 +209,7 @@ void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays 
     CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
     if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16) && inputs_arr.depth() == CV_16F)
+
     {
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
@@ -345,6 +346,15 @@ bool LayerInfo::dynamicOutputShapes() const
     return false;
 }
 
+void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                 int requiredOutputs,
+                                                 std::vector<MatShape>& outputs) const
+{
+    CV_UNUSED(inputs); CV_UNUSED(requiredOutputs); CV_UNUSED(outputs);
+    CV_Error(Error::StsNotImplemented,
+             format("layer '%s' (%s) does not implement getMemoryShapesForDynamicOutput()", name.c_str(), type.c_str()));
+}
+
 bool LayerInfo::isDataShuffling() const
 {
     return false;
@@ -407,7 +417,7 @@ std::ostream& LayerInfo::dump(std::ostream& strm, int indent, bool comma) const
         std::vector<std::string> names;
         if (opname == "If")
             names = {"then", "else"};
-        else if (opname == "Loop" || opname == "Scan")
+        else if (opname == "Loop")
             names = {"body"};
         else {
             CV_Error(Error::StsError,

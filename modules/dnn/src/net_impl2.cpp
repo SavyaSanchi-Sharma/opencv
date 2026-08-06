@@ -461,6 +461,11 @@ ArgKind Net::Impl::argKind(Arg arg) const
     return argData(arg).kind;
 }
 
+int Net::Impl::argType(Arg arg) const
+{
+    return argData(arg).type;
+}
+
 UMat& Net::Impl::argTensor(Arg arg) const
 {
     const ArgData& adata = argData(arg);
@@ -579,6 +584,62 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
     return graph;
 }
 
+void Net::Impl::inferArgTypes()
+{
+    if (!mainGraph)
+        return;
+
+    std::function<void(const Ptr<Graph>&)> visit = [&](const Ptr<Graph>& graph) {
+        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
+        for (const Ptr<LayerInfo>& op : prog) {
+            if (!op)
+                continue;
+
+            size_t ninputs = op->inputs.size();
+            std::vector<MatType> inpTypes(ninputs);
+            bool allKnown = true;
+            for (size_t i = 0; i < ninputs; i++) {
+                Arg in = op->inputs[i];
+                ArgData& adata = args.at(in.idx);
+                if (adata.type < 0 && adata.kind != DNN_ARG_TEMP) {
+                    const UMat& t = argTensor(in);
+                    if (!t.empty())
+                        adata.type = t.type();
+                }
+                inpTypes[i] = adata.type;
+                if (inpTypes[i] < 0)
+                    allKnown = false;
+            }
+
+            const std::vector<Ptr<Graph> >* subs = op->subgraphs();
+            if (subs) {
+                for (const Ptr<Graph>& sub : *subs)
+                    visit(sub);
+                continue;
+            }
+
+            if (!allKnown)
+                continue;
+
+            size_t noutputs = op->outputs.size();
+            std::vector<MatType> outTypes, tempTypes;
+            try {
+                op->getTypes(inpTypes, (int)noutputs, 0, outTypes, tempTypes);
+            } catch (...) {
+                continue;
+            }
+            for (size_t i = 0; i < noutputs && i < outTypes.size(); i++) {
+                Arg out = op->outputs[i];
+                ArgData& adata = args.at(out.idx);
+                if (adata.type < 0)
+                    adata.type = outTypes[i];
+            }
+        }
+    };
+
+    visit(mainGraph);
+}
+
 void Net::Impl::prepareForInference()
 {
 #ifdef HAVE_ONNXRUNTIME
@@ -614,6 +675,7 @@ void Net::Impl::prepareForInference()
         fuseBasic();
         fuseAgnostic();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
+        inferArgTypes();
         prepared = true;
         finalizeLayers = true;
     }
@@ -641,9 +703,12 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
             if (!op)
                 continue;
             if (op->subgraphs()) { graphOnCuda = false; break; }
-            if (op->dynamicOutputShapes()) { graphOnCuda = false; break; }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
-            if (!e) { graphOnCuda = false; break; }
+            if (!e) {
+                CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has NO CUDA exec -> whole graph on CPU",
+                                             op->name.c_str(), op->type.c_str()));
+                graphOnCuda = false; break;
+            }
             cudaExecs[i] = e;
         }
         if (!graphOnCuda) {
@@ -1428,7 +1493,7 @@ Ptr<BackendWrapper> Net::Impl::getCudaArgWrapper(Arg arg, UMat& t)
     if (!cw || argWrapperData[idx] != handle) {
         Ptr<BackendWrapper> w = wrapMat(DNN_BACKEND_CUDA, preferableTarget, t);
         cw = w.dynamicCast<CUDABackendWrapper>();
-        cw->setStream(cudaInfo->context.stream);
+        cw->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
         argWrappers[idx] = w;
         argWrapperData[idx] = handle;
     }
@@ -1464,8 +1529,6 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
 
     std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
-        if (netimpl->argTensor(inputs[i]).empty())
-            continue;
         Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(inputs[i], netimpl->argTensor(inputs[i]))
                                         .dynamicCast<CUDABackendWrapper>();
         cw->copyToDevice();
@@ -1480,49 +1543,6 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
     exec->forwardCUDA(inpG, outG, &netimpl->cudaInfo->workspace);
 }
 #endif
-
-// Slice a Scan input at index `idx` along `axis`, removing that axis (contiguous result).
-static Mat sliceScanAxis(const Mat& m, int axis, int idx)
-{
-    std::vector<Range> r(m.dims, Range::all());
-    r[axis] = Range(idx, idx + 1);
-    Mat sub = m(r).clone();
-    std::vector<int> ns;
-    for (int d = 0; d < m.dims; d++)
-        if (d != axis) ns.push_back(m.size[d]);
-    if (ns.empty()) ns.push_back(1);
-    return sub.reshape(0, (int)ns.size(), &ns[0]);
-}
-
-// Stack per-iteration Scan outputs into one tensor with a new axis at `axis`.
-static Mat stackScanAxis(const std::vector<Mat>& perIter, int axis, bool reverse)
-{
-    if (perIter.empty()) return Mat();
-    const Mat& first = perIter[0];
-    const int e = first.dims, T = (int)perIter.size();
-    if (axis < 0) axis += e + 1;
-    CV_Assert(axis >= 0 && axis <= e);
-
-    std::vector<int> os, ss;
-    for (int d = 0; d < e; d++) {
-        if (d == axis) { os.push_back(T); ss.push_back(1); }
-        os.push_back(first.size[d]);
-        ss.push_back(first.size[d]);
-    }
-    if (axis == e) { os.push_back(T); ss.push_back(1); }
-
-    Mat stacked;
-    stacked.create((int)os.size(), &os[0], first.type());
-    for (int k = 0; k < T; k++) {
-        int idx = reverse ? (T - 1 - k) : k;
-        std::vector<Range> r(os.size(), Range::all());
-        r[axis] = Range(k, k + 1);
-        Mat dst = stacked(r);
-        Mat src = perIter[idx].reshape(0, (int)ss.size(), &ss[0]);
-        src.copyTo(dst);
-    }
-    return stacked;
-}
 
 void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                              OutputArrayOfArrays outputs_, bool isMainGraph)
@@ -1605,6 +1625,25 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         if (!dynamicOutShapes) {
             allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
+        } else if (opBackend == DNN_BACKEND_CUDA) {
+            std::vector<UMat> inpUMats(ninputs);
+            for (i = 0; i < ninputs; i++)
+                inpUMats[i] = argTensor(inputs[i]);
+            std::vector<MatShape> dynOutShapes;
+            layer->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
+            CV_Assert(dynOutShapes.size() == noutputs);
+            outMats.resize(noutputs);
+            for (i = 0; i < noutputs; i++) {
+                Arg out = outputs[i];
+                UMat& out_t = argTensor(out);
+                int outType = args.at(out.idx).type;
+                if (outType < 0)
+                    outType = inpUMats[0].type();
+                rehomeAllocator(out_t, tensorAllocator());
+                out_t.fit(dynOutShapes[i], outType);
+                outMats[i] = out_t.getMat(ACCESS_WRITE);
+            }
+            tempMats = scratchBufs;
         } else {
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {
@@ -1652,7 +1691,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         else {
             Ptr<IfLayer> iflayer = layer.dynamicCast<IfLayer>();
             Ptr<LoopLayer> loopLayer = layer.dynamicCast<LoopLayer>();
-            Ptr<ScanLayer> scanLayer = layer.dynamicCast<ScanLayer>();
             if (iflayer) {
                 int branch = iflayer->branch(inpMats[0]);
                 Ptr<Graph> subgraph = subgraphs->at(branch);
@@ -1745,73 +1783,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                     outMats[n_state + i] = stacked;
                 }
             }
-            else if (scanLayer) {
-                CV_Assert(subgraphs->size() == 1);
-                Ptr<Graph> body = subgraphs->at(0);
-
-                const int M = scanLayer->numScanInputs();
-                const int bodyNIn = (int)body->inputs().size();
-                const int S = bodyNIn - M;              // loop-carried state count
-                const int K = (int)body->outputs().size() - S;  // scan output count
-                CV_Assert(M > 0 && S >= 0 && K >= 0);
-
-                // Reject opset-8 (batch dim + sequence_lens); those semantics are not implemented.
-                CV_CheckEQ((int)inpMats.size(), S + M,
-                           "Scan: opset-8 form (batch dim + sequence_lens) is not supported; re-export with opset>=9");
-
-                const std::vector<int>& iax = scanLayer->scanInputAxes();
-                const std::vector<int>& oax = scanLayer->scanOutputAxes();
-                const std::vector<int>& idir = scanLayer->scanInputDirections();
-                const std::vector<int>& odir = scanLayer->scanOutputDirections();
-                const std::vector<int>& orank = scanLayer->scanOutputRanks();
-
-                std::vector<Mat> scanIn(M);
-                std::vector<int> inAxis(M);
-                std::vector<char> inRev(M);
-                int T = -1;
-                for (int j = 0; j < M; j++) {
-                    scanIn[j] = inpMats[S + j];
-                    int ax = iax.empty() ? 0 : iax[j];
-                    if (ax < 0) ax += scanIn[j].dims;
-                    inAxis[j] = ax;
-                    inRev[j] = (char)(!idir.empty() && idir[j] != 0);
-                    int len = scanIn[j].size[ax];
-                    if (T < 0) T = len; else CV_Assert(T == len);
-                }
-                CV_Assert(T >= 0);
-
-                std::vector<Mat> state(S);
-                for (int i = 0; i < S; i++) state[i] = inpMats[i];
-
-                std::vector<std::vector<Mat> > history(K);
-                std::vector<Mat> inputs(bodyNIn), outputs;
-
-                for (int t = 0; t < T; t++) {
-                    for (int i = 0; i < S; i++) inputs[i] = state[i];
-                    for (int j = 0; j < M; j++) {
-                        int idx = inRev[j] ? (T - 1 - t) : t;
-                        inputs[S + j] = sliceScanAxis(scanIn[j], inAxis[j], idx);
-                    }
-                    forwardGraph(body, inputs, outputs, false);
-                    // Deep-copy: body buffers are recycled across iterations.
-                    // TODO: alias state in/out buffers like Loop to drop this copy.
-                    for (int i = 0; i < S; i++) state[i] = outputs[i].clone();
-                    for (int k = 0; k < K; k++) history[k].push_back(outputs[S + k].clone());
-                }
-
-                outMats.assign(state.begin(), state.end());
-                outMats.resize(S + K);
-                for (int k = 0; k < K; k++) {
-                    int ax = oax.empty() ? 0 : oax[k];
-                    bool rev = !odir.empty() && odir[k] != 0;
-                    // 0-D scalar output is stored as [1]; drop it so T scalars stack to [T], not [T,1].
-                    if (k < (int)orank.size() && orank[k] == 0) {
-                        for (Mat& e : history[k])
-                            e = e.reshape(0, 0, nullptr);
-                    }
-                    outMats[S + k] = stackScanAxis(history[k], ax, rev);
-                }
-            }
             else {
                 CV_Error_(Error::StsNotImplemented,
                           ("unknown layer type '%s' with subgraphs", op->type.c_str()));
@@ -1852,7 +1823,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 if (cur.u != m.u || cur.shape() != m.shape() || cur.type() != m.type()) {
                     UMat freshT;
                     rehomeAllocator(freshT, Mat::getDefaultAllocator());
-                    freshT.fit(m.shape(), m.type());
                     m.copyTo(freshT);
                     cur = freshT;
                 }
@@ -1904,9 +1874,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                                    !isFloatDepth(outm.depth());
             if (outm.size.layout == DATA_LAYOUT_BLOCK) {
                 transformLayout(outm.getMat(ACCESS_READ), outputsVec[i], originalLayout, originalLayout, outm.size.C);
-            } else if (widenToDeclared) {
-                outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_MAT_DEPTH(declaredType), outm.channels()));
-                outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_MAT_DEPTH(declaredType));
             } else if (outm.depth() == CV_16F || outm.depth() == CV_16BF) {
                 outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_32F, outm.channels()));
                 outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_32F);

@@ -111,7 +111,7 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)  # https://cmake.org/cmake/help/
   endif()
 endif()
 
-if(MSVC)
+if(MSVC)scm-history-item:/home/user/savya/nvrt/onnxruntime/cmake/external/emsdk?%7B%22repositoryId%22%3A%22scm6%22%2C%22historyItemId%22%3A%2211ea2ee53d2a72ad442c56ba1ced4a7b5b222b70%22%2C%22historyItemParentId%22%3A%22b2436aafa7351ee1b581f15841f1b45ed716a279%22%2C%22historyItemDisplayId%22%3A%2211ea2ee%22%7D
   set(CMAKE_USE_RELATIVE_PATHS ON CACHE INTERNAL "" FORCE)
 endif()
 
@@ -207,10 +207,6 @@ OCV_OPTION(WITH_CUDNN "Include NVIDIA CUDA Deep Neural Network (cuDNN) library s
 OCV_OPTION(WITH_CUDNNJIT "Include NVIDIA CUDA Deep Neural Network (cuDNN) Just In Time Interpretation library support" OFF
   VISIBLE_IF WITH_CUDA OR WITH_CUDNN
   VERIFY HAVE_CUDNNJIT)
-if(WITH_CUDNNJIT AND WITH_CUDNN)
-  message(STATUS "DNN: WITH_CUDNNJIT overrides WITH_CUDNN; disabling WITH_CUDNN")
-  set(WITH_CUDNN OFF)
-endif()
 OCV_OPTION(WITH_NVCUVID "Include NVidia Video Decoding library support" ON
   VISIBLE_IF WITH_CUDA
   VERIFY HAVE_NVCUVID)

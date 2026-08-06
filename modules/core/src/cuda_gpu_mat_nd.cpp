@@ -103,34 +103,34 @@ void GpuMatND::setFields(MatShape _size, int _type, StepArray _step)
     dims = static_cast<int>(_size.size());
     size = std::move(_size);
 
-    if (_step.empty())
+if (_step.empty())
+{
+    step = StepArray(dims);
+
+    if (dims > 0)
     {
-        step = StepArray(dims);
-
-        if (dims > 0)
-            step.back() = elemSize();
-
+        step.back() = elemSize();
         for (int _i = dims - 2; _i >= 0; --_i)
         {
             const size_t i = _i;
             step[i] = step[i+1] * size[i+1];
         }
-
-        flags |= Mat::CONTINUOUS_FLAG;
-    }
-    else
-    {
-        step = std::move(_step);
-        if (step.size() < size.size())
-          step.push_back(elemSize());
-
-        flags = cv::updateContinuityFlag(flags, dims, size.data(), step.data());
     }
 
-    CV_Assert(size.size() == step.size());
-    CV_Assert(dims == 0 || step.back() == elemSize());
+    flags |= Mat::CONTINUOUS_FLAG;
+}
+else
+{
+    step = std::move(_step);
+    if (step.size() < size.size())
+      step.push_back(elemSize());
+
+    flags = cv::updateContinuityFlag(flags, dims, size.data(), step.data());
 }
 
+CV_Assert(size.size() == step.size());
+CV_Assert(dims == 0 || step.back() == elemSize());
+}
 #ifndef HAVE_CUDA
 
 GpuData::GpuData(const size_t _size)
