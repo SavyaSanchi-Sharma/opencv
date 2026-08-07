@@ -370,6 +370,29 @@ public:
 
         return make_cuda_node<cuda4dnn::MVNOp>(preferableTarget, std::move(context->stream), config);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::MVNConfiguration config;
+        config.split_axis = acrossChannels ? 1 : 2;
+        config.normalize_variance = normVariance;
+        config.epsilon = eps;
+        size_t ninputs = inputs_arr.total(-1);
+        config.input_shapes.resize(ninputs);
+        for (int i = 0; i < ninputs; i++)
+        {
+            auto shape = inputs_arr.shape(i);
+            config.input_shapes[i].assign(std::begin(shape), std::end(shape));
+        }
+
+        return make_cuda_node<cuda4dnn::MVNOp>(preferableTarget, std::move(context->stream), config);
+    }
 #endif
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,

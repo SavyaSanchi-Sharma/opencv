@@ -27,7 +27,7 @@ public:
         CV_CheckType(indicesType, indicesType == CV_32S || indicesType == CV_64S,
                      "GatherND: indices must be CV_32S or CV_64S");
 
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16)
+        if (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
         {
             CV_CheckType(dataType, dataType == CV_16F || dataType == CV_8S || dataType == CV_8U ||
                                    dataType == CV_32S || dataType == CV_64S,

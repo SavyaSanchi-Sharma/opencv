@@ -1977,6 +1977,9 @@ CV__DNN_INLINE_NS_BEGIN
 
     class CV_EXPORTS ClipLayer : public Layer {
     public:
+        float minValue = 0.f, maxValue = 0.f;
+        bool  hasMin = false, hasMax = false;
+
         static Ptr<ClipLayer> create(const LayerParams &params);
     };
 

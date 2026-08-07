@@ -6,6 +6,7 @@
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 // OpenVINO backend
@@ -26,12 +27,20 @@ using namespace cv::dnn::cuda4dnn;
 
 namespace cv { namespace dnn {
 
-class MatMulLayerImpl CV_FINAL : public MatMulLayer {
+class MatMulLayerImpl CV_FINAL : public MatMulLayer, public FusionSink {
 #ifdef HAVE_OPENCL
     UMat weight_umat, bias_umat;
 #endif
+    std::vector<FusionStep> fusionSteps;
 
  public:
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
+    {
+        if (!fusionSteps.empty())
+            return false;
+        return fusionLower(ch, fusionSteps);
+    }
+
     MatMulLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
 
@@ -307,10 +316,15 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
+
+        fusionApply(fusionSteps, Y);
     }
 
 #ifdef HAVE_OPENCL
     bool forward_ocl(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, InputArrayOfArrays internals) {
+        if (!fusionSteps.empty())
+            return false;
+
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
 
@@ -455,6 +469,23 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     Ptr<BackendNode> initCUDA(void *context_,
                               const std::vector<Ptr<BackendWrapper>>& inputs,
                               const std::vector<Ptr<BackendWrapper>>& outputs) override {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        auto input_B = Mat(), bias = Mat();
+        if (!blobs.empty()) {
+            input_B = blobs.front();
+            if (blobs.size() >= 2) {
+                bias = broadcast_bias;
+            }
+        }
+
+        CV_CheckFalse(helper.empty(), "DNN/MatMul/CUDA: MatMulHelper is not initialized");
+
+        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         auto input_B = Mat(), bias = Mat();
         if (!blobs.empty()) {

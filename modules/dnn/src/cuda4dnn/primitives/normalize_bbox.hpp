@@ -123,6 +123,40 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            std::size_t outer_size = input.size_range(0, axis_start);
+            std::size_t mid_size = input.size_range(axis_start, axis_end);
+            std::size_t inner_size = input.size_range(axis_end, input.rank());
+
+            auto ws_allocator = csl::WorkspaceAllocator(workspace);
+            auto scratch = ws_allocator.get_span<T>();
+            kernels::normalize<T>(stream, output, input, outer_size, mid_size, inner_size, norm_order, epsilon, scratch);
+
+            /* there might be a single weight in which case `weight` will be not equal to 1.0
+             * or there might be several weights
+             * or we don't have to scale
+             */
+            if (weight != static_cast<T>(1.0f))
+            {
+                kernels::scale1_with_bias1<T>(stream, output, input, weight, 1.0);
+            }
+            else if (!weightsTensor.empty())
+            {
+                CV_Assert(weightsTensor.size() != 1); /* constructor should have set up to use `weight` */
+                CV_Assert(weightsTensor.size() == mid_size);
+                kernels::scaleN<T>(stream, output, input, inner_size, weightsTensor);
+            }
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:

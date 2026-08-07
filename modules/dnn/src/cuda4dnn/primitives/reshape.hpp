@@ -23,16 +23,18 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         ReshapeOp(csl::Stream stream_) : stream(std::move(stream_)) { }
 
         void forward(
-            const std::vector<cuda::GpuMatND>& inputs,
-            const std::vector<cuda::GpuMatND>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
-            /* sometimes the output shape is passed as extra inputs; hence, >= instead of == */
-            CV_Assert(inputs.size() >= outputs.size());
+            /* sometimes the output shape is passed as extra inputs, so inputs.size() can exceed
+             * outputs.size(); conversely, a Blank/Dropout-style op can have a single input feeding
+             * multiple outputs, so fall back to inputs[0] for any output index past inputs.size() */
+            CV_Assert(!inputs.empty());
 
             for (int i = 0; i < outputs.size(); i++)
             {
-                auto input = csl::viewOf<T>(inputs[i]);
+                auto input = csl::viewOf<T>(inputs[i < (int)inputs.size() ? i : 0]);
                 auto output = csl::spanOf<T>(outputs[i]);
 
                 if (input.get() != output.get())

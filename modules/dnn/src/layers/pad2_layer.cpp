@@ -5,6 +5,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/padding.hpp"
+#endif
 
 namespace cv
 {
@@ -537,8 +541,50 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            if (dynamicOutputShapes())
+                return false;
+            if (mode != BORDER_CONSTANT && mode != BORDER_REFLECT101)
+                return false;
+            std::vector<int> semanticPads;
+            return getConstSemanticPads(semanticPads);
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+
+        std::vector<int> semanticPads;
+        bool ok = getConstSemanticPads(semanticPads);
+        CV_Assert(ok);
+
+        MatShape inpShape = inputs_arr.shape(0);
+        DataLayout origLayout = getOriginalLayout(this);
+        std::vector<int> padsbuf;
+        bool mapped = mapPadsToInputLayout(inpShape, semanticPads, padsbuf, origLayout);
+        CV_Assert(mapped);
+
+        int ndims = inpShape.dims;
+        std::vector<cv::Range> dstRanges(ndims);
+        for (int i = 0; i < ndims; i++)
+            dstRanges[i] = cv::Range(padsbuf[i], padsbuf[i] + inpShape[i]);
+
+        cuda4dnn::PaddingType ptype = (mode == BORDER_CONSTANT) ? cuda4dnn::PaddingType::CONSTANT
+                                                                 : cuda4dnn::PaddingType::REFLECTION101;
+
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::PaddingOp>(std::move(context->stream), ptype, value0, dstRanges);
+        return make_cuda_node_with_type<cuda4dnn::PaddingOp>(preferableTarget, inputs_arr.depth(0),
+                                                             std::move(context->stream), ptype, value0, dstRanges);
+    }
+#endif
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {
@@ -564,12 +610,12 @@ public:
         if (!netimpl_ || !netimpl_->isConstArg(this->inputs[1]))
             return false;
 
-        Mat padsTensor = netimpl_->argTensor(this->inputs[1]);
+        Mat padsTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
         Mat axesTensor;
         if (ninputs >= 4) {
             if (!netimpl_->isConstArg(this->inputs[3]))
                 return false;
-            axesTensor = netimpl_->argTensor(this->inputs[3]);
+            axesTensor = netimpl_->argTensor(this->inputs[3]).getMat(ACCESS_READ);
         }
 
         int ndims = netimpl_->argData(this->inputs[0]).shape.dims;
@@ -720,10 +766,10 @@ public:
 
         if (ninputs >= 2) {
             int ndims = inputs[0].layout == DATA_LAYOUT_BLOCK ? inputs[0].dims - 1 : inputs[0].dims;
-            Mat padsTensor = netimpl_->argTensor(this->inputs[1]);
+            Mat padsTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
             Mat axesTensor;
             if (ninputs >= 4)
-                axesTensor = netimpl_->argTensor(this->inputs[3]);
+                axesTensor = netimpl_->argTensor(this->inputs[3]).getMat(ACCESS_READ);
             getPads(ndims, padsTensor, axesTensor, semanticPads);
         } else {
             semanticPads = pads0;

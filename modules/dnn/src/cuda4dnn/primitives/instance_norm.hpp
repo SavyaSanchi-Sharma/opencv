@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/stream.hpp"
 #include "../csl/span.hpp"
 #include "../csl/tensor.hpp"
@@ -49,6 +55,36 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
             auto output = output_wrapper->getSpan();
+
+            auto C = input.get_axis_size(1);
+            auto loops = input.size_range(0, 2);
+            auto norm_size = input.size_range(2, input.rank());
+            if (norm_size == 1) {
+                kernels::fill<T>(stream, output, 0.f);
+                return;
+            } else {
+                auto ws_allocator = csl::WorkspaceAllocator(workspace);
+
+                auto mean = ws_allocator.get_span<float>(loops);
+                kernels::fill<float>(stream, mean, 0.f);
+
+                auto stdev = ws_allocator.get_span<float>(loops);
+                kernels::fill<float>(stream, stdev, 0.f);
+
+                kernels::reduce_mean_sqr_sum<T>(stream, mean, stdev, input, norm_size);
+                kernels::compute_normalization_scale(stream, stdev, mean, stdev, norm_size, epsilon);
+                kernels::normalize_mean_variance_channelwise<T>(stream, output, input, scale, bias, mean, stdev, norm_size, C);
+            }
+        }
+
+        void forward(const std::vector<UMat>& inputs,
+                     const std::vector<UMat>& outputs,
+                     csl::Workspace& workspace) override {
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto scale = csl::viewOf<T>(inputs[1]);
+            auto bias = csl::viewOf<T>(inputs[2]);
+
+            auto output = csl::spanOf<T>(outputs[0]);
 
             auto C = input.get_axis_size(1);
             auto loops = input.size_range(0, 2);

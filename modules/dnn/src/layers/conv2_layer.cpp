@@ -4,6 +4,7 @@
 
 #include "../precomp.hpp"
 #include "../net_impl.hpp"
+#include "../graph_fusion_utils.hpp"
 #include "layers_common.hpp"
 #include "conv2_common.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
@@ -30,7 +31,7 @@ namespace dnn
     Opset's 1 to 22 are covered.
 */
 
-class Conv2LayerImpl : public Conv2Layer
+class Conv2LayerImpl : public Conv2Layer, public FusionSink
 {
 public:
     Conv2LayerImpl(const LayerParams& params)
@@ -271,7 +272,164 @@ public:
             activationFunc = activ_ptr->getActivationFunc(CV_32F, activParams);
             if (!activationFunc)
                 return false;
+            activ = activlayer;  // retain so the CUDA path can run it as its own standalone exec
         }
+        return true;
+    }
+
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
+    {
+        if (ch.absorbed.empty() || ch.stepOperands.size() != ch.absorbed.size())
+            return false;
+        if (ch.absorbed.size() == 1) {
+            if (fuseActivation(ch.absorbed[0].dynamicCast<Layer>()))
+                return true;
+            if (lowerClamp(ch))
+                return true;
+            if (lowerAddBias(ch))
+                return true;
+        }
+        return lowerAffine(ch);
+    }
+
+    bool lowerAffine(const AgnosticChain& ch)
+    {
+        if (fusedBatchNorm || addResidual || inputs.size() > 1)
+            return false;
+        if (fastActivation != FAST_ACTIV_NONE || activationFunc != nullptr || !activ.empty())
+            return false;
+        if (wshape0.empty() || wshape0.dims < 3)
+            return false;
+
+        const int K = wshape0[0];
+        if (!bias.empty() && (bias.dims != 1 || (int)bias.total() != K))
+            return false;
+
+        std::vector<float> scale(K, 1.f), shift(K, 0.f);
+        size_t i = 0;
+        bool affine = false;
+
+        if (i < ch.absorbed.size() && effectiveOpType(ch.absorbed[i]) == "Mul") {
+            if (!perChannelValues(ch, i, K, scale))
+                return false;
+            affine = true;
+            i++;
+        }
+        if (i < ch.absorbed.size() && effectiveOpType(ch.absorbed[i]) == "Add") {
+            if (!perChannelValues(ch, i, K, shift))
+                return false;
+            affine = true;
+            i++;
+        }
+        if (!affine)
+            return false;
+
+        if (i < ch.absorbed.size()) {
+            if (i + 1 != ch.absorbed.size())
+                return false;
+            if (!fuseActivation(ch.absorbed[i].dynamicCast<Layer>()) && !lowerClamp(ch))
+                return false;
+        }
+
+        fusedScale.fit(1, &K, CV_32F);
+        fusedBias.fit(1, &K, CV_32F);
+        float* fs = fusedScale.ptr<float>();
+        float* fb = fusedBias.ptr<float>();
+        const float* b = bias.empty() ? nullptr : bias.ptr<float>();
+        for (int k = 0; k < K; k++) {
+            fs[k] = scale[k];
+            fb[k] = (b ? b[k] * scale[k] : 0.f) + shift[k];
+        }
+        fusedBatchNorm = true;
+        return true;
+    }
+
+    bool perChannelValues(const AgnosticChain& ch, size_t i, int K, std::vector<float>& out) const
+    {
+        const FusionOperand& o = ch.stepOperands[i];
+        if (!o.hasSide)
+            return false;
+        if (o.bufId < 0) {
+            std::fill(out.begin(), out.end(), o.scalar);
+            return true;
+        }
+        if (o.bufId >= (int)ch.constBufs.size())
+            return false;
+
+        const Mat& c = ch.constBufs[o.bufId];
+        if (c.empty() || c.type() != CV_32F || !c.isContinuous() || (int)c.total() != K)
+            return false;
+
+        const int nspatial = wshape0.dims - 2;
+        const int ax = c.dims - nspatial - 1;
+        if (ax < 0)
+            return false;
+        for (int d = 0; d < c.dims; d++) {
+            if (c.size[d] != (d == ax ? K : 1))
+                return false;
+        }
+
+        const float* p = c.ptr<float>();
+        std::copy(p, p + K, out.begin());
+        return true;
+    }
+
+    bool lowerAddBias(const AgnosticChain& ch)
+    {
+        if (ch.stepOperands.empty() || wshape0.empty() || wshape0.dims < 3)
+            return false;
+        if (effectiveOpType(ch.absorbed[0]) != "Add")
+            return false;
+
+        const FusionOperand& o = ch.stepOperands[0];
+        if (!o.hasSide)
+            return false;
+
+        const int K = wshape0[0];
+        if (!bias.empty() && (bias.dims != 1 || (int)bias.total() != K))
+            return false;
+
+        Mat flat;
+        if (o.bufId < 0) {
+            flat.create(1, &K, CV_32F);
+            flat.setTo(o.scalar);
+        } else {
+            if (o.bufId >= (int)ch.constBufs.size())
+                return false;
+            const Mat& c = ch.constBufs[o.bufId];
+            if (c.empty() || c.type() != CV_32F || !c.isContinuous() || (int)c.total() != K)
+                return false;
+
+            const int nspatial = wshape0.dims - 2;
+            const int ax = c.dims - nspatial - 1;
+            if (ax < 0)
+                return false;
+            for (int d = 0; d < c.dims; d++) {
+                if (c.size[d] != (d == ax ? K : 1))
+                    return false;
+            }
+            flat = Mat(1, &K, CV_32F, (void*)c.ptr<float>());
+        }
+        return fuseAddBias(flat);
+    }
+
+    bool lowerClamp(const AgnosticChain& ch)
+    {
+        if (fastActivation != FAST_ACTIV_NONE || activationFunc != nullptr || !activ.empty())
+            return false;
+        if (ch.fgSteps != (int)ch.absorbed.size())
+            return false;
+
+        const std::vector<FusionNode>& nodes = ch.fg.nodes();
+        int out = ch.fg.outputNode;
+        if (out < 0 || out >= (int)nodes.size() || nodes[out].op != FusionOp::CLAMP)
+            return false;
+        if (nodes[out].scalar != 0.f)
+            return false;
+
+        fastActivation = FAST_ACTIV_CLIP;
+        activParams.assign(2, 0.f);
+        activParams[1] = nodes[out].scalar2;
         return true;
     }
 
@@ -441,7 +599,7 @@ public:
         // MLAS 1x1 SGEMM path. Skipped for small spatial: the gather/scatter
         // tax exceeds MLAS's SGEMM speedup over the in-place NCHWc8 kernel.
         if (mlas1x1Enabled() && inptype == CV_32F &&
-            !activationFunc && !addResidual && inpshape.back() == 8)
+            !addResidual && inpshape.back() == 8)
         {
             const int ndims = inpshape.dims;
             int HW = 1;
@@ -606,11 +764,6 @@ public:
                 }
             }
         });
-        if (activationFunc) {
-            float* dst = out;
-            int total = K1 * HW * 8;
-            activationFunc(dst, dst, total, activParams.data());
-        }
     }
 
     // Chunked 1x1 SGEMM-as-conv: gather NCHWc8 -> SGEMM -> scatter+activate
@@ -669,25 +822,59 @@ public:
                                    C1_out, HW, out_n);
             }
         }
+
+        if (activationFunc) {
+            float* dst = out.ptr<float>();
+            activationFunc(dst, dst, (int)out.total(), activParams.data());
+        }
     }
 
 #ifdef HAVE_CUDA
-    bool cudaSupported() const
+    // Preconditions independent of the fused activation -- weights/shape/padding
+    // must always be CUDA-friendly regardless of how the activation gets executed.
+    bool cudaSupportedBase() const
     {
         if (origWeights.empty() || wshape0.dims != 4)  // [Cout, Cin/group, kh, kw] (2D conv)
-            return false;
-        if (auto_pad != AUTO_PAD_NONE && auto_pad != AUTO_PAD_VALID)
-            return false;
-        if (activationFunc != nullptr || !activ.empty())
-            return false;
-        if (fastActivation != FAST_ACTIV_NONE && fastActivation != FAST_ACTIV_RELU &&
-            fastActivation != FAST_ACTIV_LEAKY_RELU && fastActivation != FAST_ACTIV_CLIP)
             return false;
         return true;
     }
 
+    // True iff the fused activation (if any) can run inside the same cuDNN conv kernel
+    // via the CPU-oriented FastActivation whitelist (RELU/LeakyReLU/Clip/PReLU-adjacent).
+    bool cudaFastActivation() const
+    {
+        return fastActivation == FAST_ACTIV_NONE || fastActivation == FAST_ACTIV_RELU ||
+               fastActivation == FAST_ACTIV_LEAKY_RELU || fastActivation == FAST_ACTIV_CLIP;
+    }
+
+    // cuda4dnn::ConvolutionOp already has single-kernel fusion support for these
+    // activations (see ConvolutionConfiguration::ActivationType), independent of
+    // the CPU-oriented FastActivation whitelist above. Checked against the ORIGINAL
+    // activation layer (retained in `activ` by fuseActivation()'s generic branch).
+    static bool nativeCudaActivationType(const String& type, ConvolutionConfiguration::ActivationType& out)
+    {
+        if (type == "Swish")   { out = ConvolutionConfiguration::ActivationType::SWISH;   return true; }
+        if (type == "Mish")    { out = ConvolutionConfiguration::ActivationType::MISH;    return true; }
+        if (type == "Sigmoid") { out = ConvolutionConfiguration::ActivationType::SIGMOID; return true; }
+        if (type == "TanH")    { out = ConvolutionConfiguration::ActivationType::TANH;    return true; }
+        return false;
+    }
+
+    bool cudaNativeActivation(ConvolutionConfiguration::ActivationType& out) const
+    {
+        return fastActivation == FAST_ACTIV_NONE && !activ.empty() && nativeCudaActivationType(activ->type, out);
+    }
+
+    bool cudaSupported() const
+    {
+        ConvolutionConfiguration::ActivationType unused;
+        return cudaSupportedBase() && cudaFastActivation() &&
+               (activationFunc == nullptr || cudaNativeActivation(unused));
+    }
+
     Ptr<BackendNode> initCudaConvNode(void* context_, const MatShape& inpShape,
-                                      const MatShape& outShape, int targetId)
+                                      const MatShape& outShape, int targetId,
+                                      bool hasNativeAct, ConvolutionConfiguration::ActivationType nativeAct)
     {
         csl::CSLContext context = *reinterpret_cast<csl::CSLContext*>(context_);
         const int nspatial = wshape0.dims - 2;
@@ -703,8 +890,10 @@ public:
         } else {
             config.padMode = ConvolutionConfiguration::PaddingMode::MANUAL;
             for (int i = 0; i < nspatial; i++) {
-                config.pads_begin.push_back(pads.empty() ? 0 : (size_t)pads[i]);
-                config.pads_end.push_back(pads.empty() ? 0 : (size_t)pads[i + nspatial]);
+                int pad0, pad1;
+                getPadding(pads, i, nspatial, auto_pad, (int)wshape0[2 + i], pad0, pad1);
+                config.pads_begin.push_back((size_t)pad0);
+                config.pads_end.push_back((size_t)pad1);
             }
         }
         config.input_shape.assign(inpShape.begin(), inpShape.end());
@@ -730,7 +919,7 @@ public:
         config.relu_negative_slope = 0.f;
         config.crelu_floor = 0.f; config.crelu_ceil = 0.f;
         config.power_exp = 1.f; config.power_scale = 1.f; config.power_shift = 0.f;
-        bool hasAct = fastActivation != FAST_ACTIV_NONE;
+        bool hasAct = fastActivation != FAST_ACTIV_NONE || hasNativeAct;
         if (fastActivation == FAST_ACTIV_RELU) {
             config.activation_type = ConvolutionConfiguration::ActivationType::RELU;
         } else if (fastActivation == FAST_ACTIV_LEAKY_RELU) {
@@ -740,6 +929,8 @@ public:
             config.activation_type = ConvolutionConfiguration::ActivationType::CLIPPED_RELU;
             config.crelu_floor = activParams.size() > 0 ? activParams[0] : 0.f;
             config.crelu_ceil  = activParams.size() > 1 ? activParams[1] : 6.f;
+        } else if (hasNativeAct) {
+            config.activation_type = nativeAct;
         }
 
         if (addResidual && hasAct)
@@ -791,9 +982,37 @@ public:
     static Ptr<Layer> create(const Ptr<LayerInfo>& data, void* backendCtx)
     {
         Ptr<Conv2LayerImpl> conv = data.dynamicCast<Conv2LayerImpl>();
-        if (!conv || !backendCtx || !conv->cudaSupported())
+        if (!conv || !backendCtx || !conv->cudaSupportedBase())
             return Ptr<Layer>();
+
+        ConvolutionConfiguration::ActivationType nativeAct = ConvolutionConfiguration::ActivationType::IDENTITY;
+        bool hasNativeAct = false;
+        Ptr<Layer> activExec;
+        // conv->activ is set only by fuseActivation()'s generic branch (an activation
+        // outside the fast RELU/LeakyReLU/Clip enum, e.g. Swish/Mish/Sigmoid/TanH) --
+        // that's exactly the case needing native-fusion-or-fallback resolution below.
+        // (cudaFastActivation() is the wrong check here: it returns true for
+        // FAST_ACTIV_NONE too, which is also the state a Swish-fused conv is in.)
+        if (!conv->activ.empty()) {
+            if (conv->cudaNativeActivation(nativeAct)) {
+                // cuda4dnn::ConvolutionOp can fuse this activation into the same kernel
+                // (e.g. Swish/Mish/Sigmoid/TanH) -- no separate exec needed.
+                hasNativeAct = true;
+            } else {
+                // Not a natively-fusable activation. Run the conv bare (IDENTITY) and
+                // re-create the original activation layer as its own standalone CUDA
+                // exec, run right after -- mirrors ORT's model of independent per-op
+                // CUDA kernels instead of gating GPU eligibility on fusion recognition.
+                activExec = LayerFactory::createExec(conv->activ->type, DNN_BACKEND_CUDA, conv->activ, backendCtx);
+                if (!activExec)
+                    return Ptr<Layer>();  // that activation type has no CUDA exec either
+            }
+        }
+
         Ptr<CUDAConv2Layer> layer(new CUDAConv2Layer(conv, backendCtx));
+        layer->activExec = activExec;
+        layer->hasNativeAct = hasNativeAct;
+        layer->nativeAct = nativeAct;
         layer->name = conv->name;
         layer->type = conv->type;
         layer->inputs = conv->inputs;
@@ -805,25 +1024,33 @@ public:
                      OutputArrayOfArrays outputs_,
                      void* workspace) CV_OVERRIDE
     {
-        std::vector<cuda::GpuMatND> inputs, outputs;
-        inputs_.getGpuMatNDVector(inputs);
-        outputs_.getGpuMatNDVector(outputs);
+        std::vector<UMat> inputs, outputs;
+        inputs_.getUMatVector(inputs);
+        outputs_.getUMatVector(outputs);
         CV_Assert(!inputs.empty() && !outputs.empty());
 
         auto& ws = *reinterpret_cast<cuda4dnn::csl::Workspace*>(workspace);
         if (!node) {
-            node = conv->initCudaConvNode(ctx, inputs[0].size, outputs[0].size, preferableTarget);
+            node = conv->initCudaConvNode(ctx, cv::dnn::shape(inputs[0]), cv::dnn::shape(outputs[0]),
+                                          preferableTarget, hasNativeAct, nativeAct);
             cudaNode = node.dynamicCast<CUDABackendNode>();
             CV_Assert(cudaNode);
             ws.require(cudaNode->get_workspace_memory_in_bytes());
         }
         cudaNode->forward(inputs, outputs, ws);
+        if (activExec) {
+            activExec->preferableTarget = preferableTarget;
+            activExec->forwardCUDA(outputs_, outputs_, workspace);  // in-place, safe for a pointwise activation
+        }
     }
 
     Ptr<Conv2LayerImpl> conv;
     void* ctx;
     Ptr<BackendNode> node;
     Ptr<CUDABackendNode> cudaNode;
+    bool hasNativeAct = false;
+    ConvolutionConfiguration::ActivationType nativeAct = ConvolutionConfiguration::ActivationType::IDENTITY;
+    Ptr<Layer> activExec;
 };
 
 void registerConv2CudaBackend()

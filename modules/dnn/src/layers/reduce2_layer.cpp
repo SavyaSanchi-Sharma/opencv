@@ -14,9 +14,14 @@
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "../op_cann.hpp"
 #include "layers_common.hpp"
 #include "../dnn_common.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/reduce.hpp"
+#endif
 
 namespace cv {
 namespace dnn {
@@ -104,7 +109,7 @@ public:
         CV_Assert(!inps.empty());
         outs.resize(1);
         const MatShape& inp0 = inps[0];
-        if (inp0.empty()) {
+        if (inp0.dims < 0) {
             outs[0] = MatShape();
             return false;
         }
@@ -115,7 +120,7 @@ public:
         } else if (inps.size() >= 2) {
             Net::Impl* netimpl_ = getNetImpl(this);
             if (netimpl_ && netimpl_->isConstArg(inputs[1])) {
-                Mat axesTensor = netimpl_->argTensor(inputs[1]);
+                Mat axesTensor = netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ);
                 tensorToIntVec(axesTensor, axes);
             }
         }
@@ -154,9 +159,116 @@ public:
         return false;
     }
 
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs_, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_Assert(requiredOutputs == 1);
+        CV_Assert(!inputs_.empty());
+        MatShape inp0 = inputs_[0].shape();
+
+        std::vector<int> axes_;
+        if (!this->axes.empty()) {
+            axes_ = this->axes;
+        } else if (inputs_.size() >= 2) {
+            Mat axesTensor = inputs_[1].getMat(ACCESS_READ);
+            tensorToIntVec(axesTensor, axes_);
+        }
+
+        MatShape shape_output;
+        if (axes_.empty()) {
+            if (noop_with_empty_axes) {
+                shape_output = inp0;
+            } else if (keepdims) {
+                shape_output = inp0;
+                std::fill(shape_output.begin(), shape_output.end(), 1);
+            } else {
+                shape_output = MatShape::scalar();
+            }
+        } else {
+            std::vector<int> norm_axes = axes_;
+            for (size_t i = 0; i < norm_axes.size(); ++i)
+                norm_axes[i] = normalize_axis(norm_axes[i], inp0);
+
+            auto shape_output_ = inp0;
+            for (int axis : norm_axes) shape_output_[axis] = -1;
+            for (size_t i = 0; i < shape_output_.size(); ++i) {
+                if (shape_output_[i] == -1) {
+                    if (keepdims) shape_output.push_back(1);
+                } else {
+                    shape_output.push_back(shape_output_[i]);
+                }
+            }
+            if (shape_output.empty()) shape_output = MatShape::scalar();
+        }
+
+        outputs.resize(1);
+        outputs[0] = shape_output;
+    }
+
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            if (reduce_type != ReduceType::SUM && reduce_type != ReduceType::MEAN &&
+                reduce_type != ReduceType::MAX && reduce_type != ReduceType::MIN) {
+                CV_LOG_INFO(NULL, cv::format("DNN/Reduce2 supportBackend: '%s' FAIL reduce_type=%s",
+                                             name.c_str(), reduceTypeToString(reduce_type)));
+                return false;
+            }
+            if (noop_with_empty_axes && axes.empty() && inputs.size() < 2) {
+                CV_LOG_INFO(NULL, cv::format("DNN/Reduce2 supportBackend: '%s' FAIL noop_with_empty_axes axes.empty()=%d inputs.size()=%zu",
+                                             name.c_str(), (int)axes.empty(), inputs.size()));
+                return false;
+            }
+            if (axes.empty() && inputs.size() >= 2) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (netimpl_ && !netimpl_->isConstArg(inputs[1])) {
+                    CV_LOG_INFO(NULL, cv::format("DNN/Reduce2 supportBackend: '%s' FAIL axes input (arg %d) not const",
+                                                 name.c_str(), inputs[1].idx));
+                    return false;
+                }
+            }
+            return true;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+        MatShape inp0 = cv::dnn::shape(inputsU[0]);
+        const int rank = inp0.dims;
+
+        std::vector<int> resolved_axes;
+        if (!axes.empty()) {
+            resolved_axes = axes;
+        } else if (inputs.size() >= 2) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (netimpl_ && netimpl_->isConstArg(inputs[1])) {
+                Mat axesTensor = netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ);
+                tensorToIntVec(axesTensor, resolved_axes);
+            }
+        }
+
+        std::vector<int64_t> norm_axes;
+        for (int a : resolved_axes)
+            norm_axes.push_back(normalize_axis(a, rank));
+
+        cuda4dnn::ReduceOpType cudaOp;
+        switch (reduce_type) {
+            case ReduceType::MEAN: cudaOp = cuda4dnn::ReduceOpType::MEAN; break;
+            case ReduceType::MAX:  cudaOp = cuda4dnn::ReduceOpType::MAX;  break;
+            case ReduceType::MIN:  cudaOp = cuda4dnn::ReduceOpType::MIN;  break;
+            default:               cudaOp = cuda4dnn::ReduceOpType::SUM; break;
+        }
+        return make_cuda_node_with_type<cuda4dnn::ReduceOp>(preferableTarget, inputsU[0].type(), std::move(context->stream), cudaOp, norm_axes);
+    }
+#endif
 
     virtual void getTypes(const std::vector<MatType>& inputs,
         const int requiredOutputs,
@@ -429,6 +541,16 @@ public:
                     std::memcpy(p_dst, p_src, sizeof(dtype) * dst.total());
                     return;
                 }
+                ReduceAllInvoker<Op> p(src, dst);
+                double nstripes = (size_t)p.total * (size_t)p.cost_per_thread * (1 / 1024.0);
+                parallel_for_(Range(0, p.total), p, nstripes);
+                return;
+            }
+
+            auto shape_src = shape(src);
+            std::vector<bool> is_reduced(shape_src.size(), false);
+            for (int a : axes) is_reduced[a] = true;
+            if (std::all_of(is_reduced.begin(), is_reduced.end(), [](bool b) { return b; })) {
                 ReduceAllInvoker<Op> p(src, dst);
                 double nstripes = (size_t)p.total * (size_t)p.cost_per_thread * (1 / 1024.0);
                 parallel_for_(Range(0, p.total), p, nstripes);

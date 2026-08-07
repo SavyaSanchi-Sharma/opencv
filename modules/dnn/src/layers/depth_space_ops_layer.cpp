@@ -222,6 +222,25 @@ public:
         std::vector<size_t> perm(permutation.begin(), permutation.end());
         return make_cuda_node<cuda4dnn::DepthSpaceOps>(preferableTarget, std::move(context->stream), internal_shape, perm);
     }
+
+    Ptr<BackendNode> initCUDA(void *context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        using namespace cv::dnn::cuda4dnn;
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        std::vector<size_t> perm(permutation.begin(), permutation.end());
+
+        MatShape input_shape = inputs_arr.shape(0);
+        int batch = input_shape[0], input_depth = input_shape[1], input_height = input_shape[2], input_width = input_shape[3];
+        MatShape ishape;
+        if (is_crd) {
+            ishape = MatShape{batch, input_depth / (blocksize * blocksize), blocksize, blocksize, input_height, input_width};
+        } else {
+            ishape = MatShape{batch, blocksize, blocksize, input_depth / (blocksize * blocksize), input_height, input_width};
+        }
+
+        return make_cuda_node<cuda4dnn::DepthSpaceOps>(preferableTarget, std::move(context->stream), ishape, perm);
+    }
 #endif // HAVE_CUDA
 
 #ifdef HAVE_CANN
@@ -398,6 +417,20 @@ public:
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         std::vector<size_t> perm(permutation.begin(), permutation.end());
         return make_cuda_node<cuda4dnn::DepthSpaceOps>(preferableTarget, std::move(context->stream), internal_shape, perm);
+    }
+
+    Ptr<BackendNode> initCUDA(void *context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        using namespace cv::dnn::cuda4dnn;
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        std::vector<size_t> perm(permutation.begin(), permutation.end());
+
+        MatShape input_shape = inputs_arr.shape(0);
+        int batch = input_shape[0], input_depth = input_shape[1], input_height = input_shape[2], input_width = input_shape[3];
+        MatShape ishape{batch, input_depth, input_height / blocksize, blocksize, input_width / blocksize, blocksize};
+
+        return make_cuda_node<cuda4dnn::DepthSpaceOps>(preferableTarget, std::move(context->stream), ishape, perm);
     }
 #endif // HAVE_CUDA
 

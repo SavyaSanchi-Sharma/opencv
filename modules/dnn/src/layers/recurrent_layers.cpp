@@ -875,6 +875,74 @@ public:
                                                 ordered_weights, h0, c0,
                                                 config);
     }
+
+    Ptr<BackendNode> initCUDA(void *context_, InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        const int numDirs = 1 + static_cast<int>(bidirectional);
+        auto toIFCO = [numDirs] (Mat& in) {
+            int first = in.size[0];
+            int rest = in.total() / first / 4;
+            // every weight blob contains weights for Input, Output, Forget and Cell gates
+            Mat m = in.reshape(1, {first, 4, rest});
+            Mat outputGate = m.col(1);
+            Mat forgetGate = m.col(2);
+            Mat cellGate = m.col(3);
+            // IOFC -> IFOC
+            std::swap_ranges(outputGate.begin<float>(), outputGate.end<float>(), forgetGate.begin<float>());
+            std::swap(outputGate, forgetGate);
+            // IFOC -> IFCO
+            std::swap_ranges(outputGate.begin<float>(), outputGate.end<float>(), cellGate.begin<float>());
+            in = in.reshape(1, numDirs);
+        };
+
+        Mat& b = originalBlobs[2];
+        // B is a concatenation of biases for Wh and Wx
+        b = b.reshape(1, originalBlobs[2].size[0]*2);
+
+        for (auto& m : originalBlobs)
+        {
+            toIFCO(m);
+        }
+
+        b = b.reshape(1, static_cast<int>(b.total()));
+
+        Mat ordered_weights;
+        // Wx_f, Wh_f, [Wx_b, Wh_b,] b
+        for (int i = 0; i < numDirs; ++i)
+        {
+            for (size_t j = 0; j < 2; ++j) // Wx, Wh
+            {
+                Mat oneDirection = originalBlobs[j].row(i);
+                ordered_weights.push_back(oneDirection.reshape(1, static_cast<int>(oneDirection.total())));
+            }
+        }
+        ordered_weights.push_back(b);
+
+        // Pass hidden states as is
+        Mat h0 = blobs[3];
+        Mat c0 = blobs[4];
+
+        CV_Assert(inputs_arr.total() > 0);
+        MatShape input_shape = inputs_arr.shape(0);
+
+        RNNConfiguration config
+        {
+            input_shape[0],      // seqLength;
+            1,                   // numLayers;
+            numHidden,           // hiddenSize;
+            input_shape[2],      // inputSize;
+            input_shape[1],      // miniBatch;
+            bidirectional
+        };
+
+
+        auto *context = reinterpret_cast<cuda4dnn::csl::CSLContext *>(context_);
+        return make_cuda_node<cuda4dnn::LSTMOp>(preferableTarget, std::move(context->stream),
+                                                std::move(context->cudnn_handle),
+                                                ordered_weights, h0, c0,
+                                                config);
+    }
 #endif
 };
 

@@ -105,6 +105,71 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            /* suppose we require padding for the first spatial axis (H in NCHW or D in NCDHW)
+             *
+             * there could be a case where the batch axis, channel axis, and the first spatial axis are all one
+             * this would result in effective rank being less than the number of axes requiring padding
+             */
+            /* the effective rank of the input may be smaller than the effective rank of the output but the converse is never true
+             * input: [1, 1, 1, 3]; effective rank = 1
+             * output: [1, 1, 3, 3]; effective rank = 2
+             *
+             * hence, we use the effective rank of the output tensor for the padding operation
+             */
+            auto effective_rank = get_effective_rank(output);
+            CV_Assert(get_effective_rank(input) <= effective_rank);
+            effective_rank = std::max(effective_rank, dstRanges.size());
+
+            for (int i = effective_rank - dstRanges.size(); i < effective_rank; i++)
+            {
+                if (dstRanges[i] == Range::all())
+                    CV_Assert(input.get_axis_size(i) == output.get_axis_size(i));
+                else
+                    CV_Assert(input.get_axis_size(i) == dstRanges[i].size());
+            }
+
+            if (type == PaddingType::CONSTANT)
+            {
+                kernels::fill<T>(stream, output, value);
+
+                std::vector<std::size_t> offsets(effective_rank, 0);
+                for (int i = 0; i < dstRanges.size(); i++)
+                {
+                    const auto delta = effective_rank - dstRanges.size();
+                    if (dstRanges[i] != Range::all())
+                        offsets[delta + i] = dstRanges[i].start;
+                }
+
+                kernels::concat_with_offsets<T>(stream, output, input, offsets);
+            }
+            else if (type == PaddingType::REFLECTION101)
+            {
+                std::vector<std::pair<std::size_t, std::size_t>> ranges(effective_rank);
+                for (int i = 0; i < effective_rank; i++)
+                {
+                    const auto delta = effective_rank - dstRanges.size();
+                    if (i < delta || dstRanges[i - delta] == Range::all())
+                        ranges[i] = { 0, input.get_axis_size(i) };
+                    else
+                        ranges[i] = { dstRanges[i].start, dstRanges[i].end };
+                }
+
+                kernels::copy_with_reflection101<T>(stream, output, input, ranges);
+            }
+        }
+
     private:
         csl::Stream stream;
         PaddingType type;

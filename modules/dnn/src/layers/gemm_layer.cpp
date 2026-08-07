@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../graph_fusion_utils.hpp"
 #include "layers_common.hpp"
 // backends
 #include "../op_cuda.hpp"
@@ -17,6 +18,7 @@ using namespace cv::dnn::cuda4dnn;
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 namespace cv { namespace dnn {
@@ -50,8 +52,17 @@ bool constC(LayerGemmOpMode mode){
 
 
 // Y = alpha * A’ * B’ + beta * C
-class GemmLayerImpl CV_FINAL : public GemmLayer {
+class GemmLayerImpl CV_FINAL : public GemmLayer, public FusionSink {
 public:
+    virtual bool setFusion(const AgnosticChain& ch) CV_OVERRIDE
+    {
+        if (!fusionSteps.empty())
+            return false;
+        return fusionLower(ch, fusionSteps);
+    }
+
+    std::vector<FusionStep> fusionSteps;
+
     GemmLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
 
@@ -446,6 +457,7 @@ public:
             }
         }
 
+        bool done = false;
         if (constB(mode)) {
 #ifdef HAVE_MLAS
             if (!opt.use_rvv && !packed_B_mlas.empty() &&
@@ -457,20 +469,24 @@ public:
                                     packed_B_mlas.data,
                                     1.f,
                                     Y.ptr<float>(), N)) {
-                    return;
+                    done = true;
                 }
             }
 #endif
-            CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
-            if (!thin_packed_B.empty()) {
-                fastGemmThin(rows, N, K, alpha, A.ptr<const float>(), na, 1,
-                             thin_packed_B.data(), 1.f, Y.ptr<float>(), N, opt.multi_thread);
-            } else {
-                fastGemm(trans_a, rows, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
+            if (!done) {
+                CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
+                if (!thin_packed_B.empty()) {
+                    fastGemmThin(rows, N, K, alpha, A.ptr<const float>(), na, 1,
+                                 thin_packed_B.data(), 1.f, Y.ptr<float>(), N, opt.multi_thread);
+                } else {
+                    fastGemm(trans_a, rows, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
+                }
             }
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
+
+        fusionApply(fusionSteps, Y);
     }
 
 #ifdef HAVE_CUDA
@@ -481,14 +497,14 @@ public:
         CV_CheckFalse(trans_a, "DNN/Gemm/Cuda: does not support transA");
         CV_CheckTrue(const_B, "DNN/Gemm/Cuda: input B (weight) is required to be constant");
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
-        std::vector<cuda::GpuMatND> inputs;
-        inputs_.getGpuMatNDVector(inputs);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
         auto B = blobs[0];
         auto C = have_bias && const_C ? blobs[1] : Mat(); // in most cases C is constant
 
         if (!trans_b)
             cv::transpose(B, B);
-        auto flatten_start_axis = normalize_axis(1, (int)inputs[0].size.size());
+        auto flatten_start_axis = normalize_axis(1, inputs[0].dims);
         return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, B, C);
     }
 #endif // HAVE_CUDA

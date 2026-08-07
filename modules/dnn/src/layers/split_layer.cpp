@@ -99,7 +99,7 @@ public:
                   std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_CheckEQ(inputs.size(), 1u, "");
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16)
+        if (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
             CV_CheckType(inputs[0], inputs[0] == CV_16F || inputs[0] == CV_8S || inputs[0] == CV_8U || inputs[0] == CV_32S || inputs[0] == CV_64S || inputs[0] == CV_Bool, "");
         else
             CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_8S || inputs[0] == CV_8U || inputs[0] == CV_32S || inputs[0] == CV_64S || inputs[0] == CV_Bool, "");
@@ -135,6 +135,20 @@ public:
             return make_cuda_node_bool<cuda4dnn::SplitOp>(std::move(context->stream));
         else
             return make_cuda_node_with_type<cuda4dnn::SplitOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream));
+
+    }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::SplitOp>(std::move(context->stream));
+        else
+            return make_cuda_node_with_type<cuda4dnn::SplitOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream));
 
     }
 #endif

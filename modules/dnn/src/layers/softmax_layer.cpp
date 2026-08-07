@@ -61,6 +61,7 @@ using namespace cv::dnn::ocl4dnn;
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/softmax.hpp"
+#include "../cuda4dnn/primitives/softmax_kernel.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -245,15 +246,30 @@ public:
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(
         void *context_,
-        const std::vector<Ptr<BackendWrapper>>& inputs,
-        const std::vector<Ptr<BackendWrapper>>& outputs
+        InputArrayOfArrays inputs_,
+        InputArrayOfArrays
     ) override
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
 
-        auto input_wrapper = inputs[0].dynamicCast<CUDABackendWrapper>();
-        auto channel_axis = normalize_axis(axisRaw, input_wrapper->getRank());
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        CV_Assert(!inputs.empty());
+
+        auto channel_axis = normalize_axis(axisRaw, cv::dnn::shape(inputs[0]).dims);
         return make_cuda_node<cuda4dnn::SoftmaxOp>(preferableTarget, std::move(context->cudnn_handle), channel_axis, logSoftMax);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        MatShape inShape = cv::dnn::shape(inputs[0]);
+        int axis = normalize_axis(axisRaw, inShape.dims);
+        return make_cuda_node<cuda4dnn::SoftmaxKernelOp>(preferableTarget, std::move(context->stream), axis, logSoftMax);
     }
 #endif
 
