@@ -289,6 +289,8 @@ protected:
     void parseAttentionOnnxAi      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseMultiHeadAttention   (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseGroupQueryAttention  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseSimplifiedLayerNorm  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseSkipSimplifiedLayerNorm(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseCausalConvWithState  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSDPA                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDequantizeLinear     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -2702,6 +2704,10 @@ static bool hasInput(const opencv_onnx::NodeProto& node, int i) {
     return i < node.input_size() && !node.input(i).empty();
 }
 
+static bool hasOutput(const opencv_onnx::NodeProto& node, int i) {
+    return i < node.output_size() && !node.output(i).empty();
+}
+
 // com.microsoft MultiHeadAttention (unpacked Q/K/V) -> AttentionOnnxAi.
 void ONNXImporter2::parseMultiHeadAttention(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
     CV_CheckTrue(params.has("num_heads"), "MultiHeadAttention: num_heads is required");
@@ -2711,9 +2717,13 @@ void ONNXImporter2::parseMultiHeadAttention(LayerParams& params, const opencv_on
         "MultiHeadAttention: bias / key_padding_mask / cache_indirection inputs are not supported");
 
     // inputs: query, key, value, bias, key_padding_mask, attention_bias, past_key, past_value, ...
+    const bool has_past_k = hasInput(node_proto, 6), has_past_v = hasInput(node_proto, 7);
+    CV_CheckTrue(has_past_k == has_past_v,
+                 "MultiHeadAttention: past_key and past_value must be provided as a pair");
+
     std::vector<Arg> ins{node_inputs[0], node_inputs[1], node_inputs[2]};
     if (hasInput(node_proto, 5)) ins.push_back(node_inputs[5]);  // attention_bias -> mask
-    if (hasInput(node_proto, 6) && hasInput(node_proto, 7)) { ins.push_back(node_inputs[6]); ins.push_back(node_inputs[7]); }
+    if (has_past_k) { ins.push_back(node_inputs[6]); ins.push_back(node_inputs[7]); }
     node_inputs = ins;
 
     params.type = "AttentionOnnxAi";
@@ -2726,8 +2736,6 @@ void ONNXImporter2::parseMultiHeadAttention(LayerParams& params, const opencv_on
 }
 
 // com.microsoft GroupQueryAttention (grouped, causal) -> AttentionOnnxAi.
-// Dynamic-cache export: past_key/past_value carry the real length; seqlens_k and
-// total_sequence_length are dropped.
 void ONNXImporter2::parseGroupQueryAttention(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
     CV_CheckTrue(params.has("num_heads") && params.has("kv_num_heads"),
                  "GroupQueryAttention: num_heads and kv_num_heads are required");
@@ -2739,8 +2747,21 @@ void ONNXImporter2::parseGroupQueryAttention(LayerParams& params, const opencv_o
         CV_CheckFalse(hasInput(node_proto, i), "GroupQueryAttention: only query/key/value/past_key/past_value are supported");
 
     // inputs: query, key, value, past_key, past_value, seqlens_k, total_sequence_length, ...
+    const bool has_past_k = hasInput(node_proto, 3), has_past_v = hasInput(node_proto, 4);
+    CV_CheckTrue(has_past_k == has_past_v,
+                 "GroupQueryAttention: past_key and past_value must be provided as a pair");
+
     std::vector<Arg> ins{node_inputs[0], node_inputs[1], node_inputs[2]};
-    if (hasInput(node_proto, 3) && hasInput(node_proto, 4)) { ins.push_back(node_inputs[3]); ins.push_back(node_inputs[4]); }
+    if (has_past_k) {
+        // Dropping seqlens_k is only sound for a growing past. A fixed past seq dim means a
+        // shared-buffer cache whose real length lives in seqlens_k, so it would be mis-read.
+        const MatShape& pk = netimpl->args.at(node_inputs[3].idx).shape;
+        if (pk.dims >= 2)
+            CV_CheckLE(pk[pk.dims - 2], 0,
+                "GroupQueryAttention: past_key has a fixed sequence length (shared-buffer / static "
+                "cache export); only dynamic-cache exports are supported");
+        ins.push_back(node_inputs[3]); ins.push_back(node_inputs[4]);
+    }
     node_inputs = ins;
 
     params.type = "AttentionOnnxAi";
@@ -2749,6 +2770,55 @@ void ONNXImporter2::parseGroupQueryAttention(LayerParams& params, const opencv_o
     params.set("is_causal", true);
 
     addLayer(params, node_proto, (int)node_inputs.size());
+}
+
+// com.microsoft SimplifiedLayerNormalization is RMSNorm; axis/epsilon carry over as-is.
+void ONNXImporter2::parseSimplifiedLayerNorm(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
+    CV_CheckEQ(node_proto.input_size(), 2, "SimplifiedLayerNormalization: expected (X, scale)");
+    CV_CheckLE(node_proto.output_size(), 1,
+               "SimplifiedLayerNormalization: optional mean / inv_std_var outputs are not supported");
+    params.type = "RMSNormalization";
+    addLayer(params, node_proto, 2);
+}
+
+// SkipSimplifiedLayerNormalization = RMSNorm(input + skip [+ bias]) * gamma, decomposed here.
+// outputs: output, mean?, inv_std_var?, input_skip_bias_sum?
+void ONNXImporter2::parseSkipSimplifiedLayerNorm(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
+    CV_CheckTrue(hasInput(node_proto, 1) && hasInput(node_proto, 2),
+                 "SkipSimplifiedLayerNormalization: skip and gamma are required");
+    CV_CheckFalse(hasOutput(node_proto, 1) || hasOutput(node_proto, 2),
+                  "SkipSimplifiedLayerNormalization: mean / inv_std_var outputs are not supported");
+
+    const std::vector<Arg> ins = node_inputs, outs = node_outputs;
+    const bool has_bias = hasInput(node_proto, 3);
+    // input_skip_bias_sum is the next block's residual, so produce it when asked for.
+    const bool want_sum = hasOutput(node_proto, 3) && outs.size() > 3;
+
+    LayerParams add;
+    add.name = params.name + "/skip_add";
+    add.type = "NaryEltwise";
+    add.set("operation", "add");
+    Arg sum = (want_sum && !has_bias) ? outs[3] : net.getArg(add.name + "/out");
+    node_inputs = {ins[0], ins[1]};
+    node_outputs = {sum};
+    addLayer(add, node_proto, 2);
+
+    if (has_bias) {
+        LayerParams addb;
+        addb.name = params.name + "/bias_add";
+        addb.type = "NaryEltwise";
+        addb.set("operation", "add");
+        Arg biased = want_sum ? outs[3] : net.getArg(addb.name + "/out");
+        node_inputs = {sum, ins[3]};
+        node_outputs = {biased};
+        addLayer(addb, node_proto, 2);
+        sum = biased;
+    }
+
+    params.type = "RMSNormalization";
+    node_inputs = {sum, ins[2]};
+    node_outputs = {outs[0]};
+    addLayer(params, node_proto, 2);
 }
 
 void ONNXImporter2::parseCausalConvWithState(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
@@ -2856,6 +2926,9 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     dispatch["LayerNormalization"] = &ONNXImporter2::parseLayerNorm;
     dispatch["GroupNormalization"] = &ONNXImporter2::parseInstanceNormalization;
     dispatch["RMSNormalization"] = &ONNXImporter2::parseRMSNormalization;
+    // onnxruntime-genai emits this contrib op in the default domain.
+    dispatch["SimplifiedLayerNormalization"] = &ONNXImporter2::parseSimplifiedLayerNorm;
+    dispatch["SkipSimplifiedLayerNormalization"] = &ONNXImporter2::parseSkipSimplifiedLayerNorm;
     dispatch["RotaryEmbedding"] = &ONNXImporter2::parseRotaryEmbedding;
     dispatch["NegativeLogLikelihoodLoss"] = &ONNXImporter2::parseNegativeLogLikelihoodLoss;
     dispatch["SoftmaxCrossEntropyLoss"]   = &ONNXImporter2::parseSoftmaxCrossEntropyLoss;
@@ -2919,6 +2992,8 @@ void ONNXImporter2::buildDispatchMap_COM_MICROSOFT()
     dispatch["Attention"] = &ONNXImporter2::parseAttention;
     dispatch["MultiHeadAttention"] = &ONNXImporter2::parseMultiHeadAttention;
     dispatch["GroupQueryAttention"] = &ONNXImporter2::parseGroupQueryAttention;
+    dispatch["SimplifiedLayerNormalization"] = &ONNXImporter2::parseSimplifiedLayerNorm;
+    dispatch["SkipSimplifiedLayerNormalization"] = &ONNXImporter2::parseSkipSimplifiedLayerNorm;
 
     domain_dispatch_map[str_domain_com_microsoft] = dispatch;
 }
