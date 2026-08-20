@@ -1,4 +1,4 @@
-name: arm-probe
+name: OCV PR Windows
 
 on:
   workflow_dispatch:
@@ -6,79 +6,126 @@ on:
     branches:
       - issue/ppl
 
+concurrency:
+  group: OCV-PR-Windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  arm64:
-    runs-on: windows-11-arm
-    timeout-minutes: 180
+
+  Windows:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        arch: [ arm64 ]
+        config: [ base ]
+        include:
+          - arch: arm64
+            config: base
+            runner: windows-11-arm
+            vs: 'Visual Studio 17 2022'
+            cmake_arch: ARM64
+            no_opencl: true
     defaults:
       run:
         shell: bash
     env:
+      CMAKE_OPT: >-
+        -DCL_Z_OPTION=/Z7
+        -DBUILD_EXAMPLES=ON
+        -DOPENCV_ENABLE_NONFREE=ON
+        -DCMAKE_BUILD_TYPE=Release
+        ${{ matrix.no_opencl && '-DWITH_OPENCL=OFF' || '' }}
+        -DCMAKE_ASM_COMPILER=CMAKE_ASM_COMPILER-NOTFOUND
+      MAIN_BUILD_DIR: 'build'
       OPENCV_FOR_THREADS_NUM: 8
-      OPENCV_TEST_REQUIRE_DATA: 1
-      OPENCV_TEST_DATA_PATH: '${{ github.workspace }}/opencv_extra/testdata'
+      CMAKE_BUILD_PARALLEL_LEVEL: 8
+
+    # ==========
 
     steps:
-      - name: runner hardware
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_Processor |
-            Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, L2CacheSize, L3CacheSize |
-            Format-List
-          Get-CimInstance Win32_ComputerSystem |
-            Select-Object Manufacturer, Model, NumberOfProcessors, NumberOfLogicalProcessors, TotalPhysicalMemory |
-            Format-List
-          Get-CimInstance Win32_OperatingSystem |
-            Select-Object Caption, Version, BuildNumber, OSArchitecture |
-            Format-List
-          "PROCESSOR_IDENTIFIER = $env:PROCESSOR_IDENTIFIER"
-          "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
-          "NUMBER_OF_PROCESSORS = $env:NUMBER_OF_PROCESSORS"
 
-      - name: toolchain
-        run: |
-          cmake --version
-          which cc || echo "no cc on PATH"
-          which gcc || echo "no gcc on PATH"
+    - name: Runner hardware
+      shell: pwsh
+      run: |
+        Get-CimInstance Win32_Processor |
+          Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, L2CacheSize, L3CacheSize |
+          Format-List
+        Get-CimInstance Win32_ComputerSystem |
+          Select-Object Manufacturer, Model, NumberOfProcessors, NumberOfLogicalProcessors, TotalPhysicalMemory |
+          Format-List
+        Get-CimInstance Win32_OperatingSystem |
+          Select-Object Caption, Version, BuildNumber, OSArchitecture |
+          Format-List
+        "PROCESSOR_IDENTIFIER = $env:PROCESSOR_IDENTIFIER"
+        "NUMBER_OF_PROCESSORS = $env:NUMBER_OF_PROCESSORS"
 
-      - uses: actions/checkout@v4
+    - name: Toolchain on PATH
+      run: |
+        cmake --version
+        which cc || echo "no cc on PATH"
+        which gcc || echo "no gcc on PATH"
 
-      - name: checkout opencv_extra
-        uses: actions/checkout@v4
-        with:
-          repository: opencv/opencv_extra
-          ref: 5.x
-          path: opencv_extra
-          fetch-depth: 1
+    - name: Checkout workflow repository
+      uses: actions/checkout@v4
+      with:
+        repository: opencv/ci-gha-workflow
+        ref: 'as/windows_arm'
 
-      - name: configure
-        run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ARM64 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_LIST=core,imgproc,video,ts \
-            -DWITH_OPENMP=OFF \
-            -DWITH_TBB=OFF \
-            -DWITH_OPENCL=OFF \
-            -DBUILD_PERF_TESTS=OFF \
-            -DBUILD_EXAMPLES=OFF \
-            -DBUILD_opencv_python3=OFF \
-            -DCMAKE_ASM_COMPILER=CMAKE_ASM_COMPILER-NOTFOUND
+    - name: Checkout and merge OpenCV
+      uses: ./checkout-and-merge
+      with:
+        target_branch: '5.x'
+        author: 'SavyaSanchi-Sharma'
+        source_branch: 'issue/ppl'
+        gitcache: ''
+        workdir: '${{ github.workspace }}'
 
-      - name: confirm backend
-        run: grep -i "Parallel framework" build/modules/core/version_string.inc
+    - name: Configure and build OpenCV
+      uses: ./configure-and-build
+      with:
+        workdir: '${{ github.workspace }}'
+        builddir: 'build'
+        generator: '${{ matrix.vs }}'
+        options: '-A ${{ matrix.cmake_arch }} ${{ env.CMAKE_OPT }}'
 
-      - name: build
-        run: cmake --build build --config Release --parallel
+    - name: Verify MSVC build
+      run: |
+        f=$(find . -name version_string.inc | head -1)
+        echo "build info: $f"
+        grep -E "CMake generator|C\+\+ Compiler|MSVC|Parallel framework" "$f" || true
 
-      - name: test
-        run: |
-          mkdir -p results
-          ./build/bin/Release/opencv_test_core.exe --test_seed=42 --gtest_output=xml:results/core.xml || true
-          ./build/bin/Release/opencv_test_imgproc.exe --test_seed=42 --gtest_output=xml:results/imgproc.xml || true
-          ./build/bin/Release/opencv_test_video.exe --test_seed=42 --gtest_output=xml:results/video.xml || true
+    - name: Configure and build OpenCV with contrib
+      uses: ./configure-and-build
+      with:
+        workdir: '${{ github.workspace }}'
+        builddir: 'build-contrib'
+        generator: '${{ matrix.vs }}'
+        options: '-A ${{ matrix.cmake_arch }} -DCMAKE_BUILD_TYPE=Release -DOPENCV_EXTRA_MODULES_PATH=opencv_contrib/modules ${{ env.CMAKE_OPT }}'
 
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: results
-          path: results
+    - name: Run OpenCV tests
+      uses: ./run-tests
+      env:
+        OPENCV_TEST_DATA_PATH: '${{ github.workspace }}/opencv_extra/testdata'
+        OPENCV_TEST_REQUIRE_DATA: 1
+        OPENCV_TEST_CHECK_OPTIONAL_DATA: 0
+        PYTHONPATH: '${{ github.workspace }}/${{ env.MAIN_BUILD_DIR }}/python_loader:$PYTHONPATH'
+        OPENCV_OPENCL_RUNTIME: 'disabled'
+      with:
+        workdir: '${{ github.workspace }}'
+        builddir: '${{ env.MAIN_BUILD_DIR }}'
+        logdir: '${{ github.workspace }}'
+        plan: "test-plan-win-5.x.json"
+        suite: "[ 'main' ]"
+        enable_python: "false"
+        enable_java: "false"
+        filter: "[ 'windows-common' ]"
+        suffix: 'arm64_5.x'
+        timeout: 15
+
+    - if: ${{ always() && env.WARNINGS == '1' }}
+      name: Warnings check
+      run: |
+        echo "::error Warnings have been found!"
+        exit 1
