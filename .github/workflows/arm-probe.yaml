@@ -73,14 +73,27 @@ jobs:
         repository: opencv/ci-gha-workflow
         ref: 'as/windows_arm'
 
-    - name: Checkout and merge OpenCV
-      uses: ./checkout-and-merge
+    - name: Checkout OpenCV
+      uses: actions/checkout@v4
       with:
-        target_branch: '5.x'
-        author: 'SavyaSanchi-Sharma'
-        source_branch: 'issue/ppl'
-        gitcache: ''
-        workdir: '${{ github.workspace }}'
+        repository: SavyaSanchi-Sharma/opencv
+        ref: issue/ppl
+        path: opencv
+        fetch-depth: 0
+
+    - name: Checkout opencv_extra
+      uses: actions/checkout@v4
+      with:
+        repository: opencv/opencv_extra
+        ref: 5.x
+        path: opencv_extra
+        fetch-depth: 1
+
+    - name: Confirm what is being built
+      working-directory: opencv
+      run: |
+        git log -1 --format='%H %s'
+        git describe --tags
 
     - name: Configure and build OpenCV
       uses: ./configure-and-build
@@ -95,14 +108,6 @@ jobs:
         f=$(find . -name version_string.inc | head -1)
         echo "build info: $f"
         grep -E "CMake generator|C\+\+ Compiler|MSVC|Parallel framework" "$f" || true
-
-    - name: Configure and build OpenCV with contrib
-      uses: ./configure-and-build
-      with:
-        workdir: '${{ github.workspace }}'
-        builddir: 'build-contrib'
-        generator: '${{ matrix.vs }}'
-        options: '-A ${{ matrix.cmake_arch }} -DCMAKE_BUILD_TYPE=Release -DOPENCV_EXTRA_MODULES_PATH=opencv_contrib/modules ${{ env.CMAKE_OPT }}'
 
     - name: Run OpenCV tests
       uses: ./run-tests
