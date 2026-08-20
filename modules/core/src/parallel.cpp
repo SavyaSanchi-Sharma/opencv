@@ -491,6 +491,7 @@ public:
     ~SchedPtr() {}
 };
 static SchedPtr pplScheduler;
+static Mutex& pplMutex() { static Mutex* m = new Mutex(); return *m; }
 
 #endif
 
@@ -597,15 +598,26 @@ static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody
 
 #elif defined HAVE_CONCURRENCY
 
-        if(!pplScheduler || pplScheduler->Id() == Concurrency::CurrentScheduler::Id())
+        Concurrency::Scheduler* sched = 0;
+        {
+            AutoLock lock(pplMutex());
+            if (pplScheduler && pplScheduler->Id() != Concurrency::CurrentScheduler::Id())
+            {
+                sched = pplScheduler;
+                sched->Reference();
+            }
+        }
+
+        if (!sched)
         {
             Concurrency::parallel_for(stripeRange.start, stripeRange.end, pbody);
         }
         else
         {
-            pplScheduler->Attach();
+            sched->Attach();
             Concurrency::parallel_for(stripeRange.start, stripeRange.end, pbody);
             Concurrency::CurrentScheduler::Detach();
+            sched->Release();
         }
 
 #elif defined HAVE_PTHREADS_PF
@@ -672,9 +684,12 @@ int getNumThreads(void)
 
 #elif defined HAVE_CONCURRENCY
 
-    return (pplScheduler == 0)
-        ? Concurrency::CurrentScheduler::Get()->GetNumberOfVirtualProcessors()
-        : (1 + pplScheduler->GetNumberOfVirtualProcessors());
+    {
+        AutoLock lock(pplMutex());
+        if (pplScheduler != 0)
+            return 1 + pplScheduler->GetNumberOfVirtualProcessors();
+    }
+    return Concurrency::CurrentScheduler::Get()->GetNumberOfVirtualProcessors();
 
 #elif defined HAVE_PTHREADS_PF
 
@@ -750,6 +765,7 @@ void setNumThreads( int threads_ )
 
 #elif defined HAVE_CONCURRENCY
 
+    AutoLock lock(pplMutex());
     if (threads <= 0)
     {
         pplScheduler = 0;
