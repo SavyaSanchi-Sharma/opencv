@@ -491,6 +491,7 @@ public:
     ~SchedPtr() {}
 };
 static SchedPtr pplScheduler;
+static unsigned pplThreads = 0;
 static Mutex& pplMutex() { static Mutex* m = new Mutex(); return *m; }
 
 #endif
@@ -775,11 +776,12 @@ void setNumThreads( int threads_ )
         // Concurrency always uses >=2 threads, so we just disable it if 1 thread is requested
         numThreads = 0;
     }
-    else if (pplScheduler == 0 || 1 + pplScheduler->GetNumberOfVirtualProcessors() != (unsigned int)threads)
+    else if (pplScheduler == 0 || pplThreads != (unsigned)threads)
     {
         pplScheduler = Concurrency::Scheduler::Create(Concurrency::SchedulerPolicy(2,
                        Concurrency::MinConcurrency, threads-1,
                        Concurrency::MaxConcurrency, threads-1));
+        pplThreads = threads;
     }
 
 #elif defined HAVE_PTHREADS_PF
