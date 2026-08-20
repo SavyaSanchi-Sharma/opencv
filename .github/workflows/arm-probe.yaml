@@ -38,6 +38,8 @@ jobs:
         -DCMAKE_BUILD_TYPE=Release
         ${{ matrix.no_opencl && '-DWITH_OPENCL=OFF' || '' }}
         -DCMAKE_ASM_COMPILER=CMAKE_ASM_COMPILER-NOTFOUND
+        -DBUILD_opencv_python3=OFF
+        -DBUILD_opencv_python_bindings_generator=OFF
       MAIN_BUILD_DIR: 'build'
       OPENCV_FOR_THREADS_NUM: 8
       CMAKE_BUILD_PARALLEL_LEVEL: 8
@@ -93,7 +95,8 @@ jobs:
       working-directory: opencv
       run: |
         git log -1 --format='%H %s'
-        git describe --tags
+        git describe --tags || echo "no tags in fork"
+        git status --short --branch
 
     - name: Configure and build OpenCV
       uses: ./configure-and-build
