@@ -1,0 +1,84 @@
+name: arm-probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - issue/ppl
+
+jobs:
+  arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      OPENCV_FOR_THREADS_NUM: 8
+      OPENCV_TEST_REQUIRE_DATA: 1
+      OPENCV_TEST_DATA_PATH: '${{ github.workspace }}/opencv_extra/testdata'
+
+    steps:
+      - name: runner hardware
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, L2CacheSize, L3CacheSize |
+            Format-List
+          Get-CimInstance Win32_ComputerSystem |
+            Select-Object Manufacturer, Model, NumberOfProcessors, NumberOfLogicalProcessors, TotalPhysicalMemory |
+            Format-List
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, BuildNumber, OSArchitecture |
+            Format-List
+          "PROCESSOR_IDENTIFIER = $env:PROCESSOR_IDENTIFIER"
+          "PROCESSOR_ARCHITECTURE = $env:PROCESSOR_ARCHITECTURE"
+          "NUMBER_OF_PROCESSORS = $env:NUMBER_OF_PROCESSORS"
+
+      - name: toolchain
+        run: |
+          cmake --version
+          which cc || echo "no cc on PATH"
+          which gcc || echo "no gcc on PATH"
+
+      - uses: actions/checkout@v4
+
+      - name: checkout opencv_extra
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv_extra
+          ref: 5.x
+          path: opencv_extra
+          fetch-depth: 1
+
+      - name: configure
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ARM64 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_LIST=core,imgproc,video,ts \
+            -DWITH_OPENMP=OFF \
+            -DWITH_TBB=OFF \
+            -DWITH_OPENCL=OFF \
+            -DBUILD_PERF_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_python3=OFF \
+            -DCMAKE_ASM_COMPILER=CMAKE_ASM_COMPILER-NOTFOUND
+
+      - name: confirm backend
+        run: grep -i "Parallel framework" build/modules/core/version_string.inc
+
+      - name: build
+        run: cmake --build build --config Release --parallel
+
+      - name: test
+        run: |
+          mkdir -p results
+          ./build/bin/Release/opencv_test_core.exe --test_seed=42 --gtest_output=xml:results/core.xml || true
+          ./build/bin/Release/opencv_test_imgproc.exe --test_seed=42 --gtest_output=xml:results/imgproc.xml || true
+          ./build/bin/Release/opencv_test_video.exe --test_seed=42 --gtest_output=xml:results/video.xml || true
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: results
