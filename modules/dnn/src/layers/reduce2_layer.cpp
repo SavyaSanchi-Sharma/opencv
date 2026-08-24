@@ -104,7 +104,7 @@ public:
         CV_Assert(!inps.empty());
         outs.resize(1);
         const MatShape& inp0 = inps[0];
-        if (inp0.dims < 0) {
+        if (inp0.empty()) {
             outs[0] = MatShape();
             return false;
         }
@@ -429,16 +429,6 @@ public:
                     std::memcpy(p_dst, p_src, sizeof(dtype) * dst.total());
                     return;
                 }
-                ReduceAllInvoker<Op> p(src, dst);
-                double nstripes = (size_t)p.total * (size_t)p.cost_per_thread * (1 / 1024.0);
-                parallel_for_(Range(0, p.total), p, nstripes);
-                return;
-            }
-
-            auto shape_src = shape(src);
-            std::vector<bool> is_reduced(shape_src.size(), false);
-            for (int a : axes) is_reduced[a] = true;
-            if (std::all_of(is_reduced.begin(), is_reduced.end(), [](bool b) { return b; })) {
                 ReduceAllInvoker<Op> p(src, dst);
                 double nstripes = (size_t)p.total * (size_t)p.cost_per_thread * (1 / 1024.0);
                 parallel_for_(Range(0, p.total), p, nstripes);

@@ -1168,13 +1168,8 @@ UMat UMat::reshape(int _cn, const MatShape& _newshape) const
 
 Mat UMat::getMat(AccessFlag accessFlags) const
 {
-    if(!u) {
-        Mat hdr(dims, size.p, type(), nullptr, step.p);
-        hdr.size.layout = size.layout;
-        hdr.size.C = size.C;
-        hdr.flags = flags;
-        return hdr;
-    }
+    if(!u)
+        return Mat(dims, size.p, type(), nullptr, step.p);
     // TODO Support ACCESS_READ (ACCESS_WRITE) without unnecessary data transfers
     accessFlags |= ACCESS_RW;
     UMatDataAutoLock autolock(u);

@@ -42,7 +42,7 @@ struct ConstFolding
             UMat& t = netimpl->__tensors__[inp.idx];
             // a live Mat view (UMat::getMat() bumps refcount, not urefcount) must outlive the UMat
             if (!t.u || t.u->refcount == 0)
-                t = UMat(); // deallocate unused tensor
+                t.release(); // deallocate unused tensor
         }
     }
 
