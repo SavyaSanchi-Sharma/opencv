@@ -93,6 +93,7 @@
 #include "opencv2/core/neon_utils.hpp"
 #include "opencv2/core/vsx_utils.hpp"
 #include "hal_replacement.hpp"
+#include "non_cpu_hal_replacement.hpp"
 
 #define GET_OPTIMIZED(func) (func)
 
