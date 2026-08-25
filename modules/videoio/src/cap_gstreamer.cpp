@@ -2529,6 +2529,13 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
     enc_preset = params.get<int>(VIDEOWRITER_PROP_PRESET, -1);
     enc_gop_size = params.get<int>(VIDEOWRITER_PROP_GOP_SIZE, 0);
 
+    if (enc_preset > VIDEOWRITER_PRESET_PLACEBO)
+    {
+        CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: invalid VIDEOWRITER_PROP_PRESET value "
+                           << enc_preset << ". Bailout");
+        return false;
+    }
+
     if (params.warnUnusedParameters())
     {
         CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: unsupported parameters in VideoWriter, see logger INFO channel for details");

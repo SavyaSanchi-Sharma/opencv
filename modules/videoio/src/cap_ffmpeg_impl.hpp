@@ -2552,9 +2552,10 @@ void CvVideoWriter_FFMPEG::init()
 
 static AVPixelFormat icv_fourcc_to_pix_fmt_FFMPEG(int fourcc)
 {
-    for (int i = 0; i < AV_PIX_FMT_NB; i++)
+    const AVPixFmtDescriptor* desc = NULL;
+    while ((desc = av_pix_fmt_desc_next(desc)) != NULL)
     {
-        const AVPixelFormat fmt = (AVPixelFormat)i;
+        const AVPixelFormat fmt = av_pix_fmt_desc_get_id(desc);
         if (avcodec_pix_fmt_to_codec_tag(fmt) == (unsigned int)fourcc)
             return fmt;
     }
