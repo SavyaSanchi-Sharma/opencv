@@ -1188,4 +1188,184 @@ TEST(videoio_ffmpeg, seek_with_negative_dts)
     }
 }
 
+static void generateEncoderFrames(std::vector<Mat>& frames, Size size, int count)
+{
+    frames.clear();
+    RNG rng(12345);
+    for (int i = 0; i < count; i++)
+    {
+        Mat frame(size, CV_8UC3);
+        rng.fill(frame, RNG::UNIFORM, 0, 255);
+        circle(frame, Point((i * 13) % size.width, (i * 7) % size.height), 40, Scalar::all(255), -1);
+        frames.push_back(frame);
+    }
+}
+
+static long writeWithEncoderParams(const std::string& file, const std::vector<int>& params,
+                                   const std::vector<Mat>& frames, double* readBack = NULL, int prop = -1)
+{
+    VideoWriter writer;
+    if (!writer.open(file, CAP_FFMPEG, VideoWriter::fourcc('a', 'v', 'c', '1'), 25, frames[0].size(), params))
+        return -1;
+    if (readBack && prop >= 0)
+        *readBack = writer.get(prop);
+    for (size_t i = 0; i < frames.size(); i++)
+        writer.write(frames[i]);
+    writer.release();
+
+    std::ifstream fs(file.c_str(), std::ios::in | std::ios::binary | std::ios::ate);
+    if (!fs)
+        return -1;
+    return (long)fs.tellg();
+}
+
+TEST(videoio_ffmpeg_encoder_props, crf_changes_size)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    std::vector<Mat> frames;
+    generateEncoderFrames(frames, Size(320, 240), 30);
+
+    const string lowFile = cv::tempfile(".mp4");
+    const string highFile = cv::tempfile(".mp4");
+
+    double readBack = -1;
+    const long lowSize = writeWithEncoderParams(lowFile, {VIDEOWRITER_PROP_CRF, 18}, frames,
+                                                &readBack, VIDEOWRITER_PROP_CRF);
+    const long highSize = writeWithEncoderParams(highFile, {VIDEOWRITER_PROP_CRF, 40}, frames);
+
+    if (lowSize < 0 || highSize < 0)
+        throw SkipTestException("No encoder with CRF support available");
+
+    EXPECT_EQ(18, (int)readBack);
+    EXPECT_GT(lowSize, highSize);
+
+    remove(lowFile.c_str());
+    remove(highFile.c_str());
+}
+
+TEST(videoio_ffmpeg_encoder_props, bitrate_is_not_inflated)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    std::vector<Mat> frames;
+    generateEncoderFrames(frames, Size(320, 240), 30);
+
+    const string lowFile = cv::tempfile(".mp4");
+    const string highFile = cv::tempfile(".mp4");
+
+    double readBack = -1;
+    const long lowSize = writeWithEncoderParams(lowFile, {VIDEOWRITER_PROP_BITRATE, 200000}, frames,
+                                                &readBack, VIDEOWRITER_PROP_BITRATE);
+    const long highSize = writeWithEncoderParams(highFile, {VIDEOWRITER_PROP_BITRATE, 4000000}, frames);
+
+    if (lowSize < 0 || highSize < 0)
+        throw SkipTestException("No encoder available");
+
+    EXPECT_EQ(200000, (int)readBack);
+    EXPECT_GT(highSize, lowSize);
+
+    remove(lowFile.c_str());
+    remove(highFile.c_str());
+}
+
+TEST(videoio_ffmpeg_encoder_props, gop_and_preset_round_trip)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    std::vector<Mat> frames;
+    generateEncoderFrames(frames, Size(320, 240), 20);
+
+    const string gopFile = cv::tempfile(".mp4");
+    double gopReadBack = -1;
+    const long gopSize = writeWithEncoderParams(gopFile, {VIDEOWRITER_PROP_GOP_SIZE, 5}, frames,
+                                                &gopReadBack, VIDEOWRITER_PROP_GOP_SIZE);
+    if (gopSize < 0)
+        throw SkipTestException("No encoder available");
+    EXPECT_EQ(5, (int)gopReadBack);
+    remove(gopFile.c_str());
+
+    const string presetFile = cv::tempfile(".mp4");
+    double presetReadBack = -1;
+    const long presetSize = writeWithEncoderParams(presetFile,
+        {VIDEOWRITER_PROP_PRESET, VIDEOWRITER_PRESET_ULTRAFAST}, frames,
+        &presetReadBack, VIDEOWRITER_PROP_PRESET);
+    if (presetSize < 0)
+        throw SkipTestException("No encoder with preset support available");
+    EXPECT_EQ(VIDEOWRITER_PRESET_ULTRAFAST, (int)presetReadBack);
+    remove(presetFile.c_str());
+}
+
+TEST(videoio_ffmpeg_encoder_props, pixel_format_round_trips_with_capture_property)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    std::vector<Mat> frames;
+    generateEncoderFrames(frames, Size(320, 240), 10);
+
+    const string file = cv::tempfile(".mp4");
+    const int requested = VideoWriter::fourcc('N', 'V', '1', '2');
+    double readBack = -1;
+    const long size = writeWithEncoderParams(file, {VIDEOWRITER_PROP_PIXEL_FORMAT, requested}, frames,
+                                             &readBack, VIDEOWRITER_PROP_PIXEL_FORMAT);
+    if (size < 0)
+        throw SkipTestException("Encoder does not support the requested pixel format");
+
+    EXPECT_EQ(fourccToString(requested), fourccToString((int)readBack));
+    remove(file.c_str());
+}
+
+TEST(videoio_ffmpeg_encoder_props, unsupported_property_fails_open)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    const Size size(320, 240);
+
+    VideoWriter crfOnMpeg4;
+    EXPECT_FALSE(crfOnMpeg4.open(cv::tempfile(".avi"), CAP_FFMPEG,
+                                 VideoWriter::fourcc('M', 'P', '4', 'V'), 25, size,
+                                 {VIDEOWRITER_PROP_CRF, 20}));
+
+    VideoWriter badPreset;
+    EXPECT_FALSE(badPreset.open(cv::tempfile(".mp4"), CAP_FFMPEG,
+                                VideoWriter::fourcc('a', 'v', 'c', '1'), 25, size,
+                                {VIDEOWRITER_PROP_PRESET, 99}));
+
+    VideoWriter badPixelFormat;
+    EXPECT_FALSE(badPixelFormat.open(cv::tempfile(".mp4"), CAP_FFMPEG,
+                                     VideoWriter::fourcc('a', 'v', 'c', '1'), 25, size,
+                                     {VIDEOWRITER_PROP_PIXEL_FORMAT,
+                                      VideoWriter::fourcc('Z', 'Z', 'Z', 'Z')}));
+}
+
+TEST(videoio_ffmpeg_encoder_props, no_regression_without_properties)
+{
+    if (!videoio_registry::hasBackend(CAP_FFMPEG))
+        throw SkipTestException("FFmpeg backend was not found");
+
+    std::vector<Mat> frames;
+    generateEncoderFrames(frames, Size(320, 240), 20);
+
+    const string file = cv::tempfile(".mp4");
+    const long size = writeWithEncoderParams(file, std::vector<int>(), frames);
+    ASSERT_GT(size, 0);
+
+    VideoCapture cap;
+    ASSERT_TRUE(cap.open(file, CAP_FFMPEG));
+    EXPECT_EQ(frames[0].size().width, (int)cap.get(CAP_PROP_FRAME_WIDTH));
+    EXPECT_EQ(frames[0].size().height, (int)cap.get(CAP_PROP_FRAME_HEIGHT));
+
+    Mat decoded;
+    ASSERT_TRUE(cap.read(decoded));
+    EXPECT_FALSE(decoded.empty());
+    cap.release();
+
+    remove(file.c_str());
+}
+
 }} // namespace

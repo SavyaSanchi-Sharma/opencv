@@ -62,6 +62,7 @@
 #include <gst/gst.h>
 #include <gst/gstbuffer.h>
 #include <gst/video/video.h>
+#include <gst/video/gstvideoencoder.h>
 #include <gst/audio/audio.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
@@ -314,6 +315,121 @@ static void find_hw_element(const GValue *item, gpointer va_type)
             *(int*)va_type = VIDEO_ACCELERATION_MFX;
         } else if (name_lower.find("d3d11") != std::string::npos) {
             *(int*)va_type = VIDEO_ACCELERATION_D3D11;
+        }
+    }
+}
+
+struct GstEncoderRequest
+{
+    int bitrate;
+    int crf;
+    int preset;
+    int gop_size;
+    bool error;
+};
+
+inline static
+std::string get_gst_encoder_propname(int propId, const std::string& encoder)
+{
+    const bool is_x264 = encoder.find("x264enc") != std::string::npos;
+    const bool is_x265 = encoder.find("x265enc") != std::string::npos;
+    const bool is_vpx = encoder.find("vp8enc") != std::string::npos
+                     || encoder.find("vp9enc") != std::string::npos;
+
+    switch (propId)
+    {
+    case VIDEOWRITER_PROP_BITRATE:
+        if (is_vpx) return "target-bitrate";
+        return "bitrate";
+    case VIDEOWRITER_PROP_CRF:
+        if (is_x265) return "qp";
+        if (is_vpx) return "cq-level";
+        return "quantizer";
+    case VIDEOWRITER_PROP_PRESET:
+        if (is_x264 || is_x265) return "speed-preset";
+        return std::string();
+    case VIDEOWRITER_PROP_GOP_SIZE:
+        if (is_x264 || is_x265) return "key-int-max";
+        if (is_vpx) return "keyframe-max-dist";
+        return "gop-size";
+    default:
+        return std::string();
+    }
+}
+
+inline static
+int get_gst_encoder_bitrate_divisor(const std::string& encoder)
+{
+    if (encoder.find("x264enc") != std::string::npos
+        || encoder.find("x265enc") != std::string::npos)
+        return 1000;
+    return 1;
+}
+
+inline static
+bool set_gst_property_if_supported(GstElement* element, const std::string& name, int value)
+{
+    if (name.empty())
+        return false;
+    if (!g_object_class_find_property(G_OBJECT_GET_CLASS(element), name.c_str()))
+        return false;
+    g_object_set(G_OBJECT(element), name.c_str(), value, NULL);
+    return true;
+}
+
+static void apply_encoder_properties(const GValue* item, gpointer request)
+{
+    GstEncoderRequest* req = (GstEncoderRequest*)request;
+    GstElement* element = GST_ELEMENT(g_value_get_object(item));
+    if (!GST_IS_VIDEO_ENCODER(element))
+        return;
+
+    const gchar* type_name = g_type_name(G_OBJECT_TYPE(element));
+    if (!type_name)
+        return;
+    const std::string encoder = toLowerCase(type_name);
+
+    if (req->bitrate > 0)
+    {
+        const int value = req->bitrate / get_gst_encoder_bitrate_divisor(encoder);
+        if (!set_gst_property_if_supported(element, get_gst_encoder_propname(VIDEOWRITER_PROP_BITRATE, encoder), value))
+        {
+            CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: encoder '" << encoder
+                               << "' does not support VIDEOWRITER_PROP_BITRATE. Bailout");
+            req->error = true;
+        }
+    }
+
+    if (req->gop_size > 0)
+    {
+        if (!set_gst_property_if_supported(element, get_gst_encoder_propname(VIDEOWRITER_PROP_GOP_SIZE, encoder), req->gop_size))
+        {
+            CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: encoder '" << encoder
+                               << "' does not support VIDEOWRITER_PROP_GOP_SIZE. Bailout");
+            req->error = true;
+        }
+    }
+
+    if (req->crf >= 0)
+    {
+        if (encoder.find("x264enc") != std::string::npos)
+            set_gst_property_if_supported(element, "pass", 5);
+
+        if (!set_gst_property_if_supported(element, get_gst_encoder_propname(VIDEOWRITER_PROP_CRF, encoder), req->crf))
+        {
+            CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: encoder '" << encoder
+                               << "' does not support VIDEOWRITER_PROP_CRF. Bailout");
+            req->error = true;
+        }
+    }
+
+    if (req->preset >= 0)
+    {
+        if (!set_gst_property_if_supported(element, get_gst_encoder_propname(VIDEOWRITER_PROP_PRESET, encoder), req->preset + 1))
+        {
+            CV_LOG_ERROR(NULL, "VIDEOIO/GStreamer: encoder '" << encoder
+                               << "' does not support VIDEOWRITER_PROP_PRESET. Bailout");
+            req->error = true;
         }
     }
 }
@@ -2188,6 +2304,8 @@ public:
         : ipl_depth(CV_8U)
         , input_pix_fmt(0), num_frames(0), framerate(0)
         , va_type(VIDEO_ACCELERATION_NONE), hw_device(0)
+        , enc_bitrate(0), enc_crf(-1), enc_preset(-1), enc_gop_size(0)
+        , enc_prop_error(false)
     {
     }
     virtual ~CvVideoWriter_GStreamer() CV_OVERRIDE
@@ -2229,6 +2347,12 @@ protected:
 
     VideoAccelerationType va_type;
     int hw_device;
+
+    int enc_bitrate;
+    int enc_crf;
+    int enc_preset;
+    int enc_gop_size;
+    bool enc_prop_error;
 
     void close_();
 };
@@ -2399,6 +2523,11 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
             return false;
         }
     }
+
+    enc_bitrate = params.get<int>(VIDEOWRITER_PROP_BITRATE, 0);
+    enc_crf = params.get<int>(VIDEOWRITER_PROP_CRF, -1);
+    enc_preset = params.get<int>(VIDEOWRITER_PROP_PRESET, -1);
+    enc_gop_size = params.get<int>(VIDEOWRITER_PROP_GOP_SIZE, 0);
 
     if (params.warnUnusedParameters())
     {
@@ -2640,6 +2769,38 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
 
     GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, "write-pipeline");
 
+    if (enc_bitrate > 0 || enc_crf >= 0 || enc_preset >= 0 || enc_gop_size > 0)
+    {
+        stateret = gst_element_set_state(GST_ELEMENT(pipeline.get()), GST_STATE_READY);
+        if (stateret == GST_STATE_CHANGE_FAILURE)
+        {
+            handleMessage(pipeline);
+            CV_WARN("GStreamer: cannot put pipeline to ready");
+            pipeline.release();
+            return false;
+        }
+
+        GstEncoderRequest request;
+        request.bitrate = enc_bitrate;
+        request.crf = enc_crf;
+        request.preset = enc_preset;
+        request.gop_size = enc_gop_size;
+        request.error = false;
+
+        GstIterator *iter = gst_bin_iterate_recurse(GST_BIN(pipeline.get()));
+        gst_iterator_foreach(iter, apply_encoder_properties, (gpointer)&request);
+        gst_iterator_free(iter);
+
+        enc_prop_error = request.error;
+        if (enc_prop_error)
+        {
+            gst_element_set_state(GST_ELEMENT(pipeline.get()), GST_STATE_NULL);
+            handleMessage(pipeline);
+            pipeline.release();
+            return false;
+        }
+    }
+
     stateret = gst_element_set_state(GST_ELEMENT(pipeline.get()), GST_STATE_PLAYING);
     if (stateret == GST_STATE_CHANGE_FAILURE)
     {
@@ -2767,6 +2928,26 @@ double CvVideoWriter_GStreamer::getProperty(int propId) const
     else if (propId == VIDEOWRITER_PROP_HW_DEVICE)
     {
         return static_cast<double>(hw_device);
+    }
+    else if (propId == VIDEOWRITER_PROP_BITRATE)
+    {
+        if (enc_bitrate > 0)
+            return static_cast<double>(enc_bitrate);
+    }
+    else if (propId == VIDEOWRITER_PROP_CRF)
+    {
+        if (enc_crf >= 0)
+            return static_cast<double>(enc_crf);
+    }
+    else if (propId == VIDEOWRITER_PROP_PRESET)
+    {
+        if (enc_preset >= 0)
+            return static_cast<double>(enc_preset);
+    }
+    else if (propId == VIDEOWRITER_PROP_GOP_SIZE)
+    {
+        if (enc_gop_size > 0)
+            return static_cast<double>(enc_gop_size);
     }
     return VIDEOWRITER_PROP_UNKNOWN;
 }
