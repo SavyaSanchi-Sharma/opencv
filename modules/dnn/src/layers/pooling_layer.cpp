@@ -1264,10 +1264,7 @@ public:
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size());
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-            CV_CheckType(inputs[0], inputs[0] == CV_16F, "");
-        else
-            CV_CheckType(inputs[0], inputs[0] == CV_32F, "");
+        CV_CheckType(inputs[0], inputs[0] == CV_16F || inputs[0] == CV_32F, "");
 
         outputs.push_back(inputs[0]);
         if (type == MAX && requiredOutputs == 2) {

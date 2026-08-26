@@ -212,7 +212,7 @@ void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays 
     CV_TRACE_FUNCTION();
     CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-    if (preferableTarget == DNN_TARGET_OPENCL_FP16 && inputs_arr.depth() == CV_16F)
+    if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16) && inputs_arr.depth() == CV_16F)
     {
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
@@ -307,7 +307,7 @@ void LayerInfo::getTypes(const std::vector<MatType>&inputs,
 {
     CV_Assert(inputs.size());
     for (auto input : inputs)
-        CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_64S, "");
+        CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_64S, "");
 
     outputs.assign(requiredOutputs, inputs[0]);
     internals.assign(requiredInternals, inputs[0]);
