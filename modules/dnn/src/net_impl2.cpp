@@ -5,7 +5,6 @@
 #include "precomp.hpp"
 
 #include "net_impl.hpp"
-#include "opencv2/core/hal/intrin.hpp"
 
 #include <limits>
 
@@ -591,9 +590,10 @@ void Net::Impl::widenHalfConstants()
         if (adata.kind != DNN_ARG_CONST ||
             (adata.type != CV_16F && adata.type != CV_16BF))
             continue;
-        Mat& t = __tensors__[i];
+        UMat& t = __tensors__[i];
         if (!t.empty()) {
-            Mat widened;
+            UMat widened;
+            forceAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
             widened.fit(t.shape(), accuracy);
             t.convertTo(widened, accuracy);
             t = widened;
