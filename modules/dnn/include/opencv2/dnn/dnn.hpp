@@ -50,6 +50,7 @@
 #include "../dnn/version.hpp"
 
 #include <opencv2/dnn/dict.hpp>
+#include <opencv2/dnn/fusion.hpp>
 
 namespace cv {
 namespace dnn {
@@ -261,9 +262,6 @@ CV__DNN_INLINE_NS_BEGIN
     class CV_EXPORTS Net;
     class CV_EXPORTS Graph;
     class CV_EXPORTS ActivationLayer;
-    struct ValueSource;
-    struct FusionRecipe;
-    class FusionGraph;
 
     /** @brief Backend-independent description of a graph operation (node).
      *
