@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 
 #include <type_traits>
 #include <opencv2/dnn/shape_utils.hpp>
@@ -33,6 +34,14 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 #endif
 
  public:
+    FusionApply fusion;
+
+    virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
+    {
+        if (fusion.fn || fusion.expr)
+            return false;
+        return prepareFusionApply(expr, fusion);
+    }
     MatMulLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
 
@@ -53,6 +62,8 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+        if (fusion.fn || fusion.expr)
+            return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !trans_a && !trans_b) ||
@@ -258,6 +269,12 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
         if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
+            if (fusion.fn || fusion.expr) {
+                std::vector<Mat> outs;
+                outputs_arr.getMatVector(outs);
+                if (!outs.empty())
+                    applyFusion(fusion, outs[0]);
+            }
             return;
         }
 
@@ -348,6 +365,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
+        applyFusion(fusion, Y);
     }
 
     // CV_64F: one cv::gemm call per batch slice (batches don't collapse like Gemm's).

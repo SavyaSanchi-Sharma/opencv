@@ -5,6 +5,7 @@
 // Copyright (C) 2025, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 #include "../precomp.hpp"
+#include "../fusion_graph.hpp"
 #define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
 #include "cpu_kernels/activation_kernels.simd.hpp"
 #include "layers/cpu_kernels/activation_kernels.simd_declarations.hpp"
@@ -80,6 +81,22 @@ public:
         if (hasMax) maxValue = params.get<float>("max");
         if (hasMin && hasMax)
             CV_Assert(minValue <= maxValue);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource& side) const CV_OVERRIDE
+    {
+        float lo = -FLT_MAX, hi = FLT_MAX;
+        if (hasMin) lo = minValue;
+        if (hasMax) hi = maxValue;
+        if ((!hasMin || !hasMax) && inputs.size() > 1) {
+            if (!side.hasFoldedOperand) return false;
+            if (!hasMin) lo = side.scalar;
+            if (!hasMax) hi = side.scalar2;
+        }
+        r.node[0].op = FusionEltwiseOp::CLAMP;
+        r.node[0].a = -1; r.node[0].s0 = lo; r.node[0].s1 = hi;
+        r.n = 1;
+        return true;
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE

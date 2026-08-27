@@ -42,6 +42,7 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "../fusion_graph.hpp"
 #include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
@@ -413,6 +414,11 @@ public:
         return func.getActivationFunc(depth, activParams);
     }
 
+    bool describeMath(FusionRecipe& out, const ValueSource& side) const CV_OVERRIDE
+    {
+        return func.describeMath(out, side);
+    }
+
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(
         void *context_,
@@ -461,6 +467,8 @@ struct BaseFunctor
 
     ActivationFunc getActivationFunc(int /*depth*/, std::vector<float>& /*activParams*/) const
     { return nullptr; }
+
+    bool describeMath(FusionRecipe&, const ValueSource&) const { return false; }
 };
 
 struct ReLUFunctor : public BaseFunctor
@@ -475,6 +483,13 @@ struct ReLUFunctor : public BaseFunctor
         if (depth != CV_32F) return nullptr;
         activParams = {slope};
         return cv::dnn::getActivationFunc(ACTIV_RELU);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        if (slope != 0.f) return false;
+        reluRecipe(r);
+        return true;
     }
 
     bool supportBackend(int backendId, int)
@@ -654,6 +669,12 @@ struct ReLU6Functor : public BaseFunctor
         if (depth != CV_32F) return nullptr;
         activParams = {minValue, maxValue};
         return cv::dnn::getActivationFunc(ACTIV_CLIP);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        clampRecipe(r, minValue, maxValue);
+        return true;
     }
 
     bool supportBackend(int backendId, int)
@@ -915,6 +936,12 @@ struct GeluFunctor : public BaseFunctor {
         return cv::dnn::getActivationFunc(ACTIV_GELU);
     }
 
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        geluRecipe(r);
+        return true;
+    }
+
     bool supportBackend(int backendId, int)
     {
         return backendId == DNN_BACKEND_OPENCV ||
@@ -1107,6 +1134,12 @@ struct TanHFunctor : public BaseDefaultFunctor<TanHFunctor>
         if (depth != CV_32F) return nullptr;
         activParams.clear();
         return cv::dnn::getActivationFunc(ACTIV_TANH);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        unaryRecipe(r, FusionEltwiseOp::TANH);
+        return true;
     }
 
     bool supportBackend(int backendId, int)
@@ -1411,6 +1444,12 @@ struct SigmoidFunctor : public BaseDefaultFunctor<SigmoidFunctor>
         if (depth != CV_32F) return nullptr;
         activParams.clear();
         return cv::dnn::getActivationFunc(ACTIV_SIGMOID);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        sigmoidRecipe(r);
+        return true;
     }
 
     bool supportBackend(int backendId, int)
@@ -1943,6 +1982,12 @@ struct SqrtFunctor : public BaseDefaultFunctor<SqrtFunctor>
         return sqrt(x);
     }
 
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        unaryRecipe(r, FusionEltwiseOp::SQRT);
+        return true;
+    }
+
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(int target, csl::Stream stream)
     {
@@ -2330,6 +2375,12 @@ struct ErfFunctor : public BaseDefaultFunctor<ErfFunctor>
             return nullptr;
         activParams.clear();
         return cv::dnn::getActivationFunc(ACTIV_ERF);
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        unaryRecipe(r, FusionEltwiseOp::ERF);
+        return true;
     }
 
     bool supportBackend(int backendId, int)
@@ -3160,6 +3211,13 @@ struct ExpFunctor : public BaseDefaultFunctor<ExpFunctor>
         activParams = {normScale, normShift};
         return cv::dnn::getActivationFunc(ACTIV_EXP);
     }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        expRecipe(r, normScale, normShift);
+        return true;
+    }
+
     float base, scale, shift;
     float normScale, normShift;
 
@@ -3545,6 +3603,12 @@ struct ReciprocalFunctor : public BaseDefaultFunctor<ReciprocalFunctor>
     inline float calculate(float x) const
     {
         return 1.f/x;
+    }
+
+    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    {
+        unaryRecipe(r, FusionEltwiseOp::RECIP);
+        return true;
     }
 
 #ifdef HAVE_CUDA

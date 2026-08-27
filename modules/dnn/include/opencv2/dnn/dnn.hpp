@@ -261,6 +261,9 @@ CV__DNN_INLINE_NS_BEGIN
     class CV_EXPORTS Net;
     class CV_EXPORTS Graph;
     class CV_EXPORTS ActivationLayer;
+    struct ValueSource;
+    struct FusionRecipe;
+    class FusionGraph;
 
     /** @brief Backend-independent description of a graph operation (node).
      *
@@ -513,8 +516,10 @@ CV__DNN_INLINE_NS_BEGIN
          */
         virtual void prepackWeights();
 
-        CV_PROP int preferableTarget; //!< prefer target for layer forwarding
+        virtual bool describeMath(FusionRecipe& out, const ValueSource& side) const;
+        virtual bool tryFuseChain(const Ptr<FusionGraph>& expr);
 
+        CV_PROP int preferableTarget; //!< prefer target for layer forwarding
         //! Executor-side bookkeeping for per-layer (re)initialization.
         unsigned packedWeightEpoch = 0;        //!< LayerInfo::weightEpoch prepackWeights() last ran for
         bool finalizedOnce = false;

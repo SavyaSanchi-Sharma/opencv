@@ -126,7 +126,8 @@ Ptr<BackendNode> Layer::initCann(const std::vector<Ptr<BackendWrapper> > &inputs
 
 bool Layer::setActivation(const Ptr<ActivationLayer>&) { return false; }
 bool Layer::tryFuse(Ptr<Layer>&) { return false; }
-
+bool Layer::describeMath(FusionRecipe&, const ValueSource&) const { return false; }
+bool Layer::tryFuseChain(const Ptr<FusionGraph>&) { return false; }
 void Layer::forwardCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
 {
     CV_Error(Error::StsNotImplemented, "CUDA forward of " + type + " layers is not defined.");

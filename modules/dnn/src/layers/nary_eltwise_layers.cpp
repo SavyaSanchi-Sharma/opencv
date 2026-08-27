@@ -11,6 +11,7 @@
 #undef CV_CPU_DISPATCH_MODES_ALL
 
 #include "../net_impl.hpp"
+#include "../fusion_graph.hpp"
 #include "layers_common.hpp"
 #include "../op_cuda.hpp"
 #include "../op_cann.hpp"
@@ -187,6 +188,34 @@ class NaryEltwiseLayerImpl CV_FINAL : public NaryEltwiseLayer
     NaryEltwiseHelper helper;
 public:
     std::string operation;
+
+    bool describeMath(FusionRecipe& r, const ValueSource& side) const CV_OVERRIDE
+    {
+        if (!side.hasFoldedOperand) return false;
+        if (op == OPERATION::SUB && !side.flowIsFirst) return false;
+
+        FusionEltwiseOp o;
+        switch (op) {
+        case OPERATION::ADD:
+        case OPERATION::SUM:  o = FusionEltwiseOp::ADD; break;
+        case OPERATION::SUB:  o = FusionEltwiseOp::SUB; break;
+        case OPERATION::PROD: o = FusionEltwiseOp::MUL; break;
+        case OPERATION::MAX:  o = FusionEltwiseOp::MAX; break;
+        case OPERATION::MIN:  o = FusionEltwiseOp::MIN; break;
+        default: return false;
+        }
+
+        if (side.bufferId >= 0) {
+            r.node[0].op = FusionEltwiseOp::PER_CHANNEL_CONST;
+            r.node[0].buf = side.bufferId;
+        } else {
+            r.node[0].op = FusionEltwiseOp::CONST;
+            r.node[0].s0 = side.scalar;
+        }
+        r.node[1].op = o; r.node[1].a = -1; r.node[1].b = 0;
+        r.n = 2;
+        return true;
+    }
 
     NaryEltwiseLayerImpl(const LayerParams& params)
     {

@@ -4,6 +4,7 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "cpu_kernels/fusion_apply.hpp"
 // backends
 #include "../op_cuda.hpp"
 #ifdef HAVE_CUDA
@@ -52,7 +53,14 @@ bool constC(LayerGemmOpMode mode){
 // Y = alpha * A’ * B’ + beta * C
 class GemmLayerImpl CV_FINAL : public GemmLayer {
 public:
-    mutable int inpType = -1;
+    FusionApply fusion;
+
+    virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
+    {
+        if (fusion.fn || fusion.expr)
+            return false;
+        return prepareFusionApply(expr, fusion);
+    }
 
     GemmLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
@@ -80,6 +88,8 @@ public:
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+        if (fusion.fn || fusion.expr)
+            return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && inpType == CV_32F) ||
                backendId == DNN_BACKEND_CANN ||
@@ -373,6 +383,12 @@ public:
         if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
+            if (fusion.fn || fusion.expr) {
+                std::vector<Mat> outs;
+                outputs_arr.getMatVector(outs);
+                if (!outs.empty())
+                    applyFusion(fusion, outs[0]);
+            }
             return;
         }
 
@@ -492,6 +508,7 @@ public:
                                     packed_B_mlas.data,
                                     1.f,
                                     Y.ptr<float>(), N)) {
+                    applyFusion(fusion, Y);
                     return;
                 }
             }
@@ -506,78 +523,7 @@ public:
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
-    }
-
-    // Double-precision analogue of broadcastCWtihBeta() above; not cached (see finalize()).
-    static void fillBroadcastCDouble(int M, int N, const Mat& C, double beta, Mat& dst)
-    {
-        CV_Assert(dst.rows == M && dst.cols == N);
-        double* out = dst.ptr<double>();
-        size_t total = (size_t)M * (size_t)N;
-
-        if (beta == 0 || C.empty()) {
-            std::fill_n(out, total, 0.0);
-            return;
-        }
-
-        const double* c = C.ptr<const double>();
-        const auto shape_C = shape(C);
-        int ndims_C = (int)shape_C.size();
-
-        if (ndims_C == 0 || (ndims_C == 1 && shape_C[0] == 1) ||
-            (ndims_C == 2 && shape_C[0] == 1 && shape_C[1] == 1)) {
-            // (), (1,), (1, 1): single scalar broadcast to every element.
-            std::fill_n(out, total, beta * c[0]);
-        } else if ((ndims_C == 1 && shape_C[0] == N) ||
-                   (ndims_C == 2 && shape_C[0] == 1 && shape_C[1] == N)) {
-            // (N,), (1, N): one row broadcast down every row.
-            for (int i = 0; i < M; i++)
-                for (int j = 0; j < N; j++)
-                    out[(size_t)i * N + j] = beta * c[j];
-        } else if (ndims_C == 2 && shape_C[0] == M && shape_C[1] == 1) {
-            // (M, 1): one value per row broadcast across every column.
-            for (int i = 0; i < M; i++)
-                std::fill_n(out + (size_t)i * N, N, beta * c[i]);
-        } else {
-            // (M, N): no broadcast, just scale.
-            CV_CheckEQ(shape_C[0], M, "DNN/Gemm: C is not broadcast properly");
-            CV_CheckEQ(shape_C[1], N, "DNN/Gemm: C is not broadcast properly");
-            for (size_t i = 0; i < total; i++)
-                out[i] = beta * c[i];
-        }
-    }
-
-    // CV_64F via cv::gemm, not the float-only fastGemm/MLAS kernels above.
-    void forwardDouble(const std::vector<Mat>& inputs, std::vector<Mat>& outputs, LayerGemmOpMode mode)
-    {
-        const Mat &A = inputs[0];
-        Mat &Y = outputs[0];
-        const Mat &B = constB(mode) ? blobs[0] : inputs[1];
-
-        CV_CheckTypeEQ(B.depth(), CV_64F, "DNN/Gemm: B must be CV_64F to match A");
-        CV_Assert(A.isContinuous() && Y.isContinuous());
-
-        const auto shape_A = shape(A), shape_Y = shape(Y);
-        size_t dims_A = shape_A.size();
-        int na = shape_A[dims_A - 1];
-        size_t dims_Y = shape_Y.size();
-        int N = shape_Y[dims_Y - 1];
-        const int rows = (int)(Y.total() / (size_t)N);
-
-        // 2D views onto existing data, no copy; trans_a/trans_b via cv::gemm's own flags.
-        Mat Aview = A.reshape(1, (int)(A.total() / (size_t)na));
-        Mat Yview = Y.reshape(1, rows);
-        const int flags = (trans_a ? GEMM_1_T : 0) | (trans_b ? GEMM_2_T : 0);
-
-        const bool haveC = constC(mode) || inputs.size() >= 3;
-        if (haveC) {
-            const Mat& C = (inputs.size() >= 3) ? inputs.back() : blobs.back();
-            CV_CheckTypeEQ(C.depth(), CV_64F, "DNN/Gemm: C must be CV_64F to match A");
-            fillBroadcastCDouble(rows, N, C, (double)beta, Yview);
-            cv::gemm(Aview, B, (double)alpha, Yview, 1.0, Yview, flags);
-        } else {
-            cv::gemm(Aview, B, (double)alpha, Mat(), 0.0, Yview, flags);
-        }
+        applyFusion(fusion, Y);
     }
 
 #ifdef HAVE_CUDA
