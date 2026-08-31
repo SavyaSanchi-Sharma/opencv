@@ -25,21 +25,8 @@ struct PreparedFusion
     std::vector<const float*> channelBufs;     //!< per-channel constants, indexed by bufferId
 };
 
-inline const std::vector<std::pair<int, Ptr<FusionGraph> > >& knownActivationPatterns()
-{
-    static const std::vector<std::pair<int, Ptr<FusionGraph> > > refs = []
-    {
-        std::vector<std::pair<int, Ptr<FusionGraph> > > v;
-        LayerMath r;
-        r = LayerMath(); sigmoidMath(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromMath(r)));
-        r = LayerMath(); geluMath(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromMath(r)));
-        return v;
-    }();
-    return refs;
-}
-
 inline bool matchKnownActivation(const FusionGraph& g, int& activType,
-                                  std::vector<float>& params)
+                                 std::vector<float>& params)
 {
     const std::vector<FusionNode>& nd = g.nodes();
     if (nd.empty() || nd[0].op != FusionEltwiseOp::INPUT)
@@ -82,7 +69,15 @@ inline bool matchKnownActivation(const FusionGraph& g, int& activType,
         return true;
     }
 
-    const std::vector<std::pair<int, Ptr<FusionGraph> > >& refs = knownActivationPatterns();
+    static const std::vector<std::pair<int, Ptr<FusionGraph> > > refs = []
+    {
+        std::vector<std::pair<int, Ptr<FusionGraph> > > v;
+        LayerMath r;
+        r = LayerMath(); sigmoidMath(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromMath(r)));
+        r = LayerMath(); geluMath(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromMath(r)));
+        return v;
+    }();
+
     for (size_t i = 0; i < refs.size(); i++) {
         if (refs[i].second && structurallyEqual(g, *refs[i].second)) {
             activType = refs[i].first;
