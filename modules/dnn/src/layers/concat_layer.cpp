@@ -125,9 +125,17 @@ public:
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size());
+        bool fp16Target = (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16);
+        MatType commonType = inputs[0];
         for (int i = 1; i < inputs.size(); i++)
-            CV_CheckTypeEQ(inputs[i], inputs[0], "All input types should be equal");
-        outputs.assign(1, inputs[0]);
+        {
+            bool fp16Mix = fp16Target && (inputs[i] == CV_16F || inputs[i] == CV_32F) && (commonType == CV_16F || commonType == CV_32F);
+            if (fp16Mix)
+                commonType = CV_32F;
+            else
+                CV_CheckTypeEQ(inputs[i], commonType, "All input types should be equal");
+        }
+        outputs.assign(1, commonType);
     }
 
 
@@ -345,6 +353,19 @@ public:
             return make_cuda_node_bool<cuda4dnn::ConcatOp>(std::move(context->stream), concat_axis, padding);
         else
             return make_cuda_node_with_type<cuda4dnn::ConcatOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), concat_axis, padding);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        auto concat_axis = normalize_axis(axis, inputs_arr.shape(0));
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::ConcatOp>(std::move(context->stream), concat_axis, padding);
+        else
+            return make_cuda_node_with_type<cuda4dnn::ConcatOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), concat_axis, padding);
     }
 #endif
 

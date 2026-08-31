@@ -3,6 +3,7 @@
 
 #include <opencv2/ts.hpp>
 #include <opencv2/dnn.hpp>
+#include <opencv2/core/utils/configuration.private.hpp>
 
 #include "../test/test_common.hpp"
 

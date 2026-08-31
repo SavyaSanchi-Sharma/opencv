@@ -144,7 +144,10 @@ Ptr<BackendWrapper> wrapMat(int backendId, int targetId, cv::UMat& m)
     case CV_16F:
         return CUDABackendWrapperFP16::create(m);
     case CV_32F:
-        return CUDABackendWrapperFP32::create(m);
+        if (targetId == DNN_TARGET_CUDA_FP16)
+            return CUDABackendWrapperFP16::create(m);
+        else
+            return CUDABackendWrapperFP32::create(m);
     case CV_8S:
         return CUDABackendWrapperINT8::create(m);
     case CV_8U:

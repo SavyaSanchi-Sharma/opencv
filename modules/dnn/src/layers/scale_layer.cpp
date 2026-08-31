@@ -266,6 +266,61 @@ public:
 
         return make_cuda_node<cuda4dnn::ScaleShiftOp>(preferableTarget, std::move(context->stream), config, weightsMat, biasMat);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        CV_Assert(!blobs.empty() || inputs_arr.total() == 2);
+
+        auto weightsMat = Mat(), biasMat = Mat();
+
+        cuda4dnn::ScaleShiftConfiguration config;
+        if (hasWeights)
+        {
+            if (blobs.empty())
+            {
+                config.scaleMode = cuda4dnn::ScaleShiftConfiguration::OpMode::UNTRAINABLE;
+            }
+            else
+            {
+                weightsMat = blobs[0];
+                config.scaleMode = cuda4dnn::ScaleShiftConfiguration::OpMode::TRAINABLE;
+            }
+        }
+        else
+        {
+            config.scaleMode = cuda4dnn::ScaleShiftConfiguration::OpMode::NONE;
+        }
+
+        if (hasBias)
+        {
+            if(blobs.empty())
+            {
+                config.shiftMode = cuda4dnn::ScaleShiftConfiguration::OpMode::UNTRAINABLE;
+            }
+            else
+            {
+                /* if the weights are provided, bias will be in blobs[1]; otherwise, it will be in blobs[0]
+                 * in either case, it is at the end of the blobs vector => bias = blobs.back()
+                 */
+                biasMat = blobs.back();
+                config.shiftMode = cuda4dnn::ScaleShiftConfiguration::OpMode::TRAINABLE;
+            }
+        }
+        else
+        {
+            config.shiftMode = cuda4dnn::ScaleShiftConfiguration::OpMode::NONE;
+        }
+
+        config.axis = axis;
+
+        return make_cuda_node<cuda4dnn::ScaleShiftOp>(preferableTarget, std::move(context->stream), config, weightsMat, biasMat);
+    }
 #endif
 
 #ifdef HAVE_DNN_NGRAPH
