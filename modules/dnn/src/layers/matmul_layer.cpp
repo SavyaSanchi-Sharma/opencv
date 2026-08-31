@@ -34,13 +34,13 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 #endif
 
  public:
-    FusionApply fusion;
+    PreparedFusion fusion;
 
     virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
     {
-        if (fusion.fn || fusion.expr)
+        if (fusion.expr)
             return false;
-        return prepareFusionApply(expr, fusion);
+        return prepareFusion(expr, fusion);
     }
     MatMulLayerImpl(const LayerParams& params) {
         setParamsFrom(params);
@@ -62,7 +62,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.fn || fusion.expr)
+        if (fusion.expr)
             return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
@@ -269,7 +269,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
         if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
-            if (fusion.fn || fusion.expr) {
+            if (fusion.expr) {
                 std::vector<Mat> outs;
                 outputs_arr.getMatVector(outs);
                 if (!outs.empty())

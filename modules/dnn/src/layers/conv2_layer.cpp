@@ -324,6 +324,8 @@ public:
         if (c.empty() || c.type() != CV_32F || !c.isContinuous() || (int)c.total() != K)
             return false;
 
+        // Broadcasting puts the channel axis last-but-the-spatial-dims, so the
+        // constant is only per-channel if that axis holds K and the rest are 1.
         const int nspatial = wshape0.dims - 2;
         const int ax = c.dims - nspatial - 1;
         if (ax < 0)
@@ -361,14 +363,14 @@ public:
 
         FastActivation act = FAST_ACTIV_NONE;
         std::vector<float> ap;
-        if (nd[cur].op == FusionEltwiseOp::CLAMP && bitsOf(nd[cur].scalar) == bitsOf(0.f)) {
+        if (nd[cur].op == FusionEltwiseOp::CLAMP && floatBits(nd[cur].scalar) == floatBits(0.f)) {
             act = FAST_ACTIV_CLIP;
             ap.assign(2, 0.f);
             ap[1] = nd[cur].scalar2;
             cur = nd[cur].inputs[0];
         } else if (nd[cur].op == FusionEltwiseOp::MAX && nd[cur].inputs.size() == 2 &&
                    nd[nd[cur].inputs[1]].op == FusionEltwiseOp::CONST &&
-                   bitsOf(nd[nd[cur].inputs[1]].scalar) == bitsOf(0.f)) {
+                   floatBits(nd[nd[cur].inputs[1]].scalar) == floatBits(0.f)) {
             act = FAST_ACTIV_RELU;
             cur = nd[cur].inputs[0];
         }

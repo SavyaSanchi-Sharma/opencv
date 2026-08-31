@@ -53,13 +53,13 @@ bool constC(LayerGemmOpMode mode){
 // Y = alpha * A’ * B’ + beta * C
 class GemmLayerImpl CV_FINAL : public GemmLayer {
 public:
-    FusionApply fusion;
+    PreparedFusion fusion;
 
     virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
     {
-        if (fusion.fn || fusion.expr)
+        if (fusion.expr)
             return false;
-        return prepareFusionApply(expr, fusion);
+        return prepareFusion(expr, fusion);
     }
 
     GemmLayerImpl(const LayerParams& params) {
@@ -88,7 +88,7 @@ public:
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.fn || fusion.expr)
+        if (fusion.expr)
             return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && inpType == CV_32F) ||
@@ -383,7 +383,7 @@ public:
         if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
-            if (fusion.fn || fusion.expr) {
+            if (fusion.expr) {
                 std::vector<Mat> outs;
                 outputs_arr.getMatVector(outs);
                 if (!outs.empty())

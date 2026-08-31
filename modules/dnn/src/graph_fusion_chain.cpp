@@ -35,8 +35,8 @@ public:
         : net_(net), graph_(graph), usecounts_(usecounts)
     {
         CV_Assert((int)usecounts_.size() == (int)net_.args.size());
-        taken_.assign(prog().size(), false);
-        CV_Assert(arena_.push(FusionEltwiseOp::INPUT, {}) == 0);
+        claimed_.assign(prog().size(), false);
+        CV_Assert(arena_.internNode(FusionEltwiseOp::INPUT, {}) == 0);
     }
     ChainFuser(const ChainFuser&) = delete;
     ChainFuser& operator=(const ChainFuser&) = delete;
@@ -47,27 +47,25 @@ public:
         if (chains_.empty())
             return false;
         freezeArena();
-        negotiate();
+        offerChainsToSinks();
         if (nfused_ == 0)
             return false;
-        rewriteProg();
+        dropAbsorbedLayers();
         return true;
     }
 
 private:
-    struct Candidate
+    struct ChainCandidate
     {
-        vector<int> progIdx;
+        vector<int> layerIdx;
         vector<Arg> constArgs;
-        vector<int> stepRoots;
+        vector<int> rootAfterStep;
         vector<Mat> constBufs;
     };
 
-    struct Walk { int root = 0; bool open = true; };
-
     const vector<Ptr<LayerInfo> >& prog() const { return graph_->prog(); }
 
-    static int internConstArg(Candidate& c, Arg a)
+    static int internConstArg(ChainCandidate& c, Arg a)
     {
         for (size_t k = 0; k < c.constArgs.size(); k++) {
             if (c.constArgs[k].idx == a.idx)
@@ -77,7 +75,7 @@ private:
         return (int)c.constArgs.size() - 1;
     }
 
-    bool foldableConst(Arg a, bool& isScalar, float& scalarVal) const
+    bool isFusableConst(Arg a, bool& isScalar, float& scalarVal) const
     {
         if (!net_.isConstArg(a))
             return false;
@@ -98,68 +96,66 @@ private:
         return true;
     }
 
-    bool readValueSource(const Ptr<LayerInfo>& L, Arg cur, Candidate& c, ValueSource& vs) const
+    bool readConstOperand(const Ptr<LayerInfo>& L, Arg cur, ChainCandidate& c, ConstOperand& out) const
     {
-        vector<Arg> side;
+        vector<Arg> sideInputs;
         for (Arg in : L->inputs) {
             if (in.idx == cur.idx || in.idx == 0)
                 continue;
-            side.push_back(in);
+            sideInputs.push_back(in);
         }
-        if (side.empty())
+        if (sideInputs.empty())
             return true;
-        if (side.size() > 2)
+        if (sideInputs.size() > 2)
             return false;
 
-        vs.flowIsFirst = !L->inputs.empty() && L->inputs[0].idx == cur.idx;
+        out.flowIsFirstInput = !L->inputs.empty() && L->inputs[0].idx == cur.idx;
 
-        if (side.size() == 2) {
+        if (sideInputs.size() == 2) {
             bool s0 = false, s1 = false;
             float v0 = 0.f, v1 = 0.f;
-            if (!foldableConst(side[0], s0, v0) || !s0)
+            if (!isFusableConst(sideInputs[0], s0, v0) || !s0)
                 return false;
-            if (!foldableConst(side[1], s1, v1) || !s1)
+            if (!isFusableConst(sideInputs[1], s1, v1) || !s1)
                 return false;
-            vs.hasFoldedOperand = true;
-            vs.scalar = v0;
-            vs.scalar2 = v1;
+            out.hasValue = true;
+            out.value = v0;
+            out.value2 = v1;
             return true;
         }
 
         bool isScalar = false;
         float scalarVal = 0.f;
-        if (!foldableConst(side[0], isScalar, scalarVal))
+        if (!isFusableConst(sideInputs[0], isScalar, scalarVal))
             return false;
-        vs.hasFoldedOperand = true;
+        out.hasValue = true;
         if (isScalar)
-            vs.scalar = scalarVal;
+            out.value = scalarVal;
         else
-            vs.bufferId = internConstArg(c, side[0]);
+            out.bufferId = internConstArg(c, sideInputs[0]);
         return true;
     }
 
-    bool describesItself(const Ptr<LayerInfo>& L) const
+    static bool isAbsorbableMath(Layer* l)
     {
-        Layer* l = dynamic_cast<Layer*>(L.get());
-        if (!l)
-            return false;
         FusionRecipe r;
-        ValueSource vs;
-        return l->describeMath(r, vs);
+        ConstOperand anyConstant;
+        anyConstant.hasValue = true;
+        return l->describeMath(r, anyConstant);
     }
 
-    void growChain(size_t anchor, Candidate& c)
+    void growChain(size_t anchor, ChainCandidate& c)
     {
         CV_Assert(!arenaPtr_);
 
-        Walk w;
+        int chainRoot = 0;
         Arg curArg = prog()[anchor]->outputs[0];
-        int prod = (int)anchor;
+        int producer = (int)anchor;
 
-        while (w.open && curArg.idx > 0 && curArg.idx < (int)usecounts_.size() &&
+        while (curArg.idx > 0 && curArg.idx < (int)usecounts_.size() &&
                usecounts_[curArg.idx] == 1) {
             const int j = firstConsumer_[curArg.idx];
-            if (j <= prod || j >= (int)prog().size() || taken_[j])
+            if (j <= producer || j >= (int)prog().size() || claimed_[j])
                 break;
 
             const Ptr<LayerInfo>& L = prog()[j];
@@ -173,25 +169,25 @@ private:
                 break;
 
             const size_t savedSlots = c.constArgs.size();
-            ValueSource vs;
+            ConstOperand side;
             FusionRecipe r;
-            if (!readValueSource(L, curArg, c, vs) || !l->describeMath(r, vs)) {
+            if (!readConstOperand(L, curArg, c, side) || !l->describeMath(r, side)) {
                 c.constArgs.resize(savedSlots);
                 break;
             }
 
-            const int next = appendFusionOp(arena_, w.root, r);
-            if (next < 0 || coneSize(arena_.graph(), next, coneScratch_) > FUSION_MAX_NODES) {
+            const int next = instantiateRecipe(arena_, chainRoot, r);
+            if (next < 0 || reachableNodeCount(arena_.graph(), next, reachScratch_) > FUSION_MAX_EXPR_NODES) {
                 c.constArgs.resize(savedSlots);
                 break;
             }
 
-            CV_DbgAssert(next > w.root);
-            w.root = next;
-            c.stepRoots.push_back(next);
-            c.progIdx.push_back(j);
+            CV_DbgAssert(next > chainRoot);
+            chainRoot = next;
+            c.rootAfterStep.push_back(next);
+            c.layerIdx.push_back(j);
             curArg = L->outputs[0];
-            prod = j;
+            producer = j;
         }
     }
 
@@ -202,55 +198,54 @@ private:
 
         for (size_t i = 0; i < prog().size(); i++) {
             const Ptr<LayerInfo>& L = prog()[i];
-            if (!L || taken_[i])
+            if (!L || claimed_[i])
                 continue;
             if (L->outputs.size() != 1 || L->subgraphs())
                 continue;
-            if (describesItself(L))
-                continue;
-            if (!dynamic_cast<Layer*>(L.get()))
+            Layer* anchor = dynamic_cast<Layer*>(L.get());
+            if (!anchor || isAbsorbableMath(anchor))
                 continue;
 
-            Candidate c;
-            c.progIdx.push_back((int)i);
+            ChainCandidate c;
+            c.layerIdx.push_back((int)i);
             growChain(i, c);
 
-            if (c.stepRoots.empty())
+            if (c.rootAfterStep.empty())
                 continue;
-            for (int n : c.progIdx)
-                taken_[n] = true;
+            for (int n : c.layerIdx)
+                claimed_[n] = true;
             chains_.push_back(c);
         }
     }
 
     void freezeArena()
     {
-        arenaPtr_ = arena_.release();
-        for (Candidate& c : chains_) {
+        arenaPtr_ = arena_.sharedGraph();
+        for (ChainCandidate& c : chains_) {
             c.constBufs.reserve(c.constArgs.size());
             for (Arg a : c.constArgs)
                 c.constBufs.push_back(net_.argTensor(a));
         }
     }
 
-    Ptr<FusionGraph> exprFor(int root, const vector<Mat>& bufs) const
+    Ptr<FusionGraph> expressionAt(int root, const vector<Mat>& bufs) const
     {
-        return extractSubgraph(*arenaPtr_, root, bufs);
+        return extractExpression(*arenaPtr_, root, bufs);
     }
 
-    void negotiate()
+    void offerChainsToSinks()
     {
         dropped_.assign(prog().size(), false);
 
-        for (Candidate& c : chains_) {
-            const Ptr<LayerInfo>& anchorInfo = prog()[c.progIdx[0]];
+        for (ChainCandidate& c : chains_) {
+            const Ptr<LayerInfo>& anchorInfo = prog()[c.layerIdx[0]];
             Layer* sink = dynamic_cast<Layer*>(anchorInfo.get());
             if (!sink)
                 continue;
 
             size_t accepted = 0;
-            for (size_t n = c.stepRoots.size(); n >= 1; n--) {
-                Ptr<FusionGraph> expr = exprFor(c.stepRoots[n - 1], c.constBufs);
+            for (size_t n = c.rootAfterStep.size(); n >= 1; n--) {
+                Ptr<FusionGraph> expr = expressionAt(c.rootAfterStep[n - 1], c.constBufs);
                 if (!expr)
                     continue;
                 if (sink->tryFuseChain(expr)) {
@@ -261,22 +256,22 @@ private:
             if (accepted == 0) {
                 CV_LOG_DEBUG(NULL, cv::format("[fusion] refused %s (+%d)",
                                               anchorInfo->type.c_str(),
-                                              (int)c.stepRoots.size()));
+                                              (int)c.rootAfterStep.size()));
                 continue;
             }
 
-            anchorInfo->outputs[0] = prog()[c.progIdx[accepted]]->outputs[0];
+            anchorInfo->outputs[0] = prog()[c.layerIdx[accepted]]->outputs[0];
             for (size_t k = 1; k <= accepted; k++)
-                dropped_[c.progIdx[k]] = true;
+                dropped_[c.layerIdx[k]] = true;
             nfused_++;
 
             CV_LOG_DEBUG(NULL, cv::format("[fusion] FUSED %s +%d of %d",
                                           anchorInfo->type.c_str(),
-                                          (int)accepted, (int)c.stepRoots.size()));
+                                          (int)accepted, (int)c.rootAfterStep.size()));
         }
     }
 
-    void rewriteProg()
+    void dropAbsorbedLayers()
     {
         const size_t nops = prog().size();
         vector<Ptr<LayerInfo> > newprog;
@@ -298,9 +293,9 @@ private:
     FusionGraphBuilder arena_;
     Ptr<FusionGraph>   arenaPtr_;
     vector<int>        firstConsumer_;
-    vector<bool>       taken_, dropped_;
-    vector<Candidate>  chains_;
-    vector<char>       coneScratch_;
+    vector<bool>       claimed_, dropped_;
+    vector<ChainCandidate>  chains_;
+    vector<char>       reachScratch_;
     int nfused_ = 0;
 };
 

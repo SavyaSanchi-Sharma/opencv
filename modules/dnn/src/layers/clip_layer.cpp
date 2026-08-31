@@ -83,19 +83,17 @@ public:
             CV_Assert(minValue <= maxValue);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource& side) const CV_OVERRIDE
+    bool describeMath(FusionRecipe& r, const ConstOperand& side) const CV_OVERRIDE
     {
         float lo = -FLT_MAX, hi = FLT_MAX;
         if (hasMin) lo = minValue;
         if (hasMax) hi = maxValue;
         if ((!hasMin || !hasMax) && inputs.size() > 1) {
-            if (!side.hasFoldedOperand) return false;
-            if (!hasMin) lo = side.scalar;
-            if (!hasMax) hi = side.scalar2;
+            if (!side.hasValue) return false;
+            if (!hasMin) lo = side.value;
+            if (!hasMax) hi = side.value2;
         }
-        r.node[0].op = FusionEltwiseOp::CLAMP;
-        r.node[0].a = -1; r.node[0].s0 = lo; r.node[0].s1 = hi;
-        r.n = 1;
+        r.clamp(FusionRecipe::INPUT_VALUE, lo, hi);
         return true;
     }
 

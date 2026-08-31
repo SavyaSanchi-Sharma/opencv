@@ -14,28 +14,31 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-struct FusionApply
+/** @brief Fused math a layer took on, ready to run over its output. Either a fast
+ *  activation kernel when we recognize the shape, or the expression for the interpreter.
+ */
+struct PreparedFusion
 {
-    Ptr<FusionGraph> expr;
-    ActivationFunc fn = nullptr;
-    std::vector<float> params;
-    std::vector<const float*> bufPtrs;
+    Ptr<FusionGraph> expr;                     //!< set once prepared, either way
+    ActivationFunc activationFn = nullptr;     //!< non-null picks the fast kernel
+    std::vector<float> activationParams;       //!< arguments for activationFn
+    std::vector<const float*> channelBufs;     //!< per-channel constants, indexed by bufferId
 };
 
-inline const std::vector<std::pair<int, Ptr<FusionGraph> > >& fusionActivationRefs()
+inline const std::vector<std::pair<int, Ptr<FusionGraph> > >& knownActivationPatterns()
 {
     static const std::vector<std::pair<int, Ptr<FusionGraph> > > refs = []
     {
         std::vector<std::pair<int, Ptr<FusionGraph> > > v;
         FusionRecipe r;
-        r = FusionRecipe(); sigmoidRecipe(r); v.push_back(std::make_pair(ACTIV_SIGMOID, graphFromRecipe(r)));
-        r = FusionRecipe(); geluRecipe(r);    v.push_back(std::make_pair(ACTIV_GELU,    graphFromRecipe(r)));
+        r = FusionRecipe(); sigmoidRecipe(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromRecipe(r)));
+        r = FusionRecipe(); geluRecipe(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromRecipe(r)));
         return v;
     }();
     return refs;
 }
 
-inline bool matchFusionActivation(const FusionGraph& g, int& activType,
+inline bool matchKnownActivation(const FusionGraph& g, int& activType,
                                   std::vector<float>& params)
 {
     const std::vector<FusionNode>& nd = g.nodes();
@@ -71,7 +74,7 @@ inline bool matchFusionActivation(const FusionGraph& g, int& activType,
     }
 
     if (nd.size() == 3 &&
-        nd[1].op == FusionEltwiseOp::CONST && bitsOf(nd[1].scalar) == bitsOf(0.f) &&
+        nd[1].op == FusionEltwiseOp::CONST && floatBits(nd[1].scalar) == floatBits(0.f) &&
         nd[2].op == FusionEltwiseOp::MAX && nd[2].inputs.size() == 2 &&
         nd[2].inputs[0] == 0 && nd[2].inputs[1] == 1) {
         activType = ACTIV_RELU;
@@ -79,9 +82,9 @@ inline bool matchFusionActivation(const FusionGraph& g, int& activType,
         return true;
     }
 
-    const std::vector<std::pair<int, Ptr<FusionGraph> > >& refs = fusionActivationRefs();
+    const std::vector<std::pair<int, Ptr<FusionGraph> > >& refs = knownActivationPatterns();
     for (size_t i = 0; i < refs.size(); i++) {
-        if (refs[i].second && sameFusionGraph(g, *refs[i].second)) {
+        if (refs[i].second && structurallyEqual(g, *refs[i].second)) {
             activType = refs[i].first;
             params.clear();
             return true;
@@ -90,45 +93,52 @@ inline bool matchFusionActivation(const FusionGraph& g, int& activType,
     return false;
 }
 
-inline bool prepareFusionApply(const Ptr<FusionGraph>& expr, FusionApply& out)
+inline bool prepareFusion(const Ptr<FusionGraph>& expr, PreparedFusion& out)
 {
     if (!expr || expr->size() == 0)
         return false;
     if (expr->outputNode != (int)expr->size() - 1)
         return false;
-    if (expr->size() > (size_t)FUSION_MAX_NODES)
+    if (expr->size() > (size_t)FUSION_MAX_EXPR_NODES)
         return false;
 
-    out = FusionApply();
-    out.expr = expr;
+    // Built aside and assigned only on success: a caller that refuses must be left
+    // exactly as it was, or its later shorter offers get rejected by its own guard
+    // and forward() runs math the layer never took on.
+    PreparedFusion prepared;
+    prepared.expr = expr;
 
     int activType = ACTIV_NONE;
-    if (matchFusionActivation(*expr, activType, out.params)) {
-        out.fn = getActivationFunc(activType);
-        if (out.fn)
+    if (matchKnownActivation(*expr, activType, prepared.activationParams)) {
+        prepared.activationFn = getActivationFunc(activType);
+        if (prepared.activationFn) {
+            out = prepared;
             return true;
+        }
     }
 
-    out.fn = nullptr;
-    out.params.clear();
-    out.bufPtrs.resize(expr->constBufs.size());
+    prepared.activationFn = nullptr;
+    prepared.activationParams.clear();
+    prepared.channelBufs.resize(expr->constBufs.size());
     for (size_t i = 0; i < expr->constBufs.size(); i++) {
         const Mat& m = expr->constBufs[i];
         if (m.empty() || m.type() != CV_32F || !m.isContinuous())
             return false;
-        out.bufPtrs[i] = m.ptr<float>();
+        prepared.channelBufs[i] = m.ptr<float>();
     }
     for (const FusionNode& n : expr->nodes()) {
         if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST &&
-            (n.constBufferId < 0 || n.constBufferId >= (int)out.bufPtrs.size()))
+            (n.constBufferId < 0 || n.constBufferId >= (int)prepared.channelBufs.size()))
             return false;
     }
+
+    out = prepared;
     return true;
 }
 
-inline void applyFusion(const FusionApply& a, Mat& Y)
+inline void applyFusion(const PreparedFusion& a, Mat& Y)
 {
-    if (!a.fn && !a.expr)
+    if (!a.expr)
         return;
     CV_Assert(Y.type() == CV_32F && Y.isContinuous());
 
@@ -143,23 +153,23 @@ inline void applyFusion(const FusionApply& a, Mat& Y)
         BLOCK = std::max<size_t>(1 << 12, (n + nt - 1) / nt);
     const int nblocks = (int)((n + BLOCK - 1) / BLOCK);
 
-    if (a.fn) {
-        const float* pr = a.params.empty() ? nullptr : a.params.data();
+    if (a.activationFn) {
+        const float* pr = a.activationParams.empty() ? nullptr : a.activationParams.data();
         parallel_for_(Range(0, nblocks), [&](const Range& r) {
             for (int b = r.start; b < r.end; b++) {
                 const size_t st = (size_t)b * BLOCK, en = std::min(st + BLOCK, n);
-                a.fn(p + st, p + st, en - st, pr);
+                a.activationFn(p + st, p + st, en - st, pr);
             }
         });
         return;
     }
 
     const int nch = Y.dims > 0 ? std::max(Y.size[Y.dims - 1], 1) : 1;
-    for (size_t i = 0; i < a.bufPtrs.size(); i++)
+    for (size_t i = 0; i < a.channelBufs.size(); i++)
         CV_DbgAssert((int)a.expr->constBufs[i].total() == nch);
 
     const FusionGraph& g = *a.expr;
-    const std::vector<const float*>& bufs = a.bufPtrs;
+    const std::vector<const float*>& bufs = a.channelBufs;
     parallel_for_(Range(0, nblocks), [&](const Range& r) {
         for (int b = r.start; b < r.end; b++) {
             const size_t st = (size_t)b * BLOCK, en = std::min(st + BLOCK, n);

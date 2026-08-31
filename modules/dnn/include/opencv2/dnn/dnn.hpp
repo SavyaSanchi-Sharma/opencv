@@ -514,7 +514,25 @@ CV__DNN_INLINE_NS_BEGIN
          */
         virtual void prepackWeights();
 
-        virtual bool describeMath(FusionRecipe& out, const ValueSource& side) const;
+        /** @brief States this layer's math as a small expression, so a fusion pass can
+         *  absorb it into whatever produces its input.
+         *
+         *  @param out receives the expression, built through FusionRecipe's emitters.
+         *  @param side describes the layer's non-flowing inputs when it has any, e.g.
+         *         the constant operand of an Add. Empty for a plain unary op.
+         *  @return false if the layer cannot be expressed, which also means it can
+         *          never be absorbed. Default: false.
+         */
+        virtual bool describeMath(FusionRecipe& out, const ConstOperand& side) const;
+
+        /** @brief Offers a trailing expression for this layer to absorb into its own
+         *  computation. The layer decides; refusing is always safe.
+         *
+         *  The pass offers the longest chain first and retries with shorter ones, so
+         *  an implementation must finish validating before it mutates any state.
+         *  @return true if the expression was taken on, in which case the layer is now
+         *          responsible for computing it. Default: false.
+         */
         virtual bool tryFuseChain(const Ptr<FusionGraph>& expr);
 
         CV_PROP int preferableTarget; //!< prefer target for layer forwarding

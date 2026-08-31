@@ -13,7 +13,7 @@
 namespace cv{ namespace dnn{
 CV__DNN_INLINE_NS_BEGIN
 
-inline void fusionCone(const FusionGraph& g, int root, std::vector<char>& live)
+inline void markReachableNodes(const FusionGraph& g, int root, std::vector<char>& live)
 {
     const std::vector<FusionNode>& nodes = g.nodes();
     CV_Assert(root >= 0 && root < (int)nodes.size());
@@ -28,31 +28,32 @@ inline void fusionCone(const FusionGraph& g, int root, std::vector<char>& live)
     }
 }
 
-inline int coneSize(const FusionGraph& g, int root, std::vector<char>& scratch)
+inline int reachableNodeCount(const FusionGraph& g, int root, std::vector<char>& scratch)
 {
-    fusionCone(g, root, scratch);
+    markReachableNodes(g, root, scratch);
     int n = 0;
     for (char c : scratch) n += c ? 1 : 0;
     return n;
 }
 
-inline Ptr<FusionGraph> extractSubgraph(const FusionGraph& arena, int root,
-                                        const std::vector<Mat>& constBufs)
+inline Ptr<FusionGraph> extractExpression(const FusionGraph& arena, int root,
+                                          const std::vector<Mat>& constBufs)
 {
     const std::vector<FusionNode>& src = arena.nodes();
     if (root < 0 || root >= (int)src.size())
         return Ptr<FusionGraph>();
 
     std::vector<char> live;
-    fusionCone(arena, root, live);
-    if (!live[0] || src[0].op != FusionEltwiseOp::INPUT)
+    markReachableNodes(arena, root, live);
+    CV_DbgAssert(src[0].op == FusionEltwiseOp::INPUT);
+    if (!live[0])
         return Ptr<FusionGraph>();
 
     std::vector<int> remap(live.size(), -1);
     FusionGraphBuilder out;
     for (int i = 0; i < (int)live.size(); i++) {
         if (!live[i]) continue;
-        if (out.size() >= (size_t)FUSION_MAX_NODES)
+        if (out.size() >= (size_t)FUSION_MAX_EXPR_NODES)
             return Ptr<FusionGraph>();
         const FusionNode& n = src[i];
         if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST &&
@@ -64,7 +65,7 @@ inline Ptr<FusionGraph> extractSubgraph(const FusionGraph& arena, int root,
                 return Ptr<FusionGraph>();
             ins[k] = remap[n.inputs[k]];
         }
-        remap[i] = out.push(n.op, ins, n.scalar, n.scalar2, n.constBufferId);
+        remap[i] = out.internNode(n.op, ins, n.scalar, n.scalar2, n.constBufferId);
     }
     if (remap[root] != (int)out.size() - 1)
         return Ptr<FusionGraph>();

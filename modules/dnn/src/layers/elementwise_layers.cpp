@@ -414,7 +414,7 @@ public:
         return func.getActivationFunc(depth, activParams);
     }
 
-    bool describeMath(FusionRecipe& out, const ValueSource& side) const CV_OVERRIDE
+    bool describeMath(FusionRecipe& out, const ConstOperand& side) const CV_OVERRIDE
     {
         return func.describeMath(out, side);
     }
@@ -468,7 +468,7 @@ struct BaseFunctor
     ActivationFunc getActivationFunc(int /*depth*/, std::vector<float>& /*activParams*/) const
     { return nullptr; }
 
-    bool describeMath(FusionRecipe&, const ValueSource&) const { return false; }
+    bool describeMath(FusionRecipe&, const ConstOperand&) const { return false; }
 };
 
 struct ReLUFunctor : public BaseFunctor
@@ -485,10 +485,11 @@ struct ReLUFunctor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_RELU);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
         if (slope != 0.f) return false;
-        reluRecipe(r);
+        const int zero = r.constant(0.f);
+        r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, zero);
         return true;
     }
 
@@ -671,9 +672,9 @@ struct ReLU6Functor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_CLIP);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        clampRecipe(r, minValue, maxValue);
+        r.clamp(FusionRecipe::INPUT_VALUE, minValue, maxValue);
         return true;
     }
 
@@ -936,7 +937,7 @@ struct GeluFunctor : public BaseFunctor {
         return cv::dnn::getActivationFunc(ACTIV_GELU);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
         geluRecipe(r);
         return true;
@@ -1136,9 +1137,9 @@ struct TanHFunctor : public BaseDefaultFunctor<TanHFunctor>
         return cv::dnn::getActivationFunc(ACTIV_TANH);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        unaryRecipe(r, FusionEltwiseOp::TANH);
+        r.unary(FusionEltwiseOp::TANH, FusionRecipe::INPUT_VALUE);
         return true;
     }
 
@@ -1446,7 +1447,7 @@ struct SigmoidFunctor : public BaseDefaultFunctor<SigmoidFunctor>
         return cv::dnn::getActivationFunc(ACTIV_SIGMOID);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
         sigmoidRecipe(r);
         return true;
@@ -1982,9 +1983,9 @@ struct SqrtFunctor : public BaseDefaultFunctor<SqrtFunctor>
         return sqrt(x);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        unaryRecipe(r, FusionEltwiseOp::SQRT);
+        r.unary(FusionEltwiseOp::SQRT, FusionRecipe::INPUT_VALUE);
         return true;
     }
 
@@ -2377,9 +2378,9 @@ struct ErfFunctor : public BaseDefaultFunctor<ErfFunctor>
         return cv::dnn::getActivationFunc(ACTIV_ERF);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        unaryRecipe(r, FusionEltwiseOp::ERF);
+        r.unary(FusionEltwiseOp::ERF, FusionRecipe::INPUT_VALUE);
         return true;
     }
 
@@ -3212,9 +3213,18 @@ struct ExpFunctor : public BaseDefaultFunctor<ExpFunctor>
         return cv::dnn::getActivationFunc(ACTIV_EXP);
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        expRecipe(r, normScale, normShift);
+        int x = FusionRecipe::INPUT_VALUE;
+        if (normScale != 1.f) {
+            const int s = r.constant(normScale);
+            x = r.binary(FusionEltwiseOp::MUL, x, s);
+        }
+        if (normShift != 0.f) {
+            const int s = r.constant(normShift);
+            x = r.binary(FusionEltwiseOp::ADD, x, s);
+        }
+        r.unary(FusionEltwiseOp::EXP, x);
         return true;
     }
 
@@ -3605,9 +3615,9 @@ struct ReciprocalFunctor : public BaseDefaultFunctor<ReciprocalFunctor>
         return 1.f/x;
     }
 
-    bool describeMath(FusionRecipe& r, const ValueSource&) const
+    bool describeMath(FusionRecipe& r, const ConstOperand&) const
     {
-        unaryRecipe(r, FusionEltwiseOp::RECIP);
+        r.unary(FusionEltwiseOp::RECIP, FusionRecipe::INPUT_VALUE);
         return true;
     }
 
