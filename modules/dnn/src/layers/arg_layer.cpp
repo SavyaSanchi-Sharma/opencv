@@ -3,8 +3,12 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../op_cuda.hpp"
 #include "layers_common.hpp"
 
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/arg.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -43,8 +47,25 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return !select_last_index;
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        CV_Assert(inputs.size() == 1);
+        return make_cuda_node_with_type<cuda4dnn::ArgOp>(preferableTarget, inputs[0].type(), std::move(context->stream), axis, op == ArgOp::MAX);
+    }
+#endif
 
     void handleKeepDims(MatShape& shape, const int axis_) const
     {
