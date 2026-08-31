@@ -30,9 +30,9 @@ inline const std::vector<std::pair<int, Ptr<FusionGraph> > >& knownActivationPat
     static const std::vector<std::pair<int, Ptr<FusionGraph> > > refs = []
     {
         std::vector<std::pair<int, Ptr<FusionGraph> > > v;
-        FusionRecipe r;
-        r = FusionRecipe(); sigmoidRecipe(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromRecipe(r)));
-        r = FusionRecipe(); geluRecipe(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromRecipe(r)));
+        LayerMath r;
+        r = LayerMath(); sigmoidMath(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromMath(r)));
+        r = LayerMath(); geluMath(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromMath(r)));
         return v;
     }();
     return refs;
@@ -127,8 +127,12 @@ inline bool prepareFusion(const Ptr<FusionGraph>& expr, PreparedFusion& out)
         prepared.channelBufs[i] = m.ptr<float>();
     }
     for (const FusionNode& n : expr->nodes()) {
-        if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST &&
-            (n.constBufferId < 0 || n.constBufferId >= (int)prepared.channelBufs.size()))
+        if (n.op != FusionEltwiseOp::PER_CHANNEL_CONST)
+            continue;
+        if (n.constBufferId < 0 || n.constBufferId >= (int)prepared.channelBufs.size())
+            return false;
+        const Mat& m = expr->constBufs[n.constBufferId];
+        if (m.dims < 1 || (int)m.total() != m.size[m.dims - 1])
             return false;
     }
 
@@ -140,44 +144,37 @@ inline void applyFusion(const PreparedFusion& a, Mat& Y)
 {
     if (!a.expr)
         return;
-    CV_Assert(Y.type() == CV_32F && Y.isContinuous());
+    CV_CheckTypeEQ(Y.type(), CV_32F, "DNN/fusion: output must be CV_32F");
+    CV_Assert(Y.isContinuous());
 
     float* p = Y.ptr<float>();
     const size_t n = Y.total();
     if (n == 0)
         return;
-
-    size_t BLOCK = 1 << 16;
-    const size_t nt = (size_t)std::max(1, getNumThreads());
-    if (nt > 1 && n < BLOCK * nt)
-        BLOCK = std::max<size_t>(1 << 12, (n + nt - 1) / nt);
-    const int nblocks = (int)((n + BLOCK - 1) / BLOCK);
+    CV_CheckLE(n, (size_t)INT_MAX, "DNN/fusion: output too large to split");
 
     if (a.activationFn) {
         const float* pr = a.activationParams.empty() ? nullptr : a.activationParams.data();
-        parallel_for_(Range(0, nblocks), [&](const Range& r) {
-            for (int b = r.start; b < r.end; b++) {
-                const size_t st = (size_t)b * BLOCK, en = std::min(st + BLOCK, n);
-                a.activationFn(p + st, p + st, en - st, pr);
-            }
+        parallel_for_(Range(0, (int)n), [&](const Range& r) {
+            a.activationFn(p + r.start, p + r.start, (size_t)(r.end - r.start), pr);
         });
         return;
     }
 
     const int nch = Y.dims > 0 ? std::max(Y.size[Y.dims - 1], 1) : 1;
-    for (size_t i = 0; i < a.channelBufs.size(); i++)
-        CV_DbgAssert((int)a.expr->constBufs[i].total() == nch);
+    for (const FusionNode& n : a.expr->nodes()) {
+        if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST)
+            CV_CheckEQ((int)a.expr->constBufs[n.constBufferId].total(), nch,
+                       "DNN/fusion: per-channel constant length must match the channel axis");
+    }
 
     const FusionGraph& g = *a.expr;
     const std::vector<const float*>& bufs = a.channelBufs;
-    parallel_for_(Range(0, nblocks), [&](const Range& r) {
-        for (int b = r.start; b < r.end; b++) {
-            const size_t st = (size_t)b * BLOCK, en = std::min(st + BLOCK, n);
-            int c = (int)(st % (size_t)nch);
-            for (size_t k = st; k < en; k++) {
-                p[k] = evalFusionGraph(g, p[k], bufs, c);
-                if (++c == nch) c = 0;
-            }
+    parallel_for_(Range(0, (int)n), [&](const Range& r) {
+        int c = r.start % nch;
+        for (int k = r.start; k < r.end; k++) {
+            p[k] = evalFusionGraph(g, p[k], bufs, c);
+            if (++c == nch) c = 0;
         }
     });
 }

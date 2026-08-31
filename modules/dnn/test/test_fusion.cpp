@@ -14,23 +14,23 @@ using namespace cv::dnn;
 
 static const std::vector<const float*> kNoBufs;
 
-static float eval1(const FusionRecipe& r, float x)
+static float eval1(const LayerMath& r, float x)
 {
-    Ptr<FusionGraph> g = patternFromRecipe(r);
+    Ptr<FusionGraph> g = patternFromMath(r);
     CV_Assert(g);
     return evalFusionGraph(*g, x, kNoBufs, 0);
 }
 
-TEST(Fusion, IdenticalRecipesCollapseToTheSameNode)
+TEST(Fusion, IdenticalMathCollapsesToTheSameNode)
 {
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-    FusionRecipe r;
+    LayerMath r;
     const int zero = r.constant(0.f);
-    r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, zero);
+    r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, zero);
 
-    EXPECT_EQ(instantiateRecipe(arena, in, r), instantiateRecipe(arena, in, r));
-    EXPECT_EQ(instantiateRecipe(arena, in, r), instantiateRecipe(arena, in, r));
+    EXPECT_EQ(instantiateMath(arena, in, r), instantiateMath(arena, in, r));
+    EXPECT_EQ(instantiateMath(arena, in, r), instantiateMath(arena, in, r));
     EXPECT_EQ(3u, arena.size());
 
     FusionGraphBuilder b;
@@ -44,12 +44,12 @@ TEST(Fusion, ConeIsBoundedIndependentlyOfArenaSize)
 {
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-    FusionRecipe a, b;
+    LayerMath a, b;
     const int zero = a.constant(0.f);
-    a.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, zero);
-    geluRecipe(b);
-    const int rootA = instantiateRecipe(arena, in, a);
-    const int rootB = instantiateRecipe(arena, in, b);
+    a.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, zero);
+    geluMath(b);
+    const int rootA = instantiateMath(arena, in, a);
+    const int rootB = instantiateMath(arena, in, b);
     ASSERT_GE(rootA, 0);
     ASSERT_GE(rootB, 0);
 
@@ -63,19 +63,19 @@ TEST(Fusion, ExtractionYieldsAStandaloneGraph)
 {
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-    FusionRecipe a, b;
+    LayerMath a, b;
     const int zero = a.constant(0.f);
-    a.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, zero);
-    geluRecipe(b);
-    instantiateRecipe(arena, in, a);
-    const int rootB = instantiateRecipe(arena, in, b);
+    a.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, zero);
+    geluMath(b);
+    instantiateMath(arena, in, a);
+    const int rootB = instantiateMath(arena, in, b);
 
     Ptr<FusionGraph> g = extractExpression(arena.graph(), rootB, std::vector<Mat>());
     ASSERT_TRUE(g);
     EXPECT_EQ(9u, g->size());
     EXPECT_EQ(FusionEltwiseOp::INPUT, g->nodes()[0].op);
     EXPECT_EQ((int)g->size() - 1, g->outputNode);
-    EXPECT_NEAR(0.5f * 1.5f * (1.f + std::erf(1.5f * (float)M_SQRT1_2)),
+    EXPECT_NEAR(0.5f * 1.5f * (1.f + std::erf(1.5f * 0.70710678118654752440f)),
                 evalFusionGraph(*g, 1.5f, kNoBufs, 0), 1e-5);
 
     EXPECT_FALSE(extractExpression(arena.graph(), -1, std::vector<Mat>()));
@@ -89,9 +89,9 @@ TEST(Fusion, OverLimitConeIsRefusedNotEvaluated)
     std::vector<char> scratch;
     int steps = 0;
     while (reachableNodeCount(arena.graph(), cur, scratch) <= FUSION_MAX_EXPR_NODES && steps < 200) {
-        FusionRecipe r;
-        geluRecipe(r);
-        const int next = instantiateRecipe(arena, cur, r);
+        LayerMath r;
+        geluMath(r);
+        const int next = instantiateMath(arena, cur, r);
         ASSERT_GE(next, 0);
         cur = next;
         steps++;
@@ -100,42 +100,42 @@ TEST(Fusion, OverLimitConeIsRefusedNotEvaluated)
     EXPECT_FALSE(extractExpression(arena.graph(), cur, std::vector<Mat>()));
 }
 
-TEST(Fusion, RecipesMatchClosedForm)
+TEST(Fusion, MathMatchesClosedForm)
 {
     const float xs[] = { -3.f, -0.5f, 0.f, 0.25f, 1.f, 4.f };
-    FusionRecipe r;
+    LayerMath r;
     for (float x : xs) {
-        r = FusionRecipe();
-        r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, r.constant(0.f));
+        r = LayerMath();
+        r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
         EXPECT_FLOAT_EQ(std::max(x, 0.f), eval1(r, x)) << "relu " << x;
 
-        r = FusionRecipe();
-        r.clamp(FusionRecipe::INPUT_VALUE, 0.f, 6.f);
+        r = LayerMath();
+        r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
         EXPECT_FLOAT_EQ(std::min(std::max(x, 0.f), 6.f), eval1(r, x)) << "clip " << x;
 
-        r = FusionRecipe(); sigmoidRecipe(r);
+        r = LayerMath(); sigmoidMath(r);
         EXPECT_NEAR(1.f / (1.f + std::exp(-x)), eval1(r, x), 1e-5) << "sigmoid " << x;
 
-        r = FusionRecipe(); geluRecipe(r);
-        EXPECT_NEAR(0.5f * x * (1.f + std::erf(x * (float)M_SQRT1_2)), eval1(r, x), 1e-5)
+        r = LayerMath(); geluMath(r);
+        EXPECT_NEAR(0.5f * x * (1.f + std::erf(x * 0.70710678118654752440f)), eval1(r, x), 1e-5)
             << "gelu " << x;
 
-        r = FusionRecipe();
-        r.unary(FusionEltwiseOp::TANH, FusionRecipe::INPUT_VALUE);
+        r = LayerMath();
+        r.unary(FusionEltwiseOp::TANH, LayerMath::INPUT_VALUE);
         EXPECT_NEAR(std::tanh(x), eval1(r, x), 1e-6) << "tanh " << x;
 
-        r = FusionRecipe();
-        const int scaled = r.binary(FusionEltwiseOp::MUL, FusionRecipe::INPUT_VALUE, r.constant(2.f));
+        r = LayerMath();
+        const int scaled = r.binary(FusionEltwiseOp::MUL, LayerMath::INPUT_VALUE, r.constant(2.f));
         r.unary(FusionEltwiseOp::EXP, r.binary(FusionEltwiseOp::ADD, scaled, r.constant(5.f)));
         EXPECT_NEAR(std::exp(2.f * x + 5.f), eval1(r, x), 1e-2) << "scaled exp " << x;
     }
 }
 
-TEST(Fusion, EmptyRecipeIsRefused)
+TEST(Fusion, EmptyMathIsRefused)
 {
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-    EXPECT_EQ(-1, instantiateRecipe(arena, in, FusionRecipe()));
+    EXPECT_EQ(-1, instantiateMath(arena, in, LayerMath()));
     EXPECT_EQ(1u, arena.size());
 }
 
@@ -145,8 +145,9 @@ TEST(Fusion, ReversedSubIsRefused)
     lp.set("operation", "sub");
     Ptr<Layer> sub = NaryEltwiseLayer::create(lp);
     ASSERT_TRUE(sub);
+    sub->inputs.assign(2, Arg());
 
-    FusionRecipe r;
+    LayerMath r;
     ConstOperand vs;
     vs.hasValue = true;
     vs.value = 3.f;
@@ -154,56 +155,140 @@ TEST(Fusion, ReversedSubIsRefused)
     EXPECT_FALSE(sub->describeMath(r, vs));
 
     vs.flowIsFirstInput = true;
-    r = FusionRecipe();
+    r = LayerMath();
     ASSERT_TRUE(sub->describeMath(r, vs));
     EXPECT_FLOAT_EQ(-1.f, eval1(r, 2.f));
+}
+
+TEST(Fusion, VariadicNaryIsRefused)
+{
+    LayerParams lp;
+    lp.set("operation", "sum");
+    Ptr<Layer> sum = NaryEltwiseLayer::create(lp);
+    ASSERT_TRUE(sum);
+
+    LayerMath r;
+    ConstOperand vs;
+    vs.hasValue = true;
+    vs.value = 3.f;
+
+    sum->inputs.assign(3, Arg());
+    EXPECT_FALSE(sum->describeMath(r, vs));
+
+    r = LayerMath();
+    sum->inputs.assign(2, Arg());
+    EXPECT_TRUE(sum->describeMath(r, vs));
+}
+
+TEST(Fusion, ClipWithOneDynamicBoundIsRefused)
+{
+    LayerParams lp;
+    Ptr<Layer> clip = ClipLayer::create(lp);
+    ASSERT_TRUE(clip);
+
+    LayerMath r;
+    ConstOperand vs;
+    vs.hasValue = true;
+    vs.value = 2.f;
+    vs.value2 = 0.f;
+
+    clip->inputs = { Arg(1), Arg(2) };
+    EXPECT_FALSE(clip->describeMath(r, vs));
+
+    // Clip(x, "", max): the omitted min is an empty Arg, not a missing one
+    r = LayerMath();
+    clip->inputs = { Arg(1), Arg(0), Arg(2) };
+    EXPECT_FALSE(clip->describeMath(r, vs));
+
+    r = LayerMath();
+    vs.value2 = 6.f;
+    clip->inputs = { Arg(1), Arg(2), Arg(3) };
+    ASSERT_TRUE(clip->describeMath(r, vs));
+    EXPECT_FLOAT_EQ(2.f, eval1(r, 1.f));
+    EXPECT_FLOAT_EQ(6.f, eval1(r, 9.f));
 }
 
 TEST(Fusion, ActivationMatchRecognizesAndRefuses)
 {
     int activ = ACTIV_NONE;
     std::vector<float> params;
-    FusionRecipe r;
+    LayerMath r;
 
-    r = FusionRecipe();
-    r.clamp(FusionRecipe::INPUT_VALUE, 0.f, 6.f);
-    ASSERT_TRUE(matchKnownActivation(*patternFromRecipe(r), activ, params));
+    r = LayerMath();
+    r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
+    ASSERT_TRUE(matchKnownActivation(*patternFromMath(r), activ, params));
     EXPECT_EQ(ACTIV_CLIP, activ);
     ASSERT_EQ(2u, params.size());
     EXPECT_FLOAT_EQ(0.f, params[0]);
     EXPECT_FLOAT_EQ(6.f, params[1]);
 
-    r = FusionRecipe();
-    r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, r.constant(0.f));
-    ASSERT_TRUE(matchKnownActivation(*patternFromRecipe(r), activ, params));
+    r = LayerMath();
+    r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
+    ASSERT_TRUE(matchKnownActivation(*patternFromMath(r), activ, params));
     EXPECT_EQ(ACTIV_RELU, activ);
 
-    r = FusionRecipe(); sigmoidRecipe(r);
-    ASSERT_TRUE(matchKnownActivation(*patternFromRecipe(r), activ, params));
+    r = LayerMath(); sigmoidMath(r);
+    ASSERT_TRUE(matchKnownActivation(*patternFromMath(r), activ, params));
     EXPECT_EQ(ACTIV_SIGMOID, activ);
 
-    r = FusionRecipe(); geluRecipe(r);
-    ASSERT_TRUE(matchKnownActivation(*patternFromRecipe(r), activ, params));
+    r = LayerMath(); geluMath(r);
+    ASSERT_TRUE(matchKnownActivation(*patternFromMath(r), activ, params));
     EXPECT_EQ(ACTIV_GELU, activ);
 
-    r = FusionRecipe();
-    r.unary(FusionEltwiseOp::SQRT, FusionRecipe::INPUT_VALUE);
-    EXPECT_FALSE(matchKnownActivation(*patternFromRecipe(r), activ, params));
+    r = LayerMath();
+    r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
+    EXPECT_FALSE(matchKnownActivation(*patternFromMath(r), activ, params));
 
     FusionGraphBuilder arena;
     arena.internNode(FusionEltwiseOp::INPUT, {});
-    r = FusionRecipe();
-    r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, r.constant(0.f));
-    instantiateRecipe(arena, 0, r);
+    r = LayerMath();
+    r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
+    instantiateMath(arena, 0, r);
     EXPECT_FALSE(matchKnownActivation(*arena.sharedGraph(), activ, params));
+}
+
+// Matching must survive the real path: a shared arena that already holds unrelated
+// nodes, sliced by extractExpression. Comparing two patternFromMath() graphs cannot
+// catch an ordering bug, because both sides are built the same way.
+TEST(Fusion, ActivationMatchSurvivesASharedArena)
+{
+    struct { const char* name; void (*build)(LayerMath&); int activ; } kinds[] = {
+        { "sigmoid", &sigmoidMath, ACTIV_SIGMOID },
+        { "gelu",    &geluMath,    ACTIV_GELU    },
+    };
+
+    for (const auto& k : kinds) {
+        FusionGraphBuilder arena;
+        const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
+
+        // an unrelated earlier chain, so the constants below are already interned
+        // in an order the reference pattern does not share
+        const int m1 = arena.internNode(FusionEltwiseOp::CONST, {}, -1.f);
+        const int half = arena.internNode(FusionEltwiseOp::CONST, {}, 0.5f);
+        arena.internNode(FusionEltwiseOp::MUL, {in, m1});
+        arena.internNode(FusionEltwiseOp::MUL, {in, half});
+
+        LayerMath m;
+        k.build(m);
+        const int root = instantiateMath(arena, in, m);
+        ASSERT_GE(root, 0) << k.name;
+
+        Ptr<FusionGraph> expr = extractExpression(arena.graph(), root, std::vector<Mat>());
+        ASSERT_TRUE(expr) << k.name;
+
+        int activ = ACTIV_NONE;
+        std::vector<float> params;
+        EXPECT_TRUE(matchKnownActivation(*expr, activ, params)) << k.name;
+        EXPECT_EQ(k.activ, activ) << k.name;
+    }
 }
 
 TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
 {
-    FusionRecipe r;
-    r.clamp(FusionRecipe::INPUT_VALUE, 0.f, 6.f);
+    LayerMath r;
+    r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
     PreparedFusion kern;
-    ASSERT_TRUE(prepareFusion(patternFromRecipe(r), kern));
+    ASSERT_TRUE(prepareFusion(patternFromMath(r), kern));
     ASSERT_TRUE(kern.activationFn != nullptr);
 
     int n = 5;
@@ -215,10 +300,10 @@ TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
     for (int i = 0; i < n; i++)
         EXPECT_FLOAT_EQ(want[i], y.ptr<float>()[i]) << "clip i=" << i;
 
-    r = FusionRecipe();
-    r.unary(FusionEltwiseOp::SQRT, FusionRecipe::INPUT_VALUE);
+    r = LayerMath();
+    r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
     PreparedFusion interp;
-    ASSERT_TRUE(prepareFusion(patternFromRecipe(r), interp));
+    ASSERT_TRUE(prepareFusion(patternFromMath(r), interp));
     EXPECT_TRUE(interp.activationFn == nullptr);
 
     int big = (1 << 16) + 17;
@@ -234,9 +319,9 @@ TEST(Fusion, PerChannelConstIndexesTheLastAxis)
 {
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-    FusionRecipe r;
-    r.binary(FusionEltwiseOp::MUL, FusionRecipe::INPUT_VALUE, r.perChannelConstant(1));
-    const int root = instantiateRecipe(arena, in, r);
+    LayerMath r;
+    r.binary(FusionEltwiseOp::MUL, LayerMath::INPUT_VALUE, r.perChannelConstant(1));
+    const int root = instantiateMath(arena, in, r);
     ASSERT_GE(root, 0);
 
     int one = 1, three = 3;
@@ -283,11 +368,11 @@ TEST(Fusion, SharedRootKeepsEachChainsOwnBuffers)
     FusionGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
 
-    FusionRecipe r;
-    r.binary(FusionEltwiseOp::MUL, FusionRecipe::INPUT_VALUE, r.perChannelConstant(0));
+    LayerMath r;
+    r.binary(FusionEltwiseOp::MUL, LayerMath::INPUT_VALUE, r.perChannelConstant(0));
 
-    const int rootA = instantiateRecipe(arena, in, r);
-    const int rootB = instantiateRecipe(arena, in, r);
+    const int rootA = instantiateMath(arena, in, r);
+    const int rootB = instantiateMath(arena, in, r);
     ASSERT_GE(rootA, 0);
     EXPECT_EQ(rootA, rootB);
 

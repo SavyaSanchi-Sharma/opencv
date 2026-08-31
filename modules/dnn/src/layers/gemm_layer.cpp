@@ -386,8 +386,12 @@ public:
             if (fusion.expr) {
                 std::vector<Mat> outs;
                 outputs_arr.getMatVector(outs);
-                if (!outs.empty())
-                    applyFusion(fusion, outs[0]);
+                if (!outs.empty()) {
+                    Mat y32;
+                    outs[0].convertTo(y32, CV_32F);
+                    applyFusion(fusion, y32);
+                    y32.convertTo(outs[0], outs[0].type());
+                }
             }
             return;
         }

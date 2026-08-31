@@ -50,7 +50,6 @@
 #include "../dnn/version.hpp"
 
 #include <opencv2/dnn/dict.hpp>
-#include <opencv2/dnn/fusion.hpp>
 
 namespace cv {
 namespace dnn {
@@ -62,6 +61,12 @@ class DnnNetAccessor;  // forward declaration
 CV__DNN_INLINE_NS_BEGIN
 //! @addtogroup dnn
 //! @{
+
+    //! Fusion IR, defined in dnn/src/fusion_graph.hpp. Only the two Layer
+    //! virtuals below refer to these, and only by reference.
+    class FusionGraph;
+    struct LayerMath;
+    struct ConstOperand;
 
     typedef int MatType;
 
@@ -517,13 +522,13 @@ CV__DNN_INLINE_NS_BEGIN
         /** @brief States this layer's math as a small expression, so a fusion pass can
          *  absorb it into whatever produces its input.
          *
-         *  @param out receives the expression, built through FusionRecipe's emitters.
+         *  @param out receives the expression, built through LayerMath's emitters.
          *  @param side describes the layer's non-flowing inputs when it has any, e.g.
          *         the constant operand of an Add. Empty for a plain unary op.
          *  @return false if the layer cannot be expressed, which also means it can
          *          never be absorbed. Default: false.
          */
-        virtual bool describeMath(FusionRecipe& out, const ConstOperand& side) const;
+        virtual bool describeMath(LayerMath& out, const ConstOperand& side) const;
 
         /** @brief Offers a trailing expression for this layer to absorb into its own
          *  computation. The layer decides; refusing is always safe.
@@ -536,6 +541,7 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool tryFuseChain(const Ptr<FusionGraph>& expr);
 
         CV_PROP int preferableTarget; //!< prefer target for layer forwarding
+
         //! Executor-side bookkeeping for per-layer (re)initialization.
         unsigned packedWeightEpoch = 0;        //!< LayerInfo::weightEpoch prepackWeights() last ran for
         bool finalizedOnce = false;

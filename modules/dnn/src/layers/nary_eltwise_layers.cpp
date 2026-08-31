@@ -189,9 +189,10 @@ class NaryEltwiseLayerImpl CV_FINAL : public NaryEltwiseLayer
 public:
     std::string operation;
 
-    bool describeMath(FusionRecipe& r, const ConstOperand& side) const CV_OVERRIDE
+    bool describeMath(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
     {
         if (!side.hasValue) return false;
+        if (inputs.size() != 2) return false;
         if (op == OPERATION::SUB && !side.flowIsFirstInput) return false;
 
         FusionEltwiseOp o;
@@ -207,7 +208,7 @@ public:
 
         const int operand = side.bufferId >= 0 ? r.perChannelConstant(side.bufferId)
                                               : r.constant(side.value);
-        r.binary(o, FusionRecipe::INPUT_VALUE, operand);
+        r.binary(o, LayerMath::INPUT_VALUE, operand);
         return true;
     }
 

@@ -414,7 +414,7 @@ public:
         return func.getActivationFunc(depth, activParams);
     }
 
-    bool describeMath(FusionRecipe& out, const ConstOperand& side) const CV_OVERRIDE
+    bool describeMath(LayerMath& out, const ConstOperand& side) const CV_OVERRIDE
     {
         return func.describeMath(out, side);
     }
@@ -468,7 +468,7 @@ struct BaseFunctor
     ActivationFunc getActivationFunc(int /*depth*/, std::vector<float>& /*activParams*/) const
     { return nullptr; }
 
-    bool describeMath(FusionRecipe&, const ConstOperand&) const { return false; }
+    bool describeMath(LayerMath&, const ConstOperand&) const { return false; }
 };
 
 struct ReLUFunctor : public BaseFunctor
@@ -485,11 +485,11 @@ struct ReLUFunctor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_RELU);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
         if (slope != 0.f) return false;
         const int zero = r.constant(0.f);
-        r.binary(FusionEltwiseOp::MAX, FusionRecipe::INPUT_VALUE, zero);
+        r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, zero);
         return true;
     }
 
@@ -672,9 +672,9 @@ struct ReLU6Functor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_CLIP);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        r.clamp(FusionRecipe::INPUT_VALUE, minValue, maxValue);
+        r.clamp(LayerMath::INPUT_VALUE, minValue, maxValue);
         return true;
     }
 
@@ -937,9 +937,9 @@ struct GeluFunctor : public BaseFunctor {
         return cv::dnn::getActivationFunc(ACTIV_GELU);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        geluRecipe(r);
+        geluMath(r);
         return true;
     }
 
@@ -1137,9 +1137,9 @@ struct TanHFunctor : public BaseDefaultFunctor<TanHFunctor>
         return cv::dnn::getActivationFunc(ACTIV_TANH);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        r.unary(FusionEltwiseOp::TANH, FusionRecipe::INPUT_VALUE);
+        r.unary(FusionEltwiseOp::TANH, LayerMath::INPUT_VALUE);
         return true;
     }
 
@@ -1447,9 +1447,9 @@ struct SigmoidFunctor : public BaseDefaultFunctor<SigmoidFunctor>
         return cv::dnn::getActivationFunc(ACTIV_SIGMOID);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        sigmoidRecipe(r);
+        sigmoidMath(r);
         return true;
     }
 
@@ -1983,9 +1983,9 @@ struct SqrtFunctor : public BaseDefaultFunctor<SqrtFunctor>
         return sqrt(x);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        r.unary(FusionEltwiseOp::SQRT, FusionRecipe::INPUT_VALUE);
+        r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
         return true;
     }
 
@@ -2378,9 +2378,9 @@ struct ErfFunctor : public BaseDefaultFunctor<ErfFunctor>
         return cv::dnn::getActivationFunc(ACTIV_ERF);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        r.unary(FusionEltwiseOp::ERF, FusionRecipe::INPUT_VALUE);
+        r.unary(FusionEltwiseOp::ERF, LayerMath::INPUT_VALUE);
         return true;
     }
 
@@ -3213,9 +3213,9 @@ struct ExpFunctor : public BaseDefaultFunctor<ExpFunctor>
         return cv::dnn::getActivationFunc(ACTIV_EXP);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        int x = FusionRecipe::INPUT_VALUE;
+        int x = LayerMath::INPUT_VALUE;
         if (normScale != 1.f) {
             const int s = r.constant(normScale);
             x = r.binary(FusionEltwiseOp::MUL, x, s);
@@ -3615,9 +3615,9 @@ struct ReciprocalFunctor : public BaseDefaultFunctor<ReciprocalFunctor>
         return 1.f/x;
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand&) const
+    bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        r.unary(FusionEltwiseOp::RECIP, FusionRecipe::INPUT_VALUE);
+        r.unary(FusionEltwiseOp::RECIP, LayerMath::INPUT_VALUE);
         return true;
     }
 

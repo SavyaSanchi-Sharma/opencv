@@ -83,17 +83,23 @@ public:
             CV_Assert(minValue <= maxValue);
     }
 
-    bool describeMath(FusionRecipe& r, const ConstOperand& side) const CV_OVERRIDE
+    bool describeMath(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
     {
         float lo = -FLT_MAX, hi = FLT_MAX;
         if (hasMin) lo = minValue;
         if (hasMax) hi = maxValue;
         if ((!hasMin || !hasMax) && inputs.size() > 1) {
-            if (!side.hasValue) return false;
+            // ConstOperand carries two anonymous scalars with no slot information, so
+            // only the fully specified (x, min, max) form can be read unambiguously.
+            // An omitted optional input shows up as an empty Arg, not a missing one.
+            if (inputs.size() != 3 || !side.hasValue)
+                return false;
+            if (inputs[1].idx == 0 || inputs[2].idx == 0)
+                return false;
             if (!hasMin) lo = side.value;
             if (!hasMax) hi = side.value2;
         }
-        r.clamp(FusionRecipe::INPUT_VALUE, lo, hi);
+        r.clamp(LayerMath::INPUT_VALUE, lo, hi);
         return true;
     }
 

@@ -15,8 +15,8 @@ using std::vector;
 
 namespace {
 
-static void firstConsumerOf(const vector<Ptr<LayerInfo> >& prog, int nargs,
-                            vector<int>& firstConsumer)
+void firstConsumerOf(const vector<Ptr<LayerInfo> >& prog, int nargs,
+                     vector<int>& firstConsumer)
 {
     firstConsumer.assign((size_t)nargs, -1);
     for (size_t j = 0; j < prog.size(); j++) {
@@ -36,7 +36,8 @@ public:
     {
         CV_Assert((int)usecounts_.size() == (int)net_.args.size());
         claimed_.assign(prog().size(), false);
-        CV_Assert(arena_.internNode(FusionEltwiseOp::INPUT, {}) == 0);
+        const int inputNode = arena_.internNode(FusionEltwiseOp::INPUT, {});
+        CV_Assert(inputNode == 0);
     }
     ChainFuser(const ChainFuser&) = delete;
     ChainFuser& operator=(const ChainFuser&) = delete;
@@ -138,7 +139,7 @@ private:
 
     static bool isAbsorbableMath(Layer* l)
     {
-        FusionRecipe r;
+        LayerMath r;
         ConstOperand anyConstant;
         anyConstant.hasValue = true;
         return l->describeMath(r, anyConstant);
@@ -165,18 +166,21 @@ private:
             if (!l)
                 break;
 
-            if (arena_.size() >= (size_t)FUSION_MAX_ARENA_NODES)
+            if (arena_.size() >= (size_t)FUSION_MAX_ARENA_NODES) {
+                CV_LOG_DEBUG(NULL, cv::format("[fusion] arena full (%d nodes), chain truncated",
+                                              (int)arena_.size()));
                 break;
+            }
 
             const size_t savedSlots = c.constArgs.size();
             ConstOperand side;
-            FusionRecipe r;
+            LayerMath r;
             if (!readConstOperand(L, curArg, c, side) || !l->describeMath(r, side)) {
                 c.constArgs.resize(savedSlots);
                 break;
             }
 
-            const int next = instantiateRecipe(arena_, chainRoot, r);
+            const int next = instantiateMath(arena_, chainRoot, r);
             if (next < 0 || reachableNodeCount(arena_.graph(), next, reachScratch_) > FUSION_MAX_EXPR_NODES) {
                 c.constArgs.resize(savedSlots);
                 break;
@@ -282,7 +286,7 @@ private:
         }
         graph_->setProg(newprog);
 
-        CV_LOG_DEBUG(NULL, cv::format("fuseLayer: fused %d chain(s) in graph '%s', arena %d nodes",
+        CV_LOG_DEBUG(NULL, cv::format("fuseChains: fused %d chain(s) in graph '%s', arena %d nodes",
                                       nfused_, graph_->name().c_str(), (int)arenaPtr_->size()));
     }
 
@@ -299,8 +303,8 @@ private:
     int nfused_ = 0;
 };
 
-static bool fuseChainsInGraph(Net::Impl& net, const Ptr<Graph>& graph,
-                             const vector<int>& usecounts)
+bool fuseChainsInGraph(Net::Impl& net, const Ptr<Graph>& graph,
+                       const vector<int>& usecounts)
 {
     if (!graph)
         return false;
@@ -327,9 +331,13 @@ static bool fuseChainsInGraph(Net::Impl& net, const Ptr<Graph>& graph,
 
 } // namespace
 
-void Net::Impl::fuseLayer()
+void Net::Impl::fuseChains()
 {
     if (!mainGraph)
+        return;
+    // Sinks apply the fused math on the CPU path only; on an OpenCL target the
+    // absorbed layers would be dropped and their math never run.
+    if (IS_DNN_OPENCL_TARGET(preferableTarget))
         return;
     vector<int> usecounts;
     useCounts(usecounts);

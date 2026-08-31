@@ -598,7 +598,7 @@ void Net::Impl::prepareForInference()
         fuseTransposeMatMul();
         fuseScaleSoftmax();
         fuseBasic();
-        fuseLayer();
+        fuseChains();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
         prepared = true;
     }
