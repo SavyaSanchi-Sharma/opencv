@@ -538,7 +538,7 @@ CV__DNN_INLINE_NS_BEGIN
          *  @return true if the expression was taken on, in which case the layer is now
          *          responsible for computing it. Default: false.
          */
-        virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr);
+        virtual bool absorbMath(const Ptr<AdjacencyGraph>& expr);
 
         CV_PROP int preferableTarget; //!< prefer target for layer forwarding
 

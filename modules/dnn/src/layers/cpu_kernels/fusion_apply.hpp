@@ -30,73 +30,6 @@ struct PreparedFusion
     void run(Mat& Y) const;
 };
 
-namespace fusion {
-
-inline bool matchActivation(const AdjacencyGraph& g, int& activType,
-                                 std::vector<float>& params)
-{
-    const std::vector<FusionNode>& nd = g.nodes();
-    if (nd.empty() || nd[0].op != FusionEltwiseOp::INPUT)
-        return false;
-    if (g.outputNode != (int)nd.size() - 1)
-        return false;
-
-    if (nd.size() == 2 && nd[1].inputs.size() == 1 && nd[1].inputs[0] == 0) {
-        switch (nd[1].op) {
-        case FusionEltwiseOp::CLAMP:
-            activType = ACTIV_CLIP;
-            params.assign(2, 0.f);
-            params[0] = nd[1].scalar;
-            params[1] = nd[1].scalar2;
-            return true;
-        case FusionEltwiseOp::TANH:
-            activType = ACTIV_TANH;
-            params.clear();
-            return true;
-        case FusionEltwiseOp::ERF:
-            activType = ACTIV_ERF;
-            params.clear();
-            return true;
-        case FusionEltwiseOp::EXP:
-            activType = ACTIV_EXP;
-            params.assign(2, 0.f);
-            params[0] = 1.f;
-            return true;
-        default:
-            break;
-        }
-    }
-
-    if (nd.size() == 3 &&
-        nd[1].op == FusionEltwiseOp::CONST && detail::bits(nd[1].scalar) == detail::bits(0.f) &&
-        nd[2].op == FusionEltwiseOp::MAX && nd[2].inputs.size() == 2 &&
-        nd[2].inputs[0] == 0 && nd[2].inputs[1] == 1) {
-        activType = ACTIV_RELU;
-        params.assign(1, 0.f);
-        return true;
-    }
-
-    static const std::vector<std::pair<int, Ptr<AdjacencyGraph> > > refs = []
-    {
-        std::vector<std::pair<int, Ptr<AdjacencyGraph> > > v;
-        LayerMath r;
-        r = LayerMath(); sigmoid(r); v.push_back(std::make_pair(ACTIV_SIGMOID, fromMath(r)));
-        r = LayerMath(); gelu(r);    v.push_back(std::make_pair(ACTIV_GELU,    fromMath(r)));
-        return v;
-    }();
-
-    for (size_t i = 0; i < refs.size(); i++) {
-        if (refs[i].second && sameGraph(g, *refs[i].second)) {
-            activType = refs[i].first;
-            params.clear();
-            return true;
-        }
-    }
-    return false;
-}
-
-} // namespace fusion
-
 inline bool PreparedFusion::take(const Ptr<AdjacencyGraph>& e)
 {
     if (expr)
@@ -124,17 +57,6 @@ inline bool PreparedFusion::take(const Ptr<AdjacencyGraph>& e)
         return true;
     }
 
-    int activType = ACTIV_NONE;
-    if (fusion::matchActivation(*e, activType, prepared.activationParams)) {
-        prepared.activationFn = getActivationFunc(activType);
-        if (prepared.activationFn) {
-            *this = prepared;
-            return true;
-        }
-    }
-
-    prepared.activationFn = nullptr;
-    prepared.activationParams.clear();
     prepared.channelBufs.resize(e->constBufs.size());
     for (size_t i = 0; i < e->constBufs.size(); i++) {
         const Mat& m = e->constBufs[i];

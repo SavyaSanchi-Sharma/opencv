@@ -326,44 +326,6 @@ inline int instantiate(AdjacencyGraphBuilder& builder, int inputNode,
     return graphIndex[math.nodeCount() - 1];
 }
 
-inline bool sameGraph(const AdjacencyGraph& a, const AdjacencyGraph& b,
-                              int rootA = -1, int rootB = -1)
-{
-    if (rootA < 0 || rootB < 0) {
-        if (a.outputNode < 0 || b.outputNode < 0 || a.size() != b.size())
-            return false;
-        rootA = a.outputNode;
-        rootB = b.outputNode;
-    }
-    const FusionNode& na = a.nodes()[rootA];
-    const FusionNode& nb = b.nodes()[rootB];
-    if (na.op != nb.op || na.inputs.size() != nb.inputs.size())
-        return false;
-    if (detail::bits(na.scalar) != detail::bits(nb.scalar))
-        return false;
-    if (detail::bits(na.scalar2) != detail::bits(nb.scalar2))
-        return false;
-    if (na.constBufferId != nb.constBufferId)
-        return false;
-
-    // internNode orders commutative operands by arena index, which depends on what
-    // else the arena already held, so either pairing may be the equivalent one.
-    if (na.inputs.size() == 2 &&
-        (na.op == FusionEltwiseOp::ADD || na.op == FusionEltwiseOp::MUL ||
-         na.op == FusionEltwiseOp::MAX || na.op == FusionEltwiseOp::MIN)) {
-        if (sameGraph(a, b, na.inputs[0], nb.inputs[0]) &&
-            sameGraph(a, b, na.inputs[1], nb.inputs[1]))
-            return true;
-        return sameGraph(a, b, na.inputs[0], nb.inputs[1]) &&
-               sameGraph(a, b, na.inputs[1], nb.inputs[0]);
-    }
-    for (size_t k = 0; k < na.inputs.size(); k++) {
-        if (!sameGraph(a, b, na.inputs[k], nb.inputs[k]))
-            return false;
-    }
-    return true;
-}
-
 inline float evalElement(const AdjacencyGraph& g, float x,
                              const std::vector<const float*>& constBufs, int channelIdx)
 {
@@ -480,15 +442,6 @@ inline Ptr<AdjacencyGraph> extract(const AdjacencyGraph& arena, int root,
     return g;
 }
 
-inline Ptr<AdjacencyGraph> fromMath(const LayerMath& math)
-{
-    AdjacencyGraphBuilder b;
-    const int in = b.internNode(FusionEltwiseOp::INPUT, {});
-    const int root = instantiate(b, in, math);
-    if (root < 0)
-        return Ptr<AdjacencyGraph>();
-    return extract(b.graph(), root, std::vector<Mat>());
-}
 
 } // namespace fusion
 

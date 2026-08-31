@@ -127,7 +127,7 @@ Ptr<BackendNode> Layer::initCann(const std::vector<Ptr<BackendWrapper> > &inputs
 bool Layer::setActivation(const Ptr<ActivationLayer>&) { return false; }
 bool Layer::tryFuse(Ptr<Layer>&) { return false; }
 bool Layer::unfoldOp(LayerMath&, const ConstOperand&) const { return false; }
-bool Layer::tryAbsorbMath(const Ptr<AdjacencyGraph>&) { return false; }
+bool Layer::absorbMath(const Ptr<AdjacencyGraph>&) { return false; }
 
 void Layer::forwardCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
 {

@@ -57,7 +57,7 @@ public:
 
     PreparedFusion fusion;
 
-    virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
+    virtual bool absorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
     {
         return fusion.take(expr);
     }

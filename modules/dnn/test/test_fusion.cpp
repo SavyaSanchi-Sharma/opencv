@@ -14,9 +14,21 @@ using namespace cv::dnn;
 
 static const std::vector<const float*> kNoBufs;
 
+// A standalone graph from one layer's math. Only tests build graphs this way;
+// the pass always goes through a shared arena and fusion::extract.
+static Ptr<AdjacencyGraph> graphOf(const LayerMath& m)
+{
+    AdjacencyGraphBuilder b;
+    const int in = b.internNode(FusionEltwiseOp::INPUT, {});
+    const int root = fusion::instantiate(b, in, m);
+    if (root < 0)
+        return Ptr<AdjacencyGraph>();
+    return fusion::extract(b.graph(), root, std::vector<Mat>());
+}
+
 static float eval1(const LayerMath& r, float x)
 {
-    Ptr<AdjacencyGraph> g = fusion::fromMath(r);
+    Ptr<AdjacencyGraph> g = graphOf(r);
     CV_Assert(g);
     return fusion::evalElement(*g, x, kNoBufs, 0);
 }
@@ -208,87 +220,81 @@ TEST(Fusion, ClipWithOneDynamicBoundIsRefused)
     EXPECT_FLOAT_EQ(6.f, eval1(r, 9.f));
 }
 
-TEST(Fusion, ActivationMatchRecognizesAndRefuses)
+// Every layer now states which kernel computes its own math, so this goes through
+// the real path: the layer fills LayerMath, and PreparedFusion picks the kernel up.
+TEST(Fusion, LayersDeclareTheirOwnKernel)
 {
-    int activ = ACTIV_NONE;
-    std::vector<float> params;
-    LayerMath r;
-
-    r = LayerMath();
-    r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
-    ASSERT_TRUE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
-    EXPECT_EQ(ACTIV_CLIP, activ);
-    ASSERT_EQ(2u, params.size());
-    EXPECT_FLOAT_EQ(0.f, params[0]);
-    EXPECT_FLOAT_EQ(6.f, params[1]);
-
-    r = LayerMath();
-    r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
-    ASSERT_TRUE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
-    EXPECT_EQ(ACTIV_RELU, activ);
-
-    r = LayerMath(); fusion::sigmoid(r);
-    ASSERT_TRUE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
-    EXPECT_EQ(ACTIV_SIGMOID, activ);
-
-    r = LayerMath(); fusion::gelu(r);
-    ASSERT_TRUE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
-    EXPECT_EQ(ACTIV_GELU, activ);
-
-    r = LayerMath();
-    r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
-    EXPECT_FALSE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
-
-    AdjacencyGraphBuilder arena;
-    arena.internNode(FusionEltwiseOp::INPUT, {});
-    r = LayerMath();
-    r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
-    fusion::instantiate(arena, 0, r);
-    EXPECT_FALSE(fusion::matchActivation(*arena.sharedGraph(), activ, params));
-}
-
-// Matching must survive the real path: a shared arena that already holds unrelated
-// nodes, sliced by fusion::extract. Comparing two fusion::fromMath() graphs cannot
-// catch an ordering bug, because both sides are built the same way.
-TEST(Fusion, ActivationMatchSurvivesASharedArena)
-{
-    struct { const char* name; void (*build)(LayerMath&); int activ; } kinds[] = {
-        { "sigmoid", &fusion::sigmoid, ACTIV_SIGMOID },
-        { "gelu",    &fusion::gelu,    ACTIV_GELU    },
+    struct { const char* name; const char* type; int nInputs; } cases[] = {
+        { "sigmoid", "Sigmoid", 1 },
+        { "gelu",    "Gelu",    1 },
+        { "tanh",    "TanH",    1 },
+        { "relu",    "ReLU",    1 },
     };
 
-    for (const auto& k : kinds) {
-        AdjacencyGraphBuilder arena;
-        const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
-
-        // an unrelated earlier chain, so the constants below are already interned
-        // in an order the reference pattern does not share
-        const int m1 = arena.internNode(FusionEltwiseOp::CONST, {}, -1.f);
-        const int half = arena.internNode(FusionEltwiseOp::CONST, {}, 0.5f);
-        arena.internNode(FusionEltwiseOp::MUL, {in, m1});
-        arena.internNode(FusionEltwiseOp::MUL, {in, half});
+    for (const auto& c : cases) {
+        LayerParams lp;
+        Ptr<Layer> l = LayerFactory::createLayerInstance(c.type, lp);
+        ASSERT_TRUE(l) << c.name;
+        l->inputs.assign(c.nInputs, Arg(1));
 
         LayerMath m;
-        k.build(m);
-        const int root = fusion::instantiate(arena, in, m);
-        ASSERT_GE(root, 0) << k.name;
+        ConstOperand side;
+        ASSERT_TRUE(l->unfoldOp(m, side)) << c.name;
+        EXPECT_TRUE(m.kernel != nullptr) << c.name << ": no kernel declared";
 
-        Ptr<AdjacencyGraph> expr = fusion::extract(arena.graph(), root, std::vector<Mat>());
-        ASSERT_TRUE(expr) << k.name;
+        Ptr<AdjacencyGraph> expr = graphOf(m);
+        ASSERT_TRUE(expr) << c.name;
+        expr->kernel = m.kernel;
+        expr->kernelParamCount = m.kernelParamCount;
+        for (int i = 0; i < m.kernelParamCount; i++)
+            expr->kernelParams[i] = m.kernelParams[i];
 
-        int activ = ACTIV_NONE;
-        std::vector<float> params;
-        EXPECT_TRUE(fusion::matchActivation(*expr, activ, params)) << k.name;
-        EXPECT_EQ(k.activ, activ) << k.name;
+        PreparedFusion pf;
+        const bool took = pf.take(expr);
+        EXPECT_TRUE(took) << c.name;
+        EXPECT_TRUE(pf.activationFn != nullptr) << c.name << ": fell to the interpreter";
     }
+}
+
+// Clip and NaryEltwise are not ElementWiseLayers, so they declare explicitly rather
+// than through the wrapper. They must end up on the same fast path.
+TEST(Fusion, NonElementwiseLayersDeclareToo)
+{
+    LayerParams lp;
+    Ptr<Layer> clip = ClipLayer::create(lp);
+    ASSERT_TRUE(clip);
+    clip->inputs = { Arg(1), Arg(2), Arg(3) };
+    LayerMath cm;
+    ConstOperand cs;
+    cs.hasValue = true; cs.value = 0.f; cs.value2 = 6.f;
+    ASSERT_TRUE(clip->unfoldOp(cm, cs));
+    EXPECT_TRUE(cm.kernel != nullptr) << "clip declared no kernel";
+    EXPECT_EQ(2, cm.kernelParamCount);
+
+    LayerParams np;
+    np.set("operation", "max");
+    Ptr<Layer> mx = NaryEltwiseLayer::create(np);
+    ASSERT_TRUE(mx);
+    mx->inputs.assign(2, Arg(1));
+    LayerMath nm;
+    ConstOperand ns;
+    ns.hasValue = true; ns.value = 0.f;
+    ASSERT_TRUE(mx->unfoldOp(nm, ns));
+    EXPECT_TRUE(nm.kernel != nullptr) << "Max(x,0) declared no kernel";
 }
 
 TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
 {
     LayerMath r;
+    r.setKernel(cv::dnn::getActivationFunc(ACTIV_CLIP), { 0.f, 6.f });
     r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
+    Ptr<AdjacencyGraph> ce = graphOf(r);
+    ce->kernel = r.kernel;
+    ce->kernelParamCount = r.kernelParamCount;
+    for (int i = 0; i < r.kernelParamCount; i++)
+        ce->kernelParams[i] = r.kernelParams[i];
     PreparedFusion kern;
-    ASSERT_TRUE(kern.take(fusion::fromMath(r)));
+    ASSERT_TRUE(kern.take(ce));
     ASSERT_TRUE(kern.activationFn != nullptr);
 
     int n = 5;
@@ -303,7 +309,7 @@ TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
     r = LayerMath();
     r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
     PreparedFusion interp;
-    ASSERT_TRUE(interp.take(fusion::fromMath(r)));
+    ASSERT_TRUE(interp.take(graphOf(r)));
     EXPECT_TRUE(interp.activationFn == nullptr);
 
     int big = (1 << 16) + 17;

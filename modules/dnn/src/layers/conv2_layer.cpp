@@ -339,7 +339,7 @@ public:
         return true;
     }
 
-    virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
+    virtual bool absorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
     {
         if (!expr || expr->size() == 0)
             return false;

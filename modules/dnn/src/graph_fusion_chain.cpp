@@ -260,7 +260,7 @@ private:
                     for (int q = 0; q < c.singleStepKernelParamCount; q++)
                         expr->kernelParams[q] = c.singleStepKernelParams[q];
                 }
-                if (sink->tryAbsorbMath(expr)) {
+                if (sink->absorbMath(expr)) {
                     accepted = n;
                     break;
                 }

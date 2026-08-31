@@ -206,6 +206,9 @@ public:
         default: return false;
         }
 
+        if (o == FusionEltwiseOp::MAX && side.bufferId < 0 && side.value == 0.f)
+            r.setKernel(cv::dnn::getActivationFunc(ACTIV_RELU), { 0.f });
+
         const int operand = side.bufferId >= 0 ? r.perChannelConstant(side.bufferId)
                                               : r.constant(side.value);
         r.binary(o, LayerMath::INPUT_VALUE, operand);

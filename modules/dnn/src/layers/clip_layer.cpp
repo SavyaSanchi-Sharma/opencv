@@ -99,6 +99,7 @@ public:
             if (!hasMin) lo = side.value;
             if (!hasMax) hi = side.value2;
         }
+        r.setKernel(cv::dnn::getActivationFunc(ACTIV_CLIP), { lo, hi });
         r.clamp(LayerMath::INPUT_VALUE, lo, hi);
         return true;
     }
