@@ -373,10 +373,20 @@ public:
                               InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
-        Mat scale, bias;
-        getScaleBias(scale, bias);  // per-channel FP32 scale and shift
+        Mat scale_, bias_;
+        if (inputs.size() == 1) {
+            getScaleBias(scale_, bias_);  // already frozen by graph_const_args
+        } else {
+            CV_Assert(inputs.size() == 5);
+            auto netimpl_ = getNetImpl(this);
+            Mat sc = netimpl_->argTensor(inputs[1]).getMat(ACCESS_READ);
+            Mat bs = netimpl_->argTensor(inputs[2]).getMat(ACCESS_READ);
+            Mat mn = netimpl_->argTensor(inputs[3]).getMat(ACCESS_READ);
+            Mat vr = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
+            BatchNorm2Layer::getScaleBias(sc, bs, mn, vr, epsilon, scale_, bias_);
+        }
         return make_cuda_node<cuda4dnn::BatchNormOp>(
-            preferableTarget, std::move(context->stream), scale, bias);
+            preferableTarget, std::move(context->stream), scale_, bias_);
     }
 #endif
 

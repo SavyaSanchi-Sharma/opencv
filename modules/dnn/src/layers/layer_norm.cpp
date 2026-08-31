@@ -388,6 +388,20 @@ public:
 
         return make_cuda_node<cuda4dnn::LayerNormOp>(preferableTarget, std::move(context->stream), scale, bias, axis, epsilon, loops);
     }
+
+    Ptr<BackendNode> initCUDA(void *context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        auto input_shape = inputs_arr.shape(0);
+        size_t loops = static_cast<size_t>(total(input_shape, 0, axis));
+
+        const auto scale = blobs.empty() ? Mat() : blobs.front(),
+                   bias = blobs.empty() ? Mat() : blobs.back();
+
+        return make_cuda_node<cuda4dnn::LayerNormOp>(preferableTarget, std::move(context->stream), scale, bias, axis, epsilon, loops);
+    }
 #endif // HAVE_CUDA
 };
 

@@ -1097,6 +1097,16 @@ public:
         return (outputs[0][2] == inputs[0][2]) && (outputs[0][3] == inputs[0][3]);
     }
 
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        std::vector<MatShape> inpShapes(inputs.size());
+        for (size_t i = 0; i < inputs.size(); i++)
+            inpShapes[i] = inputs[i].shape();
+        std::vector<MatShape> internals;
+        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
+    }
+
     // Only resizeNearest has a genuine CV_32S path; other modes reject it below.
     void getTypes(const std::vector<MatType>& inputs,
                   const int requiredOutputs,
@@ -1514,6 +1524,36 @@ public:
     ) override
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::ResizeConfiguration config;
+        if (interpolation == "nearest")
+        {
+            config.type = InterpolationType::NEAREST_NEIGHBOUR;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+        }
+        else if (interpolation == "bilinear")
+        {
+            config.type = InterpolationType::BILINEAR;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+        }
+        else if (interpolation == "opencv_linear")
+        {
+            config.type = InterpolationType::BILINEAR;
+            config.align_corners = false;
+            config.half_pixel_centers = true;
+        }
+        else
+            CV_Error(Error::StsNotImplemented, "Requested interpolation mode is not available in resize layer.");
+        return make_cuda_node<cuda4dnn::ResizeOp>(preferableTarget, std::move(context->stream), config);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
 
         cuda4dnn::ResizeConfiguration config;
         if (interpolation == "nearest")

@@ -42,6 +42,20 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             kernels::crop_and_resize(stream, output, input, static_cast<csl::View<T>>(boxes));
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == 2 && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto boxes = csl::viewOf<T>(inputs[1]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            kernels::crop_and_resize(stream, output, input, static_cast<csl::View<T>>(boxes));
+        }
+
     private:
         csl::Stream stream;
     };

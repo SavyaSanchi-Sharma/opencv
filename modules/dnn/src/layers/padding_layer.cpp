@@ -204,6 +204,28 @@ public:
         else
             return make_cuda_node_with_type<cuda4dnn::PaddingOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), ptype, paddingValue, dstRanges);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::PaddingType ptype;
+        if (paddingType == "constant")
+            ptype = PaddingType::CONSTANT;
+        else if (paddingType == "reflect")
+            ptype = PaddingType::REFLECTION101;
+        else
+            CV_Error(Error::StsNotImplemented, "Unsupported padding mode");
+
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::PaddingOp>(std::move(context->stream), ptype, paddingValue, dstRanges);
+        else
+            return make_cuda_node_with_type<cuda4dnn::PaddingOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), ptype, paddingValue, dstRanges);
+    }
 #endif
 
 #ifdef HAVE_CANN

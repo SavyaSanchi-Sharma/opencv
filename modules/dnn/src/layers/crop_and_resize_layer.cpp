@@ -171,6 +171,16 @@ public:
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         return make_cuda_node<cuda4dnn::CropAndResizeOp>(preferableTarget, std::move(context->stream));
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+        return make_cuda_node<cuda4dnn::CropAndResizeOp>(preferableTarget, std::move(context->stream));
+    }
 #endif
 
 private:

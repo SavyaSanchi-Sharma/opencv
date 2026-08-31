@@ -73,6 +73,38 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(const std::vector<UMat>& inputs,
+                     const std::vector<UMat>& outputs,
+                     csl::Workspace& workspace) override {
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto scale = csl::viewOf<T>(inputs[1]);
+            auto bias = csl::viewOf<T>(inputs[2]);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            auto C = input.get_axis_size(1);
+            auto loops = input.size_range(0, 2);
+            auto norm_size = input.size_range(2, input.rank());
+            auto num_groups = this->num_groups;
+            auto group_size = C / num_groups;
+            if (norm_size == 1) {
+                kernels::fill<T>(stream, output, 0.f);
+                return;
+            } else {
+                auto ws_allocator = csl::WorkspaceAllocator(workspace);
+
+                auto mean = ws_allocator.get_span<float>(loops / group_size);
+                kernels::fill<float>(stream, mean, 0.f);
+
+                auto stdev = ws_allocator.get_span<float>(loops / group_size);
+                kernels::fill<float>(stream, stdev, 0.f);
+
+                kernels::reduce_mean_sqr_sum<T>(stream, mean, stdev, input, norm_size * group_size);
+                kernels::compute_normalization_scale(stream, stdev, mean, stdev, norm_size * group_size, epsilon);
+                kernels::normalize_mean_variance_groupwise<T>(stream, output, input, scale, bias, mean, stdev, norm_size, C, num_groups, group_size);
+            }
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:

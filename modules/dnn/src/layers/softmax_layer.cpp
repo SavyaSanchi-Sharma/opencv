@@ -61,6 +61,7 @@ using namespace cv::dnn::ocl4dnn;
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/softmax.hpp"
+#include "../cuda4dnn/primitives/softmax_kernel.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -243,20 +244,21 @@ public:
     }
 
 #ifdef HAVE_CUDA
-    Ptr<BackendNode> initCUDA(
-        void *context_,
-        InputArrayOfArrays inputs_,
-        InputArrayOfArrays
-    ) override
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
     {
-        auto context = reinterpret_cast<csl::CSLContext*>(context_);
-
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
         CV_Assert(!inputs.empty());
-
-        auto channel_axis = normalize_axis(axisRaw, cv::dnn::shape(inputs[0]).dims);
-        return make_cuda_node<cuda4dnn::SoftmaxOp>(preferableTarget, std::move(context->cudnn_handle), channel_axis, logSoftMax);
+        int axis = normalize_axis(axisRaw, cv::dnn::shape(inputs[0]).dims);
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+        // GRAPH_JIT_ONLY does not load the cuDNN ops library, so use the hand-written kernel
+        return make_cuda_node<cuda4dnn::SoftmaxKernelOp>(preferableTarget, std::move(context->stream), axis, logSoftMax);
+#else
+        return make_cuda_node<cuda4dnn::SoftmaxOp>(preferableTarget, std::move(context->cudnn_handle), axis, logSoftMax);
+#endif
     }
 #endif
 
