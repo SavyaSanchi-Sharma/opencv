@@ -939,7 +939,7 @@ struct GeluFunctor : public BaseFunctor {
 
     bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        geluMath(r);
+        fusion::gelu(r);
         return true;
     }
 
@@ -1449,7 +1449,7 @@ struct SigmoidFunctor : public BaseDefaultFunctor<SigmoidFunctor>
 
     bool describeMath(LayerMath& r, const ConstOperand&) const
     {
-        sigmoidMath(r);
+        fusion::sigmoid(r);
         return true;
     }
 

@@ -40,7 +40,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     {
         if (fusion.expr)
             return false;
-        return prepareFusion(expr, fusion);
+        return fusion::prepare(expr, fusion);
     }
 
     MatMulLayerImpl(const LayerParams& params) {
@@ -276,7 +276,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 if (!outs.empty()) {
                     Mat y32;
                     outs[0].convertTo(y32, CV_32F);
-                    applyFusion(fusion, y32);
+                    fusion::apply(fusion, y32);
                     y32.convertTo(outs[0], outs[0].type());
                 }
             }
@@ -370,7 +370,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
-        applyFusion(fusion, Y);
+        fusion::apply(fusion, Y);
     }
 
     // CV_64F: one cv::gemm call per batch slice (batches don't collapse like Gemm's).

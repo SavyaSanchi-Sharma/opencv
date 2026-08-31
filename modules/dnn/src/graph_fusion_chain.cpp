@@ -66,16 +66,6 @@ private:
 
     const vector<Ptr<LayerInfo> >& prog() const { return graph_->prog(); }
 
-    static int internConstArg(ChainCandidate& c, Arg a)
-    {
-        for (size_t k = 0; k < c.constArgs.size(); k++) {
-            if (c.constArgs[k].idx == a.idx)
-                return (int)k;
-        }
-        c.constArgs.push_back(a);
-        return (int)c.constArgs.size() - 1;
-    }
-
     bool isFusableConstArg(Arg a, bool& isScalar, float& scalarVal) const
     {
         if (!net_.isConstArg(a))
@@ -130,10 +120,18 @@ private:
         if (!isFusableConstArg(sideInputs[0], isScalar, scalarVal))
             return false;
         out.hasValue = true;
-        if (isScalar)
+        if (isScalar) {
             out.value = scalarVal;
-        else
-            out.bufferId = internConstArg(c, sideInputs[0]);
+            return true;
+        }
+        for (size_t k = 0; k < c.constArgs.size(); k++) {
+            if (c.constArgs[k].idx == sideInputs[0].idx) {
+                out.bufferId = (int)k;
+                return true;
+            }
+        }
+        c.constArgs.push_back(sideInputs[0]);
+        out.bufferId = (int)c.constArgs.size() - 1;
         return true;
     }
 
@@ -180,8 +178,8 @@ private:
                 break;
             }
 
-            const int next = instantiateMath(arena_, chainRoot, r);
-            if (next < 0 || reachableNodeCount(arena_.graph(), next, reachScratch_) > FUSION_MAX_EXPR_NODES) {
+            const int next = fusion::instantiate(arena_, chainRoot, r);
+            if (next < 0 || fusion::detail::markLive(arena_.graph(), next, reachScratch_) > FUSION_MAX_EXPR_NODES) {
                 c.constArgs.resize(savedSlots);
                 break;
             }
@@ -232,11 +230,6 @@ private:
         }
     }
 
-    Ptr<FusionGraph> expressionAt(int root, const vector<Mat>& bufs) const
-    {
-        return extractExpression(*arenaPtr_, root, bufs);
-    }
-
     void offerChainsToSinks()
     {
         dropped_.assign(prog().size(), false);
@@ -249,7 +242,7 @@ private:
 
             size_t accepted = 0;
             for (size_t n = c.rootAfterStep.size(); n >= 1; n--) {
-                Ptr<FusionGraph> expr = expressionAt(c.rootAfterStep[n - 1], c.constBufs);
+                Ptr<FusionGraph> expr = fusion::extract(*arenaPtr_, c.rootAfterStep[n - 1], c.constBufs);
                 if (!expr)
                     continue;
                 if (sink->tryFuseChain(expr)) {

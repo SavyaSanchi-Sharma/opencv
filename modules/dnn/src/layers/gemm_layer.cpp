@@ -61,7 +61,7 @@ public:
     {
         if (fusion.expr)
             return false;
-        return prepareFusion(expr, fusion);
+        return fusion::prepare(expr, fusion);
     }
 
     GemmLayerImpl(const LayerParams& params) {
@@ -391,7 +391,7 @@ public:
                 if (!outs.empty()) {
                     Mat y32;
                     outs[0].convertTo(y32, CV_32F);
-                    applyFusion(fusion, y32);
+                    fusion::apply(fusion, y32);
                     y32.convertTo(outs[0], outs[0].type());
                 }
             }
@@ -514,7 +514,7 @@ public:
                                     packed_B_mlas.data,
                                     1.f,
                                     Y.ptr<float>(), N)) {
-                    applyFusion(fusion, Y);
+                    fusion::apply(fusion, Y);
                     return;
                 }
             }
@@ -529,7 +529,7 @@ public:
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
-        applyFusion(fusion, Y);
+        fusion::apply(fusion, Y);
     }
 
     // Double-precision analogue of broadcastCWtihBeta() above; not cached (see finalize()).

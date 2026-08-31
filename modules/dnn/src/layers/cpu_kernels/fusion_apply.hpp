@@ -25,7 +25,9 @@ struct PreparedFusion
     std::vector<const float*> channelBufs;     //!< per-channel constants, indexed by bufferId
 };
 
-inline bool matchKnownActivation(const FusionGraph& g, int& activType,
+namespace fusion {
+
+inline bool matchActivation(const FusionGraph& g, int& activType,
                                  std::vector<float>& params)
 {
     const std::vector<FusionNode>& nd = g.nodes();
@@ -61,7 +63,7 @@ inline bool matchKnownActivation(const FusionGraph& g, int& activType,
     }
 
     if (nd.size() == 3 &&
-        nd[1].op == FusionEltwiseOp::CONST && floatBits(nd[1].scalar) == floatBits(0.f) &&
+        nd[1].op == FusionEltwiseOp::CONST && detail::bits(nd[1].scalar) == detail::bits(0.f) &&
         nd[2].op == FusionEltwiseOp::MAX && nd[2].inputs.size() == 2 &&
         nd[2].inputs[0] == 0 && nd[2].inputs[1] == 1) {
         activType = ACTIV_RELU;
@@ -73,13 +75,13 @@ inline bool matchKnownActivation(const FusionGraph& g, int& activType,
     {
         std::vector<std::pair<int, Ptr<FusionGraph> > > v;
         LayerMath r;
-        r = LayerMath(); sigmoidMath(r); v.push_back(std::make_pair(ACTIV_SIGMOID, patternFromMath(r)));
-        r = LayerMath(); geluMath(r);    v.push_back(std::make_pair(ACTIV_GELU,    patternFromMath(r)));
+        r = LayerMath(); sigmoid(r); v.push_back(std::make_pair(ACTIV_SIGMOID, fromMath(r)));
+        r = LayerMath(); gelu(r);    v.push_back(std::make_pair(ACTIV_GELU,    fromMath(r)));
         return v;
     }();
 
     for (size_t i = 0; i < refs.size(); i++) {
-        if (refs[i].second && structurallyEqual(g, *refs[i].second)) {
+        if (refs[i].second && sameGraph(g, *refs[i].second)) {
             activType = refs[i].first;
             params.clear();
             return true;
@@ -88,7 +90,7 @@ inline bool matchKnownActivation(const FusionGraph& g, int& activType,
     return false;
 }
 
-inline bool prepareFusion(const Ptr<FusionGraph>& expr, PreparedFusion& out)
+inline bool prepare(const Ptr<FusionGraph>& expr, PreparedFusion& out)
 {
     if (!expr || expr->size() == 0)
         return false;
@@ -104,7 +106,7 @@ inline bool prepareFusion(const Ptr<FusionGraph>& expr, PreparedFusion& out)
     prepared.expr = expr;
 
     int activType = ACTIV_NONE;
-    if (matchKnownActivation(*expr, activType, prepared.activationParams)) {
+    if (matchActivation(*expr, activType, prepared.activationParams)) {
         prepared.activationFn = getActivationFunc(activType);
         if (prepared.activationFn) {
             out = prepared;
@@ -135,7 +137,7 @@ inline bool prepareFusion(const Ptr<FusionGraph>& expr, PreparedFusion& out)
     return true;
 }
 
-inline void applyFusion(const PreparedFusion& a, Mat& Y)
+inline void apply(const PreparedFusion& a, Mat& Y)
 {
     if (!a.expr)
         return;
@@ -168,11 +170,13 @@ inline void applyFusion(const PreparedFusion& a, Mat& Y)
     parallel_for_(Range(0, (int)n), [&](const Range& r) {
         int c = r.start % nch;
         for (int k = r.start; k < r.end; k++) {
-            p[k] = evalFusionGraph(g, p[k], bufs, c);
+            p[k] = eval(g, p[k], bufs, c);
             if (++c == nch) c = 0;
         }
     });
 }
+
+} // namespace fusion
 
 CV__DNN_INLINE_NS_END
 }} // namespace cv::dnn

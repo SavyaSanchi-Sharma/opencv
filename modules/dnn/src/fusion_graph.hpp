@@ -40,7 +40,9 @@ enum class FusionEltwiseOp
     RECIP = 13
 };
 
-inline int operandCount(FusionEltwiseOp op)
+namespace fusion { namespace detail {
+
+inline int arity(FusionEltwiseOp op)
 {
     switch (op) {
     case FusionEltwiseOp::INPUT:
@@ -64,7 +66,9 @@ inline int operandCount(FusionEltwiseOp op)
     CV_Error(Error::StsBadArg, "DNN/fusion: unknown FusionEltwiseOp");
 }
 
-inline unsigned floatBits(float f) { Cv32suf s; s.f = f; return s.u; }
+inline unsigned bits(float f) { Cv32suf s; s.f = f; return s.u; }
+
+}} // namespace fusion::detail
 
 /** @brief The constant operand(s) a layer has alongside the value flowing into it,
  *  e.g. the 3 in `x + 3`, or Clip's two bounds. A layer with none gets hasValue false.
@@ -116,13 +120,13 @@ struct LayerMath
 
     int unary(FusionEltwiseOp op, int operand)
     {
-        CV_Assert(operandCount(op) == 1);
+        CV_Assert(fusion::detail::arity(op) == 1);
         return appendNode(op, operand, INPUT_VALUE, 0.f, 0.f, -1);
     }
 
     int binary(FusionEltwiseOp op, int left, int right)
     {
-        CV_Assert(operandCount(op) == 2);
+        CV_Assert(fusion::detail::arity(op) == 2);
         return appendNode(op, left, right, 0.f, 0.f, -1);
     }
 
@@ -147,7 +151,9 @@ private:
 // Sigmoid and Gelu are each built twice - by their own layer, and by the
 // reference table matchKnownActivation compares against - and the two have to
 // emit nodes in the same order, so they share one definition.
-inline void sigmoidMath(LayerMath& r)
+namespace fusion {
+
+inline void sigmoid(LayerMath& r)
 {
     const int one      = r.constant(1.f);
     const int minusOne = r.constant(-1.f);
@@ -157,7 +163,7 @@ inline void sigmoidMath(LayerMath& r)
     r.unary(FusionEltwiseOp::RECIP, denom);
 }
 
-inline void geluMath(LayerMath& r)
+inline void gelu(LayerMath& r)
 {
     const int half     = r.constant(0.5f);
     const int one      = r.constant(1.f);
@@ -168,6 +174,8 @@ inline void geluMath(LayerMath& r)
     const int halfX    = r.binary(FusionEltwiseOp::MUL, half, LayerMath::INPUT_VALUE);
     r.binary(FusionEltwiseOp::MUL, halfX, gate);
 }
+
+} // namespace fusion
 
 struct FusionNode
 {
@@ -180,8 +188,8 @@ struct FusionNode
     bool operator==(const FusionNode& o) const noexcept
     {
         return op == o.op && inputs == o.inputs
-            && floatBits(scalar)  == floatBits(o.scalar)
-            && floatBits(scalar2) == floatBits(o.scalar2)
+            && fusion::detail::bits(scalar)  == fusion::detail::bits(o.scalar)
+            && fusion::detail::bits(scalar2) == fusion::detail::bits(o.scalar2)
             && constBufferId   == o.constBufferId;
     }
 };
@@ -192,8 +200,8 @@ struct FusionNodeHash
     {
         size_t h = std::hash<int>()((int)n.op);
         for (int i : n.inputs) h = h * 1000003u ^ (size_t)i;
-        h = h * 1000003u ^ (size_t)floatBits(n.scalar);
-        h = h * 1000003u ^ (size_t)floatBits(n.scalar2);
+        h = h * 1000003u ^ (size_t)fusion::detail::bits(n.scalar);
+        h = h * 1000003u ^ (size_t)fusion::detail::bits(n.scalar2);
         h = h * 1000003u ^ (size_t)n.constBufferId;
         return h;
     }
@@ -228,7 +236,7 @@ public:
                    float scalar2 = 0.f, int constBufferId = -1)
     {
         CV_Assert((gp_->size() == 0) == (op == FusionEltwiseOp::INPUT));
-        CV_Assert((int)inputs.size() == operandCount(op));
+        CV_Assert((int)inputs.size() == fusion::detail::arity(op));
         CV_DbgAssert(gp_->size() < (size_t)FUSION_MAX_ARENA_NODES);
         for (int i : inputs)
             CV_Assert(i >= 0 && i < (int)gp_->size());
@@ -274,7 +282,9 @@ private:
     std::unordered_map<FusionNode, int, FusionNodeHash> interned_;
 };
 
-inline int instantiateMath(FusionGraphBuilder& builder, int inputNode,
+namespace fusion {
+
+inline int instantiate(FusionGraphBuilder& builder, int inputNode,
                              const LayerMath& math)
 {
     if (inputNode < 0 || math.nodeCount() <= 0)
@@ -283,7 +293,7 @@ inline int instantiateMath(FusionGraphBuilder& builder, int inputNode,
     int graphIndex[FUSION_MAX_MATH_NODES];
     for (int i = 0; i < math.nodeCount(); i++) {
         const LayerMathNode& nd = math.nodeAt(i);
-        const int k = operandCount(nd.op);
+        const int k = detail::arity(nd.op);
         std::vector<int> inputs;
         inputs.reserve((size_t)k);
         if (k >= 1) inputs.push_back(nd.left  < 0 ? inputNode : graphIndex[nd.left]);
@@ -293,7 +303,7 @@ inline int instantiateMath(FusionGraphBuilder& builder, int inputNode,
     return graphIndex[math.nodeCount() - 1];
 }
 
-inline bool structurallyEqual(const FusionGraph& a, const FusionGraph& b,
+inline bool sameGraph(const FusionGraph& a, const FusionGraph& b,
                               int rootA = -1, int rootB = -1)
 {
     if (rootA < 0 || rootB < 0) {
@@ -306,9 +316,9 @@ inline bool structurallyEqual(const FusionGraph& a, const FusionGraph& b,
     const FusionNode& nb = b.nodes()[rootB];
     if (na.op != nb.op || na.inputs.size() != nb.inputs.size())
         return false;
-    if (floatBits(na.scalar) != floatBits(nb.scalar))
+    if (detail::bits(na.scalar) != detail::bits(nb.scalar))
         return false;
-    if (floatBits(na.scalar2) != floatBits(nb.scalar2))
+    if (detail::bits(na.scalar2) != detail::bits(nb.scalar2))
         return false;
     if (na.constBufferId != nb.constBufferId)
         return false;
@@ -318,20 +328,20 @@ inline bool structurallyEqual(const FusionGraph& a, const FusionGraph& b,
     if (na.inputs.size() == 2 &&
         (na.op == FusionEltwiseOp::ADD || na.op == FusionEltwiseOp::MUL ||
          na.op == FusionEltwiseOp::MAX || na.op == FusionEltwiseOp::MIN)) {
-        if (structurallyEqual(a, b, na.inputs[0], nb.inputs[0]) &&
-            structurallyEqual(a, b, na.inputs[1], nb.inputs[1]))
+        if (sameGraph(a, b, na.inputs[0], nb.inputs[0]) &&
+            sameGraph(a, b, na.inputs[1], nb.inputs[1]))
             return true;
-        return structurallyEqual(a, b, na.inputs[0], nb.inputs[1]) &&
-               structurallyEqual(a, b, na.inputs[1], nb.inputs[0]);
+        return sameGraph(a, b, na.inputs[0], nb.inputs[1]) &&
+               sameGraph(a, b, na.inputs[1], nb.inputs[0]);
     }
     for (size_t k = 0; k < na.inputs.size(); k++) {
-        if (!structurallyEqual(a, b, na.inputs[k], nb.inputs[k]))
+        if (!sameGraph(a, b, na.inputs[k], nb.inputs[k]))
             return false;
     }
     return true;
 }
 
-inline float evalFusionGraph(const FusionGraph& g, float x,
+inline float eval(const FusionGraph& g, float x,
                              const std::vector<const float*>& constBufs, int channelIdx)
 {
     const std::vector<FusionNode>& nodes = g.nodes();
@@ -371,30 +381,29 @@ inline float evalFusionGraph(const FusionGraph& g, float x,
     return v[out];
 }
 
-inline void markReachableNodes(const FusionGraph& g, int root, std::vector<char>& live)
+namespace detail {
+
+inline int markLive(const FusionGraph& g, int root, std::vector<char>& live)
 {
     const std::vector<FusionNode>& nodes = g.nodes();
     CV_Assert(root >= 0 && root < (int)nodes.size());
     live.assign((size_t)root + 1, 0);
     live[root] = 1;
+    int nlive = 0;
     for (int i = root; i >= 0; i--) {
         if (!live[i]) continue;
+        nlive++;
         for (int in : nodes[i].inputs) {
             CV_DbgAssert(in >= 0 && in < i);
             live[in] = 1;
         }
     }
+    return nlive;
 }
 
-inline int reachableNodeCount(const FusionGraph& g, int root, std::vector<char>& scratch)
-{
-    markReachableNodes(g, root, scratch);
-    int n = 0;
-    for (char c : scratch) n += c ? 1 : 0;
-    return n;
-}
+} // namespace detail
 
-inline Ptr<FusionGraph> extractExpression(const FusionGraph& arena, int root,
+inline Ptr<FusionGraph> extract(const FusionGraph& arena, int root,
                                           const std::vector<Mat>& constBufs)
 {
     const std::vector<FusionNode>& src = arena.nodes();
@@ -402,7 +411,7 @@ inline Ptr<FusionGraph> extractExpression(const FusionGraph& arena, int root,
         return Ptr<FusionGraph>();
 
     std::vector<char> live;
-    markReachableNodes(arena, root, live);
+    detail::markLive(arena, root, live);
     CV_DbgAssert(src[0].op == FusionEltwiseOp::INPUT);
     if (!live[0])
         return Ptr<FusionGraph>();
@@ -448,15 +457,17 @@ inline Ptr<FusionGraph> extractExpression(const FusionGraph& arena, int root,
     return g;
 }
 
-inline Ptr<FusionGraph> patternFromMath(const LayerMath& math)
+inline Ptr<FusionGraph> fromMath(const LayerMath& math)
 {
     FusionGraphBuilder b;
     const int in = b.internNode(FusionEltwiseOp::INPUT, {});
-    const int root = instantiateMath(b, in, math);
+    const int root = instantiate(b, in, math);
     if (root < 0)
         return Ptr<FusionGraph>();
-    return extractExpression(b.graph(), root, std::vector<Mat>());
+    return extract(b.graph(), root, std::vector<Mat>());
 }
+
+} // namespace fusion
 
 CV__DNN_INLINE_NS_END
 }} // namespace cv::dnn

@@ -363,14 +363,14 @@ public:
 
         FastActivation act = FAST_ACTIV_NONE;
         std::vector<float> ap;
-        if (nd[cur].op == FusionEltwiseOp::CLAMP && floatBits(nd[cur].scalar) == floatBits(0.f)) {
+        if (nd[cur].op == FusionEltwiseOp::CLAMP && fusion::detail::bits(nd[cur].scalar) == fusion::detail::bits(0.f)) {
             act = FAST_ACTIV_CLIP;
             ap.assign(2, 0.f);
             ap[1] = nd[cur].scalar2;
             cur = nd[cur].inputs[0];
         } else if (nd[cur].op == FusionEltwiseOp::MAX && nd[cur].inputs.size() == 2 &&
                    nd[nd[cur].inputs[1]].op == FusionEltwiseOp::CONST &&
-                   floatBits(nd[nd[cur].inputs[1]].scalar) == floatBits(0.f)) {
+                   fusion::detail::bits(nd[nd[cur].inputs[1]].scalar) == fusion::detail::bits(0.f)) {
             act = FAST_ACTIV_RELU;
             cur = nd[cur].inputs[0];
         }
