@@ -6,7 +6,7 @@
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
-#include "fusion_graph.hpp"
+#include "adjacency_graph.hpp"
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -48,7 +48,7 @@ public:
         if (chains_.empty())
             return false;
         freezeArena();
-        offerChainsToSinks();
+        fuseLongestChains();
         if (nfused_ == 0)
             return false;
         dropAbsorbedLayers();
@@ -62,6 +62,9 @@ private:
         vector<Arg> constArgs;
         vector<int> rootAfterStep;
         vector<Mat> constBufs;
+        ActivationFunc singleStepKernel = nullptr;
+        float singleStepKernelParams[LayerMath::MAX_KERNEL_PARAMS] = { 0.f, 0.f, 0.f, 0.f };
+        int   singleStepKernelParamCount = 0;
     };
 
     const vector<Ptr<LayerInfo> >& prog() const { return graph_->prog(); }
@@ -140,7 +143,7 @@ private:
         LayerMath r;
         ConstOperand anyConstant;
         anyConstant.hasValue = true;
-        return l->describeMath(r, anyConstant);
+        return l->unfoldOp(r, anyConstant);
     }
 
     void growChain(size_t anchor, ChainCandidate& c)
@@ -173,7 +176,7 @@ private:
             const size_t savedSlots = c.constArgs.size();
             ConstOperand side;
             LayerMath r;
-            if (!readConstOperand(L, curArg, c, side) || !l->describeMath(r, side)) {
+            if (!readConstOperand(L, curArg, c, side) || !l->unfoldOp(r, side)) {
                 c.constArgs.resize(savedSlots);
                 break;
             }
@@ -185,6 +188,12 @@ private:
             }
 
             CV_DbgAssert(next > chainRoot);
+            if (c.rootAfterStep.empty()) {
+                c.singleStepKernel = r.kernel;
+                c.singleStepKernelParamCount = r.kernelParamCount;
+                for (int q = 0; q < r.kernelParamCount; q++)
+                    c.singleStepKernelParams[q] = r.kernelParams[q];
+            }
             chainRoot = next;
             c.rootAfterStep.push_back(next);
             c.layerIdx.push_back(j);
@@ -230,7 +239,7 @@ private:
         }
     }
 
-    void offerChainsToSinks()
+    void fuseLongestChains()
     {
         dropped_.assign(prog().size(), false);
 
@@ -242,10 +251,16 @@ private:
 
             size_t accepted = 0;
             for (size_t n = c.rootAfterStep.size(); n >= 1; n--) {
-                Ptr<FusionGraph> expr = fusion::extract(*arenaPtr_, c.rootAfterStep[n - 1], c.constBufs);
+                Ptr<AdjacencyGraph> expr = fusion::extract(*arenaPtr_, c.rootAfterStep[n - 1], c.constBufs);
                 if (!expr)
                     continue;
-                if (sink->tryFuseChain(expr)) {
+                if (n == 1) {
+                    expr->kernel = c.singleStepKernel;
+                    expr->kernelParamCount = c.singleStepKernelParamCount;
+                    for (int q = 0; q < c.singleStepKernelParamCount; q++)
+                        expr->kernelParams[q] = c.singleStepKernelParams[q];
+                }
+                if (sink->tryAbsorbMath(expr)) {
                     accepted = n;
                     break;
                 }
@@ -287,8 +302,8 @@ private:
     const Ptr<Graph>& graph_;
     const vector<int>& usecounts_;
 
-    FusionGraphBuilder arena_;
-    Ptr<FusionGraph>   arenaPtr_;
+    AdjacencyGraphBuilder arena_;
+    Ptr<AdjacencyGraph>   arenaPtr_;
     vector<int>        firstConsumer_;
     vector<bool>       claimed_, dropped_;
     vector<ChainCandidate>  chains_;

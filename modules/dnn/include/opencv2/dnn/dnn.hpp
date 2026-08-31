@@ -64,7 +64,7 @@ CV__DNN_INLINE_NS_BEGIN
 
     //! Fusion IR, defined in dnn/src/fusion_graph.hpp. Only the two Layer
     //! virtuals below refer to these, and only by reference.
-    class FusionGraph;
+    class AdjacencyGraph;
     struct LayerMath;
     struct ConstOperand;
 
@@ -528,7 +528,7 @@ CV__DNN_INLINE_NS_BEGIN
          *  @return false if the layer cannot be expressed, which also means it can
          *          never be absorbed. Default: false.
          */
-        virtual bool describeMath(LayerMath& out, const ConstOperand& side) const;
+        virtual bool unfoldOp(LayerMath& out, const ConstOperand& side) const;
 
         /** @brief Offers a trailing expression for this layer to absorb into its own
          *  computation. The layer decides; refusing is always safe.
@@ -538,7 +538,7 @@ CV__DNN_INLINE_NS_BEGIN
          *  @return true if the expression was taken on, in which case the layer is now
          *          responsible for computing it. Default: false.
          */
-        virtual bool tryFuseChain(const Ptr<FusionGraph>& expr);
+        virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr);
 
         CV_PROP int preferableTarget; //!< prefer target for layer forwarding
 

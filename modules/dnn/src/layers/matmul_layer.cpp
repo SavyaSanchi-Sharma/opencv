@@ -36,11 +36,9 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
  public:
     PreparedFusion fusion;
 
-    virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
+    virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
     {
-        if (fusion.expr)
-            return false;
-        return fusion::prepare(expr, fusion);
+        return fusion.take(expr);
     }
 
     MatMulLayerImpl(const LayerParams& params) {
@@ -276,7 +274,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 if (!outs.empty()) {
                     Mat y32;
                     outs[0].convertTo(y32, CV_32F);
-                    fusion::apply(fusion, y32);
+                    fusion.run(y32);
                     y32.convertTo(outs[0], outs[0].type());
                 }
             }
@@ -370,7 +368,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
                           b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
         }
-        fusion::apply(fusion, Y);
+        fusion.run(Y);
     }
 
     // CV_64F: one cv::gemm call per batch slice (batches don't collapse like Gemm's).

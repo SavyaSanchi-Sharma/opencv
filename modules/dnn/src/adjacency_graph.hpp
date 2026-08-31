@@ -4,14 +4,14 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-#ifndef __OPENCV_DNN_SRC_FUSION_GRAPH_HPP__
-#define __OPENCV_DNN_SRC_FUSION_GRAPH_HPP__
+#ifndef __OPENCV_DNN_SRC_ADJACENCY_GRAPH_HPP__
+#define __OPENCV_DNN_SRC_ADJACENCY_GRAPH_HPP__
 
 #include <cmath>
 #include <unordered_map>
 #include <vector>
 #include <opencv2/core.hpp>
-#include "opencv2/dnn/version.hpp"
+#include "opencv2/dnn/all_layers.hpp"   // ActivationFunc
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -100,6 +100,24 @@ struct LayerMathNode
 struct LayerMath
 {
     enum { INPUT_VALUE = -1 };
+
+    enum { MAX_KERNEL_PARAMS = 4 };
+
+    //! The layer's own kernel for exactly this math, when it has one. A backend that
+    //! also has it can run it directly instead of walking the decomposed form.
+    ActivationFunc kernel = nullptr;
+    float kernelParams[MAX_KERNEL_PARAMS] = { 0.f, 0.f, 0.f, 0.f };
+    int   kernelParamCount = 0;
+
+    void setKernel(ActivationFunc fn, const std::vector<float>& params)
+    {
+        if (params.size() > (size_t)MAX_KERNEL_PARAMS)
+            return;
+        kernel = fn;
+        kernelParamCount = (int)params.size();
+        for (int i = 0; i < kernelParamCount; i++)
+            kernelParams[i] = params[i];
+    }
 
     int nodeCount() const { return nodeCount_; }
     const LayerMathNode& nodeAt(int i) const
@@ -207,13 +225,18 @@ struct FusionNodeHash
     }
 };
 
-class FusionGraph
+class AdjacencyGraph
 {
 public:
     const std::vector<FusionNode>& nodes() const { return nodes_; }
     size_t size() const { return nodes_.size(); }
     int outputNode = -1;
     std::vector<Mat> constBufs;
+
+    //! Set when this whole expression is one layer that already has a kernel.
+    ActivationFunc kernel = nullptr;
+    float kernelParams[LayerMath::MAX_KERNEL_PARAMS] = { 0.f, 0.f, 0.f, 0.f };
+    int   kernelParamCount = 0;
 
 private:
     std::vector<FusionNode> nodes_;
@@ -222,13 +245,13 @@ private:
         nodes_.push_back(std::move(n));
         return (int)nodes_.size() - 1;
     }
-    friend class FusionGraphBuilder;
+    friend class AdjacencyGraphBuilder;
 };
 
-class FusionGraphBuilder
+class AdjacencyGraphBuilder
 {
 public:
-    FusionGraphBuilder() : gp_(makePtr<FusionGraph>()) {}
+    AdjacencyGraphBuilder() : gp_(makePtr<AdjacencyGraph>()) {}
 
     /** @brief Adds one node, reusing an identical existing one if there is
      *  already one in this graph. Returns the node's index either way. */
@@ -265,9 +288,9 @@ public:
     }
 
     size_t size() const { return gp_->size(); }
-    const FusionGraph& graph() const { return *gp_; }
+    const AdjacencyGraph& graph() const { return *gp_; }
 
-    Ptr<FusionGraph> finish(int output)
+    Ptr<AdjacencyGraph> finish(int output)
     {
         CV_Assert(output == (int)gp_->size() - 1);
         gp_->outputNode = output;
@@ -275,16 +298,16 @@ public:
     }
 
     //! The graph as built so far; the builder keeps writing to it.
-    Ptr<FusionGraph> sharedGraph() { return gp_; }
+    Ptr<AdjacencyGraph> sharedGraph() { return gp_; }
 
 private:
-    Ptr<FusionGraph> gp_;
+    Ptr<AdjacencyGraph> gp_;
     std::unordered_map<FusionNode, int, FusionNodeHash> interned_;
 };
 
 namespace fusion {
 
-inline int instantiate(FusionGraphBuilder& builder, int inputNode,
+inline int instantiate(AdjacencyGraphBuilder& builder, int inputNode,
                              const LayerMath& math)
 {
     if (inputNode < 0 || math.nodeCount() <= 0)
@@ -303,7 +326,7 @@ inline int instantiate(FusionGraphBuilder& builder, int inputNode,
     return graphIndex[math.nodeCount() - 1];
 }
 
-inline bool sameGraph(const FusionGraph& a, const FusionGraph& b,
+inline bool sameGraph(const AdjacencyGraph& a, const AdjacencyGraph& b,
                               int rootA = -1, int rootB = -1)
 {
     if (rootA < 0 || rootB < 0) {
@@ -341,7 +364,7 @@ inline bool sameGraph(const FusionGraph& a, const FusionGraph& b,
     return true;
 }
 
-inline float evalElement(const FusionGraph& g, float x,
+inline float evalElement(const AdjacencyGraph& g, float x,
                              const std::vector<const float*>& constBufs, int channelIdx)
 {
     const std::vector<FusionNode>& nodes = g.nodes();
@@ -383,7 +406,7 @@ inline float evalElement(const FusionGraph& g, float x,
 
 namespace detail {
 
-inline int markLive(const FusionGraph& g, int root, std::vector<char>& live)
+inline int markLive(const AdjacencyGraph& g, int root, std::vector<char>& live)
 {
     const std::vector<FusionNode>& nodes = g.nodes();
     CV_Assert(root >= 0 && root < (int)nodes.size());
@@ -403,21 +426,21 @@ inline int markLive(const FusionGraph& g, int root, std::vector<char>& live)
 
 } // namespace detail
 
-inline Ptr<FusionGraph> extract(const FusionGraph& arena, int root,
+inline Ptr<AdjacencyGraph> extract(const AdjacencyGraph& arena, int root,
                                           const std::vector<Mat>& constBufs)
 {
     const std::vector<FusionNode>& src = arena.nodes();
     if (root < 0 || root >= (int)src.size())
-        return Ptr<FusionGraph>();
+        return Ptr<AdjacencyGraph>();
 
     std::vector<char> live;
     detail::markLive(arena, root, live);
     CV_DbgAssert(src[0].op == FusionEltwiseOp::INPUT);
     if (!live[0])
-        return Ptr<FusionGraph>();
+        return Ptr<AdjacencyGraph>();
 
     std::vector<int> remap(live.size(), -1);
-    FusionGraphBuilder out;
+    AdjacencyGraphBuilder out;
     remap[0] = out.internNode(FusionEltwiseOp::INPUT, {});
 
     std::vector<int> pending(1, root);
@@ -440,30 +463,30 @@ inline Ptr<FusionGraph> extract(const FusionGraph& arena, int root,
         pending.pop_back();
 
         if (out.size() >= (size_t)FUSION_MAX_EXPR_NODES)
-            return Ptr<FusionGraph>();
+            return Ptr<AdjacencyGraph>();
         if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST &&
             (n.constBufferId < 0 || n.constBufferId >= (int)constBufs.size()))
-            return Ptr<FusionGraph>();
+            return Ptr<AdjacencyGraph>();
         std::vector<int> ins(n.inputs.size());
         for (size_t k = 0; k < ins.size(); k++)
             ins[k] = remap[n.inputs[k]];
         remap[i] = out.internNode(n.op, ins, n.scalar, n.scalar2, n.constBufferId);
     }
     if (remap[root] != (int)out.size() - 1)
-        return Ptr<FusionGraph>();
+        return Ptr<AdjacencyGraph>();
 
-    Ptr<FusionGraph> g = out.finish(remap[root]);
+    Ptr<AdjacencyGraph> g = out.finish(remap[root]);
     g->constBufs = constBufs;
     return g;
 }
 
-inline Ptr<FusionGraph> fromMath(const LayerMath& math)
+inline Ptr<AdjacencyGraph> fromMath(const LayerMath& math)
 {
-    FusionGraphBuilder b;
+    AdjacencyGraphBuilder b;
     const int in = b.internNode(FusionEltwiseOp::INPUT, {});
     const int root = instantiate(b, in, math);
     if (root < 0)
-        return Ptr<FusionGraph>();
+        return Ptr<AdjacencyGraph>();
     return extract(b.graph(), root, std::vector<Mat>());
 }
 

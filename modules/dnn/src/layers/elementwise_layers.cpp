@@ -42,7 +42,7 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
-#include "../fusion_graph.hpp"
+#include "../adjacency_graph.hpp"
 #include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
@@ -414,9 +414,14 @@ public:
         return func.getActivationFunc(depth, activParams);
     }
 
-    bool describeMath(LayerMath& out, const ConstOperand& side) const CV_OVERRIDE
+    bool unfoldOp(LayerMath& out, const ConstOperand& side) const CV_OVERRIDE
     {
-        return func.describeMath(out, side);
+        if (!func.unfoldOp(out, side))
+            return false;
+        std::vector<float> params;
+        if (ActivationFunc fn = func.getActivationFunc(CV_32F, params))
+            out.setKernel(fn, params);
+        return true;
     }
 
 #ifdef HAVE_CUDA
@@ -468,7 +473,7 @@ struct BaseFunctor
     ActivationFunc getActivationFunc(int /*depth*/, std::vector<float>& /*activParams*/) const
     { return nullptr; }
 
-    bool describeMath(LayerMath&, const ConstOperand&) const { return false; }
+    bool unfoldOp(LayerMath&, const ConstOperand&) const { return false; }
 };
 
 struct ReLUFunctor : public BaseFunctor
@@ -485,7 +490,7 @@ struct ReLUFunctor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_RELU);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         if (slope != 0.f) return false;
         const int zero = r.constant(0.f);
@@ -672,7 +677,7 @@ struct ReLU6Functor : public BaseFunctor
         return cv::dnn::getActivationFunc(ACTIV_CLIP);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         r.clamp(LayerMath::INPUT_VALUE, minValue, maxValue);
         return true;
@@ -937,7 +942,7 @@ struct GeluFunctor : public BaseFunctor {
         return cv::dnn::getActivationFunc(ACTIV_GELU);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         fusion::gelu(r);
         return true;
@@ -1137,7 +1142,7 @@ struct TanHFunctor : public BaseDefaultFunctor<TanHFunctor>
         return cv::dnn::getActivationFunc(ACTIV_TANH);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         r.unary(FusionEltwiseOp::TANH, LayerMath::INPUT_VALUE);
         return true;
@@ -1447,7 +1452,7 @@ struct SigmoidFunctor : public BaseDefaultFunctor<SigmoidFunctor>
         return cv::dnn::getActivationFunc(ACTIV_SIGMOID);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         fusion::sigmoid(r);
         return true;
@@ -1983,7 +1988,7 @@ struct SqrtFunctor : public BaseDefaultFunctor<SqrtFunctor>
         return sqrt(x);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
         return true;
@@ -2378,7 +2383,7 @@ struct ErfFunctor : public BaseDefaultFunctor<ErfFunctor>
         return cv::dnn::getActivationFunc(ACTIV_ERF);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         r.unary(FusionEltwiseOp::ERF, LayerMath::INPUT_VALUE);
         return true;
@@ -3213,7 +3218,7 @@ struct ExpFunctor : public BaseDefaultFunctor<ExpFunctor>
         return cv::dnn::getActivationFunc(ACTIV_EXP);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         int x = LayerMath::INPUT_VALUE;
         if (normScale != 1.f) {
@@ -3615,7 +3620,7 @@ struct ReciprocalFunctor : public BaseDefaultFunctor<ReciprocalFunctor>
         return 1.f/x;
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand&) const
+    bool unfoldOp(LayerMath& r, const ConstOperand&) const
     {
         r.unary(FusionEltwiseOp::RECIP, LayerMath::INPUT_VALUE);
         return true;

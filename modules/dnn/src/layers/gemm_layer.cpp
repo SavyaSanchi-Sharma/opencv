@@ -57,11 +57,9 @@ public:
 
     PreparedFusion fusion;
 
-    virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
+    virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
     {
-        if (fusion.expr)
-            return false;
-        return fusion::prepare(expr, fusion);
+        return fusion.take(expr);
     }
 
     GemmLayerImpl(const LayerParams& params) {
@@ -391,7 +389,7 @@ public:
                 if (!outs.empty()) {
                     Mat y32;
                     outs[0].convertTo(y32, CV_32F);
-                    fusion::apply(fusion, y32);
+                    fusion.run(y32);
                     y32.convertTo(outs[0], outs[0].type());
                 }
             }
@@ -514,7 +512,7 @@ public:
                                     packed_B_mlas.data,
                                     1.f,
                                     Y.ptr<float>(), N)) {
-                    fusion::apply(fusion, Y);
+                    fusion.run(Y);
                     return;
                 }
             }
@@ -529,7 +527,7 @@ public:
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
-        fusion::apply(fusion, Y);
+        fusion.run(Y);
     }
 
     // Double-precision analogue of broadcastCWtihBeta() above; not cached (see finalize()).

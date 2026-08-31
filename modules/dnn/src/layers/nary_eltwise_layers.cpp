@@ -11,7 +11,7 @@
 #undef CV_CPU_DISPATCH_MODES_ALL
 
 #include "../net_impl.hpp"
-#include "../fusion_graph.hpp"
+#include "../adjacency_graph.hpp"
 #include "layers_common.hpp"
 #include "../op_cuda.hpp"
 #include "../op_cann.hpp"
@@ -189,7 +189,7 @@ class NaryEltwiseLayerImpl CV_FINAL : public NaryEltwiseLayer
 public:
     std::string operation;
 
-    bool describeMath(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
+    bool unfoldOp(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
     {
         if (!side.hasValue) return false;
         if (inputs.size() != 2) return false;

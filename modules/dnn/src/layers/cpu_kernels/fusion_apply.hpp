@@ -9,7 +9,7 @@
 
 #include "opencv2/core.hpp"
 #include "opencv2/dnn/all_layers.hpp"
-#include "../../fusion_graph.hpp"
+#include "../../adjacency_graph.hpp"
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -19,15 +19,20 @@ CV__DNN_INLINE_NS_BEGIN
  */
 struct PreparedFusion
 {
-    Ptr<FusionGraph> expr;                     //!< set once prepared, either way
+    Ptr<AdjacencyGraph> expr;                     //!< set once prepared, either way
     ActivationFunc activationFn = nullptr;     //!< non-null picks the fast kernel
     std::vector<float> activationParams;       //!< arguments for activationFn
     std::vector<const float*> channelBufs;     //!< per-channel constants, indexed by bufferId
+
+    //! Takes on `e` if this can run it. Refusing leaves the object untouched.
+    bool take(const Ptr<AdjacencyGraph>& e);
+    //! Runs the taken math over a layer's output. Called on every inference.
+    void run(Mat& Y) const;
 };
 
 namespace fusion {
 
-inline bool matchActivation(const FusionGraph& g, int& activType,
+inline bool matchActivation(const AdjacencyGraph& g, int& activType,
                                  std::vector<float>& params)
 {
     const std::vector<FusionNode>& nd = g.nodes();
@@ -71,9 +76,9 @@ inline bool matchActivation(const FusionGraph& g, int& activType,
         return true;
     }
 
-    static const std::vector<std::pair<int, Ptr<FusionGraph> > > refs = []
+    static const std::vector<std::pair<int, Ptr<AdjacencyGraph> > > refs = []
     {
-        std::vector<std::pair<int, Ptr<FusionGraph> > > v;
+        std::vector<std::pair<int, Ptr<AdjacencyGraph> > > v;
         LayerMath r;
         r = LayerMath(); sigmoid(r); v.push_back(std::make_pair(ACTIV_SIGMOID, fromMath(r)));
         r = LayerMath(); gelu(r);    v.push_back(std::make_pair(ACTIV_GELU,    fromMath(r)));
@@ -90,56 +95,70 @@ inline bool matchActivation(const FusionGraph& g, int& activType,
     return false;
 }
 
-inline bool prepare(const Ptr<FusionGraph>& expr, PreparedFusion& out)
+} // namespace fusion
+
+inline bool PreparedFusion::take(const Ptr<AdjacencyGraph>& e)
 {
-    if (!expr || expr->size() == 0)
+    if (expr)
         return false;
-    if (expr->outputNode != (int)expr->size() - 1)
+    if (!e || e->size() == 0)
         return false;
-    if (expr->size() > (size_t)FUSION_MAX_EXPR_NODES)
+    if (e->outputNode != (int)e->size() - 1)
+        return false;
+    if (e->size() > (size_t)FUSION_MAX_EXPR_NODES)
         return false;
 
     // Built aside and assigned only on success: a caller that refuses must be left
     // exactly as it was, or its later shorter offers get rejected by its own guard
     // and forward() runs math the layer never took on.
     PreparedFusion prepared;
-    prepared.expr = expr;
+    prepared.expr = e;
+
+    // The layer may already own a kernel for exactly this math; use it rather than
+    // decomposing and then recognising the pieces again.
+    if (e->kernel) {
+        prepared.activationFn = e->kernel;
+        prepared.activationParams.assign(e->kernelParams,
+                                         e->kernelParams + e->kernelParamCount);
+        *this = prepared;
+        return true;
+    }
 
     int activType = ACTIV_NONE;
-    if (matchActivation(*expr, activType, prepared.activationParams)) {
+    if (fusion::matchActivation(*e, activType, prepared.activationParams)) {
         prepared.activationFn = getActivationFunc(activType);
         if (prepared.activationFn) {
-            out = prepared;
+            *this = prepared;
             return true;
         }
     }
 
     prepared.activationFn = nullptr;
     prepared.activationParams.clear();
-    prepared.channelBufs.resize(expr->constBufs.size());
-    for (size_t i = 0; i < expr->constBufs.size(); i++) {
-        const Mat& m = expr->constBufs[i];
+    prepared.channelBufs.resize(e->constBufs.size());
+    for (size_t i = 0; i < e->constBufs.size(); i++) {
+        const Mat& m = e->constBufs[i];
         if (m.empty() || m.type() != CV_32F || !m.isContinuous())
             return false;
         prepared.channelBufs[i] = m.ptr<float>();
     }
-    for (const FusionNode& n : expr->nodes()) {
+    for (const FusionNode& n : e->nodes()) {
         if (n.op != FusionEltwiseOp::PER_CHANNEL_CONST)
             continue;
         if (n.constBufferId < 0 || n.constBufferId >= (int)prepared.channelBufs.size())
             return false;
-        const Mat& m = expr->constBufs[n.constBufferId];
+        const Mat& m = e->constBufs[n.constBufferId];
         if (m.dims < 1 || (int)m.total() != m.size[m.dims - 1])
             return false;
     }
 
-    out = prepared;
+    *this = prepared;
     return true;
 }
 
-inline void apply(const PreparedFusion& a, Mat& Y)
+inline void PreparedFusion::run(Mat& Y) const
 {
-    if (!a.expr)
+    if (!expr)
         return;
     CV_CheckTypeEQ(Y.type(), CV_32F, "DNN/fusion: output must be CV_32F");
     CV_Assert(Y.isContinuous());
@@ -150,33 +169,31 @@ inline void apply(const PreparedFusion& a, Mat& Y)
         return;
     CV_CheckLE(n, (size_t)INT_MAX, "DNN/fusion: output too large to split");
 
-    if (a.activationFn) {
-        const float* pr = a.activationParams.empty() ? nullptr : a.activationParams.data();
+    if (activationFn) {
+        const float* pr = activationParams.empty() ? nullptr : activationParams.data();
         parallel_for_(Range(0, (int)n), [&](const Range& r) {
-            a.activationFn(p + r.start, p + r.start, (size_t)(r.end - r.start), pr);
+            activationFn(p + r.start, p + r.start, (size_t)(r.end - r.start), pr);
         });
         return;
     }
 
     const int nch = Y.dims > 0 ? std::max(Y.size[Y.dims - 1], 1) : 1;
-    for (const FusionNode& n : a.expr->nodes()) {
+    for (const FusionNode& n : expr->nodes()) {
         if (n.op == FusionEltwiseOp::PER_CHANNEL_CONST)
-            CV_CheckEQ((int)a.expr->constBufs[n.constBufferId].total(), nch,
+            CV_CheckEQ((int)expr->constBufs[n.constBufferId].total(), nch,
                        "DNN/fusion: per-channel constant length must match the channel axis");
     }
 
-    const FusionGraph& g = *a.expr;
-    const std::vector<const float*>& bufs = a.channelBufs;
+    const AdjacencyGraph& g = *expr;
+    const std::vector<const float*>& bufs = channelBufs;
     parallel_for_(Range(0, (int)n), [&](const Range& r) {
         int c = r.start % nch;
         for (int k = r.start; k < r.end; k++) {
-            p[k] = evalElement(g, p[k], bufs, c);
+            p[k] = fusion::evalElement(g, p[k], bufs, c);
             if (++c == nch) c = 0;
         }
     });
 }
-
-} // namespace fusion
 
 CV__DNN_INLINE_NS_END
 }} // namespace cv::dnn

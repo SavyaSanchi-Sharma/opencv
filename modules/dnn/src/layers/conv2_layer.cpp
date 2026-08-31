@@ -4,7 +4,7 @@
 
 #include "../precomp.hpp"
 #include "../net_impl.hpp"
-#include "../fusion_graph.hpp"
+#include "../adjacency_graph.hpp"
 #include "layers_common.hpp"
 #include "conv2_common.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
@@ -311,7 +311,7 @@ public:
         return false;
     }
 
-    bool readPerChannelValues(const FusionGraph& g, int bufId, float scalarVal, int K,
+    bool readPerChannelValues(const AdjacencyGraph& g, int bufId, float scalarVal, int K,
                        std::vector<float>& out) const
     {
         if (bufId < 0) {
@@ -339,7 +339,7 @@ public:
         return true;
     }
 
-    virtual bool tryFuseChain(const Ptr<FusionGraph>& expr) CV_OVERRIDE
+    virtual bool tryAbsorbMath(const Ptr<AdjacencyGraph>& expr) CV_OVERRIDE
     {
         if (!expr || expr->size() == 0)
             return false;

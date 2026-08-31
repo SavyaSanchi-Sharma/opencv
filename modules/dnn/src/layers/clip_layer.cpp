@@ -5,7 +5,7 @@
 // Copyright (C) 2025, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 #include "../precomp.hpp"
-#include "../fusion_graph.hpp"
+#include "../adjacency_graph.hpp"
 #define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
 #include "cpu_kernels/activation_kernels.simd.hpp"
 #include "layers/cpu_kernels/activation_kernels.simd_declarations.hpp"
@@ -83,7 +83,7 @@ public:
             CV_Assert(minValue <= maxValue);
     }
 
-    bool describeMath(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
+    bool unfoldOp(LayerMath& r, const ConstOperand& side) const CV_OVERRIDE
     {
         float lo = -FLT_MAX, hi = FLT_MAX;
         if (hasMin) lo = minValue;

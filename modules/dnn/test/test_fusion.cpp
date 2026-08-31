@@ -5,7 +5,7 @@
 // Third party copyrights are property of their respective owners.
 
 #include "test_precomp.hpp"
-#include "../src/fusion_graph.hpp"
+#include "../src/adjacency_graph.hpp"
 #include "../src/layers/cpu_kernels/fusion_apply.hpp"
 
 namespace opencv_test { namespace {
@@ -16,14 +16,14 @@ static const std::vector<const float*> kNoBufs;
 
 static float eval1(const LayerMath& r, float x)
 {
-    Ptr<FusionGraph> g = fusion::fromMath(r);
+    Ptr<AdjacencyGraph> g = fusion::fromMath(r);
     CV_Assert(g);
     return fusion::evalElement(*g, x, kNoBufs, 0);
 }
 
 TEST(Fusion, IdenticalMathCollapsesToTheSameNode)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
     LayerMath r;
     const int zero = r.constant(0.f);
@@ -33,7 +33,7 @@ TEST(Fusion, IdenticalMathCollapsesToTheSameNode)
     EXPECT_EQ(fusion::instantiate(arena, in, r), fusion::instantiate(arena, in, r));
     EXPECT_EQ(3u, arena.size());
 
-    FusionGraphBuilder b;
+    AdjacencyGraphBuilder b;
     const int i2 = b.internNode(FusionEltwiseOp::INPUT, {});
     const int k = b.internNode(FusionEltwiseOp::CONST, {}, 7.f);
     EXPECT_EQ(b.internNode(FusionEltwiseOp::ADD, {i2, k}), b.internNode(FusionEltwiseOp::ADD, {k, i2}));
@@ -42,7 +42,7 @@ TEST(Fusion, IdenticalMathCollapsesToTheSameNode)
 
 TEST(Fusion, ConeIsBoundedIndependentlyOfArenaSize)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
     LayerMath a, b;
     const int zero = a.constant(0.f);
@@ -61,7 +61,7 @@ TEST(Fusion, ConeIsBoundedIndependentlyOfArenaSize)
 
 TEST(Fusion, ExtractionYieldsAStandaloneGraph)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
     LayerMath a, b;
     const int zero = a.constant(0.f);
@@ -70,7 +70,7 @@ TEST(Fusion, ExtractionYieldsAStandaloneGraph)
     fusion::instantiate(arena, in, a);
     const int rootB = fusion::instantiate(arena, in, b);
 
-    Ptr<FusionGraph> g = fusion::extract(arena.graph(), rootB, std::vector<Mat>());
+    Ptr<AdjacencyGraph> g = fusion::extract(arena.graph(), rootB, std::vector<Mat>());
     ASSERT_TRUE(g);
     EXPECT_EQ(9u, g->size());
     EXPECT_EQ(FusionEltwiseOp::INPUT, g->nodes()[0].op);
@@ -84,7 +84,7 @@ TEST(Fusion, ExtractionYieldsAStandaloneGraph)
 
 TEST(Fusion, OverLimitConeIsRefusedNotEvaluated)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     int cur = arena.internNode(FusionEltwiseOp::INPUT, {});
     std::vector<char> scratch;
     int steps = 0;
@@ -133,7 +133,7 @@ TEST(Fusion, MathMatchesClosedForm)
 
 TEST(Fusion, EmptyMathIsRefused)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
     EXPECT_EQ(-1, fusion::instantiate(arena, in, LayerMath()));
     EXPECT_EQ(1u, arena.size());
@@ -152,11 +152,11 @@ TEST(Fusion, ReversedSubIsRefused)
     vs.hasValue = true;
     vs.value = 3.f;
     vs.flowIsFirstInput = false;
-    EXPECT_FALSE(sub->describeMath(r, vs));
+    EXPECT_FALSE(sub->unfoldOp(r, vs));
 
     vs.flowIsFirstInput = true;
     r = LayerMath();
-    ASSERT_TRUE(sub->describeMath(r, vs));
+    ASSERT_TRUE(sub->unfoldOp(r, vs));
     EXPECT_FLOAT_EQ(-1.f, eval1(r, 2.f));
 }
 
@@ -173,11 +173,11 @@ TEST(Fusion, VariadicNaryIsRefused)
     vs.value = 3.f;
 
     sum->inputs.assign(3, Arg());
-    EXPECT_FALSE(sum->describeMath(r, vs));
+    EXPECT_FALSE(sum->unfoldOp(r, vs));
 
     r = LayerMath();
     sum->inputs.assign(2, Arg());
-    EXPECT_TRUE(sum->describeMath(r, vs));
+    EXPECT_TRUE(sum->unfoldOp(r, vs));
 }
 
 TEST(Fusion, ClipWithOneDynamicBoundIsRefused)
@@ -193,17 +193,17 @@ TEST(Fusion, ClipWithOneDynamicBoundIsRefused)
     vs.value2 = 0.f;
 
     clip->inputs = { Arg(1), Arg(2) };
-    EXPECT_FALSE(clip->describeMath(r, vs));
+    EXPECT_FALSE(clip->unfoldOp(r, vs));
 
     // Clip(x, "", max): the omitted min is an empty Arg, not a missing one
     r = LayerMath();
     clip->inputs = { Arg(1), Arg(0), Arg(2) };
-    EXPECT_FALSE(clip->describeMath(r, vs));
+    EXPECT_FALSE(clip->unfoldOp(r, vs));
 
     r = LayerMath();
     vs.value2 = 6.f;
     clip->inputs = { Arg(1), Arg(2), Arg(3) };
-    ASSERT_TRUE(clip->describeMath(r, vs));
+    ASSERT_TRUE(clip->unfoldOp(r, vs));
     EXPECT_FLOAT_EQ(2.f, eval1(r, 1.f));
     EXPECT_FLOAT_EQ(6.f, eval1(r, 9.f));
 }
@@ -239,7 +239,7 @@ TEST(Fusion, ActivationMatchRecognizesAndRefuses)
     r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
     EXPECT_FALSE(fusion::matchActivation(*fusion::fromMath(r), activ, params));
 
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     arena.internNode(FusionEltwiseOp::INPUT, {});
     r = LayerMath();
     r.binary(FusionEltwiseOp::MAX, LayerMath::INPUT_VALUE, r.constant(0.f));
@@ -258,7 +258,7 @@ TEST(Fusion, ActivationMatchSurvivesASharedArena)
     };
 
     for (const auto& k : kinds) {
-        FusionGraphBuilder arena;
+        AdjacencyGraphBuilder arena;
         const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
 
         // an unrelated earlier chain, so the constants below are already interned
@@ -273,7 +273,7 @@ TEST(Fusion, ActivationMatchSurvivesASharedArena)
         const int root = fusion::instantiate(arena, in, m);
         ASSERT_GE(root, 0) << k.name;
 
-        Ptr<FusionGraph> expr = fusion::extract(arena.graph(), root, std::vector<Mat>());
+        Ptr<AdjacencyGraph> expr = fusion::extract(arena.graph(), root, std::vector<Mat>());
         ASSERT_TRUE(expr) << k.name;
 
         int activ = ACTIV_NONE;
@@ -288,14 +288,14 @@ TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
     LayerMath r;
     r.clamp(LayerMath::INPUT_VALUE, 0.f, 6.f);
     PreparedFusion kern;
-    ASSERT_TRUE(fusion::prepare(fusion::fromMath(r), kern));
+    ASSERT_TRUE(kern.take(fusion::fromMath(r)));
     ASSERT_TRUE(kern.activationFn != nullptr);
 
     int n = 5;
     Mat y(1, &n, CV_32F);
     const float src[] = { -2.f, 0.f, 3.f, 6.f, 9.f };
     std::copy(src, src + n, y.ptr<float>());
-    fusion::apply(kern, y);
+    kern.run(y);
     const float want[] = { 0.f, 0.f, 3.f, 6.f, 6.f };
     for (int i = 0; i < n; i++)
         EXPECT_FLOAT_EQ(want[i], y.ptr<float>()[i]) << "clip i=" << i;
@@ -303,21 +303,21 @@ TEST(Fusion, ApplyTakesKernelPathThenInterpreterPath)
     r = LayerMath();
     r.unary(FusionEltwiseOp::SQRT, LayerMath::INPUT_VALUE);
     PreparedFusion interp;
-    ASSERT_TRUE(fusion::prepare(fusion::fromMath(r), interp));
+    ASSERT_TRUE(interp.take(fusion::fromMath(r)));
     EXPECT_TRUE(interp.activationFn == nullptr);
 
     int big = (1 << 16) + 17;
     Mat z(1, &big, CV_32F);
     for (int i = 0; i < big; i++)
         z.ptr<float>()[i] = (float)(i % 100);
-    fusion::apply(interp, z);
+    interp.run(z);
     for (int i = 0; i < big; i += 997)
         EXPECT_NEAR(std::sqrt((float)(i % 100)), z.ptr<float>()[i], 1e-5) << "sqrt i=" << i;
 }
 
 TEST(Fusion, PerChannelConstIndexesTheLastAxis)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
     LayerMath r;
     r.binary(FusionEltwiseOp::MUL, LayerMath::INPUT_VALUE, r.perChannelConstant(1));
@@ -338,7 +338,7 @@ TEST(Fusion, PerChannelConstIndexesTheLastAxis)
     std::vector<Mat> bufs;
     bufs.push_back(b0);
     bufs.push_back(b1);
-    Ptr<FusionGraph> expr = fusion::extract(arena.graph(), root, bufs);
+    Ptr<AdjacencyGraph> expr = fusion::extract(arena.graph(), root, bufs);
     ASSERT_TRUE(expr);
     bool seen = false;
     for (const FusionNode& nd : expr->nodes()) {
@@ -350,14 +350,14 @@ TEST(Fusion, PerChannelConstIndexesTheLastAxis)
     EXPECT_TRUE(seen);
 
     PreparedFusion fa;
-    ASSERT_TRUE(fusion::prepare(expr, fa));
+    ASSERT_TRUE(fa.take(expr));
     EXPECT_TRUE(fa.activationFn == nullptr);
 
     int sz[] = { 2, 3 };
     Mat y(2, sz, CV_32F);
     for (int i = 0; i < 6; i++)
         y.ptr<float>()[i] = 1.f;
-    fusion::apply(fa, y);
+    fa.run(y);
     const float want[] = { 2.f, 3.f, 4.f, 2.f, 3.f, 4.f };
     for (int i = 0; i < 6; i++)
         EXPECT_FLOAT_EQ(want[i], y.ptr<float>()[i]) << "i=" << i;
@@ -365,7 +365,7 @@ TEST(Fusion, PerChannelConstIndexesTheLastAxis)
 
 TEST(Fusion, SharedRootKeepsEachChainsOwnBuffers)
 {
-    FusionGraphBuilder arena;
+    AdjacencyGraphBuilder arena;
     const int in = arena.internNode(FusionEltwiseOp::INPUT, {});
 
     LayerMath r;
@@ -380,8 +380,8 @@ TEST(Fusion, SharedRootKeepsEachChainsOwnBuffers)
     Mat ba(1, &three, CV_32F), bb(1, &three, CV_32F);
     for (int i = 0; i < 3; i++) { ba.ptr<float>()[i] = 2.f; bb.ptr<float>()[i] = 10.f; }
 
-    Ptr<FusionGraph> ea = fusion::extract(arena.graph(), rootA, std::vector<Mat>(1, ba));
-    Ptr<FusionGraph> eb = fusion::extract(arena.graph(), rootB, std::vector<Mat>(1, bb));
+    Ptr<AdjacencyGraph> ea = fusion::extract(arena.graph(), rootA, std::vector<Mat>(1, ba));
+    Ptr<AdjacencyGraph> eb = fusion::extract(arena.graph(), rootB, std::vector<Mat>(1, bb));
     ASSERT_TRUE(ea);
     ASSERT_TRUE(eb);
 
@@ -391,14 +391,14 @@ TEST(Fusion, SharedRootKeepsEachChainsOwnBuffers)
     EXPECT_FLOAT_EQ(10.f, eb->constBufs[0].ptr<float>()[0]);
 
     PreparedFusion fa, fb;
-    ASSERT_TRUE(fusion::prepare(ea, fa));
-    ASSERT_TRUE(fusion::prepare(eb, fb));
+    ASSERT_TRUE(fa.take(ea));
+    ASSERT_TRUE(fb.take(eb));
 
     int sz[] = { 1, 3 };
     Mat ya(2, sz, CV_32F), yb(2, sz, CV_32F);
     for (int i = 0; i < 3; i++) { ya.ptr<float>()[i] = 1.f; yb.ptr<float>()[i] = 1.f; }
-    fusion::apply(fa, ya);
-    fusion::apply(fb, yb);
+    fa.run(ya);
+    fb.run(yb);
     for (int i = 0; i < 3; i++) {
         EXPECT_FLOAT_EQ(2.f,  ya.ptr<float>()[i]) << "A i=" << i;
         EXPECT_FLOAT_EQ(10.f, yb.ptr<float>()[i]) << "B i=" << i;
