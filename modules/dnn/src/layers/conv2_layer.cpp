@@ -287,7 +287,7 @@ public:
         return false;
     }
 
-    static bool constOperand(const std::vector<FusionNode>& nd, int node,
+    static bool splitConstOperand(const std::vector<FusionNode>& nd, int node,
                              int& other, int& bufId, float& scalarVal)
     {
         const FusionNode& n = nd[node];
@@ -311,7 +311,7 @@ public:
         return false;
     }
 
-    bool channelValues(const FusionGraph& g, int bufId, float scalarVal, int K,
+    bool readPerChannelValues(const FusionGraph& g, int bufId, float scalarVal, int K,
                        std::vector<float>& out) const
     {
         if (bufId < 0) {
@@ -381,9 +381,9 @@ public:
         if (nd[cur].op == FusionEltwiseOp::ADD) {
             int other = -1, bufId = -1;
             float sv = 0.f;
-            if (!constOperand(nd, cur, other, bufId, sv))
+            if (!splitConstOperand(nd, cur, other, bufId, sv))
                 return false;
-            if (!channelValues(*expr, bufId, sv, K, shift))
+            if (!readPerChannelValues(*expr, bufId, sv, K, shift))
                 return false;
             affine = true;
             cur = other;
@@ -391,9 +391,9 @@ public:
         if (nd[cur].op == FusionEltwiseOp::MUL) {
             int other = -1, bufId = -1;
             float sv = 0.f;
-            if (!constOperand(nd, cur, other, bufId, sv))
+            if (!splitConstOperand(nd, cur, other, bufId, sv))
                 return false;
-            if (!channelValues(*expr, bufId, sv, K, scale))
+            if (!readPerChannelValues(*expr, bufId, sv, K, scale))
                 return false;
             affine = true;
             cur = other;

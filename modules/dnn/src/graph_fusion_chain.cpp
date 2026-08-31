@@ -76,7 +76,7 @@ private:
         return (int)c.constArgs.size() - 1;
     }
 
-    bool isFusableConst(Arg a, bool& isScalar, float& scalarVal) const
+    bool isFusableConstArg(Arg a, bool& isScalar, float& scalarVal) const
     {
         if (!net_.isConstArg(a))
             return false;
@@ -115,9 +115,9 @@ private:
         if (sideInputs.size() == 2) {
             bool s0 = false, s1 = false;
             float v0 = 0.f, v1 = 0.f;
-            if (!isFusableConst(sideInputs[0], s0, v0) || !s0)
+            if (!isFusableConstArg(sideInputs[0], s0, v0) || !s0)
                 return false;
-            if (!isFusableConst(sideInputs[1], s1, v1) || !s1)
+            if (!isFusableConstArg(sideInputs[1], s1, v1) || !s1)
                 return false;
             out.hasValue = true;
             out.value = v0;
@@ -127,7 +127,7 @@ private:
 
         bool isScalar = false;
         float scalarVal = 0.f;
-        if (!isFusableConst(sideInputs[0], isScalar, scalarVal))
+        if (!isFusableConstArg(sideInputs[0], isScalar, scalarVal))
             return false;
         out.hasValue = true;
         if (isScalar)
