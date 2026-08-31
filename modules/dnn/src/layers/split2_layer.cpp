@@ -5,7 +5,11 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
-//#include "../op_cuda.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/slice.hpp"
+#endif
 //#include "../op_inf_engine.hpp"
 //#include "../ie_ngraph.hpp"
 //#include "../op_webnn.hpp"
@@ -105,8 +109,41 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return true;
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays outputs_) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs, outputs;
+        inputs_.getUMatVector(inputs);
+        outputs_.getUMatVector(outputs);
+
+        MatShape inpShape = cv::dnn::shape(inputs[0]);
+        const int rank = inpShape.dims;
+        int axis_ = normalize_axis(axis, rank);
+
+        std::vector<std::vector<std::size_t>> offsets(outputs.size(), std::vector<std::size_t>(rank, 0));
+        std::size_t cum = 0;
+        for (size_t i = 0; i < outputs.size(); i++)
+        {
+            offsets[i][axis_] = cum;
+            cum += (std::size_t)cv::dnn::shape(outputs[i])[axis_];
+        }
+        CV_Assert(cum == (std::size_t)inpShape[axis_]);
+
+        if (inputs[0].type() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), offsets);
+        return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, inputs[0].type(), std::move(context->stream), offsets);
+    }
+#endif
 
     void getOutShapes(const MatShape& inpShape, int axis_,
                       const std::vector<int>& split,
