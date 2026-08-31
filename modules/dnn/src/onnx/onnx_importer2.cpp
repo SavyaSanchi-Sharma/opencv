@@ -61,9 +61,6 @@ static T getScalarFromMat(Mat m)
 }
 
 
-
-
-
 static std::string dataType2str(int dt)
 {
     const char* str =
@@ -111,6 +108,7 @@ protected:
     Ptr<Graph> parseGraph(opencv_onnx::GraphProto* graph_proto, bool mainGraph);
     void parseNode(const opencv_onnx::NodeProto& node_proto);
     bool parseValueInfo(const opencv_onnx::ValueInfoProto& valueInfoProto, ArgData& data);
+    int findGraphTensorOnnxType(const std::string& name) const;
     Mat parseTensor(const opencv_onnx::TensorProto& tensorProto);
     void rememberMissingOp(const std::string& opname);
 
@@ -259,6 +257,7 @@ protected:
     void parseReshape              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseScatter              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseShape                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseDropout              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSimpleLayers         (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSlice                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSoftMax              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -717,6 +716,14 @@ Net ONNXImporter2::parseModel()
     parseOperatorSet();
     Ptr<Graph> mainGraph = parseGraph(graph_proto, true);
     netimpl->mainGraph = mainGraph;
+    // Capture declared output dtypes before prepareForInference() replaces them with computed ones.
+    if (mainGraph)
+    {
+        const std::vector<Arg>& outs = mainGraph->outputs();
+        netimpl->mainGraphOutTypes.resize(outs.size());
+        for (size_t i = 0; i < outs.size(); i++)
+            netimpl->mainGraphOutTypes[i] = netimpl->args.at(outs[i].idx).type;
+    }
     netimpl->modelFormat = DNN_MODEL_ONNX;
     netimpl->originalLayout = DATA_LAYOUT_NCHW;
     // netimpl->onnx_opset = onnx_opset;
@@ -1690,10 +1697,37 @@ void ONNXImporter2::parseCast2(LayerParams& layerParams, const opencv_onnx::Node
     addLayer(layerParams, node_proto);
 }
 
+// Returns a graph tensor's ONNX data_type by name, or -1 if unknown.
+int ONNXImporter2::findGraphTensorOnnxType(const std::string& name) const
+{
+    if (!curr_graph_proto)
+        return -1;
+    const opencv_onnx::GraphProto& g = *curr_graph_proto;
+    for (int i = 0; i < g.input_size(); i++)
+        if (g.input(i).name() == name && g.input(i).has_type() && g.input(i).type().has_tensor_type())
+            return g.input(i).type().tensor_type().elem_type();
+    for (int i = 0; i < g.value_info_size(); i++)
+        if (g.value_info(i).name() == name && g.value_info(i).has_type() && g.value_info(i).type().has_tensor_type())
+            return g.value_info(i).type().tensor_type().elem_type();
+    for (int i = 0; i < g.output_size(); i++)
+        if (g.output(i).name() == name && g.output(i).has_type() && g.output(i).type().has_tensor_type())
+            return g.output(i).type().tensor_type().elem_type();
+    for (int i = 0; i < g.initializer_size(); i++)
+        if (g.initializer(i).name() == name)
+            return g.initializer(i).data_type();
+    return -1;
+}
+
 void ONNXImporter2::parseCastLike(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
     CV_CheckEQ(node_proto.input_size(), 2, "CastLike requires two inputs");
     layerParams.type = "Cast2";
+    if (!layerParams.has("to"))
+    {
+        int elemType = findGraphTensorOnnxType(node_proto.input(1));
+        if (elemType > 0)
+            layerParams.set("to", elemType);
+    }
     addLayer(layerParams, node_proto);
 }
 
@@ -2332,6 +2366,15 @@ void ONNXImporter2::parseLayerNorm(LayerParams& layerParams, const opencv_onnx::
 
 void ONNXImporter2::parseSimpleLayers(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
 {
+    addLayer(layerParams, node_proto);
+}
+
+// Passthrough Dropout (eval mode) with an optional 2nd "mask" output. BlankLayer handles the
+// 1-output case; the 2-output case needs a deterministic all-true mask, so route it to DropoutMask.
+void ONNXImporter2::parseDropout(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+{
+    if (node_proto.output_size() > 1)
+        layerParams.type = "DropoutMask";
     addLayer(layerParams, node_proto);
 }
 
@@ -3159,7 +3202,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
 
     std::vector<std::string> simpleLayers {
         "Acos", "Acosh", "Asin", "Asinh", "Atan", "Atanh", "Ceil", "Celu", "Cos",
-        "Cosh", "Dropout", "Erf", "Exp", "Floor", "HardSigmoid", "HardSwish",
+        "Cosh", "Erf", "Exp", "Floor", "HardSigmoid", "HardSwish",
         "Identity", "Log", "Not", "Round", "Reciprocal", "Selu", "Sign", "Sigmoid", "Sin", "Sinh",
         "Softplus", "Softsign", "Shrink", "Sqrt", "Tan", "ThresholdedRelu", "Gelu",
         "GeluApproximation"
@@ -3168,6 +3211,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     {
         dispatch[name] = &ONNXImporter2::parseSimpleLayers;
     }
+    dispatch["Dropout"] = &ONNXImporter2::parseDropout;
 
     // BUG: https://github.com/opencv/opencv/issues/26310
     // ai.onnx: opset 10+
