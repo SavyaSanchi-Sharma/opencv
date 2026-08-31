@@ -1301,6 +1301,86 @@ public:
         return make_cuda_node<cuda4dnn::ConvolutionOp>(
             preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        // TODO: extract bias from inputs and pass it
+        CV_Assert(inputs_arr.size().area() == 1 || inputs_arr.size().area() == 2);
+        auto input_shape = inputs_arr.shape(0);
+
+        CV_Assert(outputs_arr.size().area() == 1);
+        auto output_shape = outputs_arr.shape(0);
+
+        CV_Assert(!blobs.empty());
+        const auto output_feature_maps = blobs[0].size[0];
+        const auto input_feature_maps = input_shape[1];
+        const auto input_feature_maps_per_group = blobs[0].size[1];
+        const auto groups = input_feature_maps / input_feature_maps_per_group;
+
+        ConvolutionConfiguration config;
+
+        if (input_shape.size() == 3)
+        {
+            // Conv1D
+            // We add an extra dim for input and output tensors, because CuDNN doesn't support convolution with 3D tensors
+            input_shape.insert(std::end(input_shape) - 1, 1);
+            output_shape.insert(std::end(output_shape) - 1, 1);
+
+            // Do the similar thing for the other parameters
+            pads_begin.insert(std::begin(pads_begin), 0);
+            pads_end.insert(std::begin(pads_end), 0);
+            strides.insert(std::begin(strides), 1);
+            dilations.insert(std::begin(dilations), 1);
+            kernel_size.insert(std::begin(kernel_size), 1);
+        }
+        config.kernel_size.assign(std::begin(kernel_size), std::end(kernel_size));
+        config.dilations.assign(std::begin(dilations), std::end(dilations));
+        config.strides.assign(std::begin(strides), std::end(strides));
+
+        if (padMode.empty())
+        {
+            config.padMode = ConvolutionConfiguration::PaddingMode::MANUAL;
+            config.pads_begin.assign(std::begin(pads_begin), std::end(pads_begin));
+            config.pads_end.assign(std::begin(pads_end), std::end(pads_end));
+        }
+        else if (padMode == "VALID")
+        {
+            config.padMode = ConvolutionConfiguration::PaddingMode::VALID;
+        }
+        else if (padMode == "SAME")
+        {
+            config.padMode = ConvolutionConfiguration::PaddingMode::SAME;
+        }
+        else
+        {
+            CV_Error(Error::StsNotImplemented, padMode + " padding mode not supported by ConvolutionLayer");
+        }
+
+        config.input_shape.assign(std::begin(input_shape), std::end(input_shape));
+        config.output_shape.assign(std::begin(output_shape), std::end(output_shape));
+        config.groups = groups;
+
+        config.fusion_mode = cudaFusionMode;
+        config.activation_type = cudaActType;
+        config.relu_negative_slope = cuda_relu_slope;
+        config.crelu_floor = cuda_crelu_floor;
+        config.crelu_ceil = cuda_crelu_ceil;
+        config.power_exp = cuda_power_exp;
+        config.power_scale = cuda_power_scale;
+        config.power_shift = cuda_power_shift;
+
+        Mat filtersMat = fusedWeights ? weightsMat : blobs[0];
+        Mat biasMat = (hasBias() || fusedBias) ? Mat(output_feature_maps, 1, CV_32F, biasvec.data()) : Mat();
+        if (countNonZero(biasMat) == 0)
+            biasMat = Mat();
+
+        return make_cuda_node<cuda4dnn::ConvolutionOp>(
+            preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
+    }
 #endif
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,

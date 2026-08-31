@@ -24,20 +24,15 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             : stream(std::move(stream_)), spatial_scale{spatial_scale} { }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             CV_Assert(inputs.size() == 2 && outputs.size() == 1);
 
-            auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
-            auto input = input_wrapper->getView();
-
-            auto rois_wrapper = inputs[1].dynamicCast<wrapper_type>();
-            auto rois = rois_wrapper->getView();
-
-            auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
-            auto output = output_wrapper->getSpan();
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto rois = csl::viewOf<T>(inputs[1]);
+            auto output = csl::spanOf<T>(outputs[0]);
 
             kernels::roi_pooling<T>(stream, output, input, rois, spatial_scale);
         }

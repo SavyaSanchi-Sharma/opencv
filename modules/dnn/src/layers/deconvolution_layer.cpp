@@ -956,6 +956,85 @@ public:
         return make_cuda_node<cuda4dnn::TransposeConvolutionOp>(
             preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        CV_Assert(!blobs.empty());
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        CV_Assert(inputs_arr.size().area() == 1);
+        auto input_shape = inputs_arr.shape(0);
+
+        CV_Assert(outputs_arr.size().area() == 1);
+        auto output_shape = outputs_arr.shape(0);
+
+        if (numOutput < 0)
+            numOutput = blobs[0].size[1] * groups;
+
+        if (weightsMat.empty())
+            transpose(blobs[0].reshape(1, blobs[0].size[0]), weightsMat);
+
+        if (biasesMat.empty()) {
+            if (blobs.size() >= 2)
+                biasesMat = blobs[1].reshape(1, numOutput);
+            else
+                biasesMat = Mat::zeros(numOutput, 1, CV_32F);
+        }
+
+        TransposeConvolutionConfiguration config;
+
+        if (input_shape.size() == 3)
+        {
+            // CuDNN doesn't support 1D convolution; add an extra spatial dim
+            input_shape.insert(std::end(input_shape) - 1, 1);
+            output_shape.insert(std::end(output_shape) - 1, 1);
+
+            pads_begin.insert(std::begin(pads_begin), 0);
+            pads_end.insert(std::begin(pads_end), 0);
+            strides.insert(std::begin(strides), 1);
+            dilations.insert(std::begin(dilations), 1);
+            kernel_size.insert(std::begin(kernel_size), 1);
+        }
+        config.kernel_size.assign(std::begin(kernel_size), std::end(kernel_size));
+        config.dilations.assign(std::begin(dilations), std::end(dilations));
+        config.strides.assign(std::begin(strides), std::end(strides));
+
+        if (padMode.empty())
+        {
+            config.padMode = TransposeConvolutionConfiguration::PaddingMode::MANUAL;
+            config.pads_begin.assign(std::begin(pads_begin), std::end(pads_begin));
+            config.pads_end.assign(std::begin(pads_end), std::end(pads_end));
+        }
+        else if (padMode == "VALID")
+        {
+            config.padMode = TransposeConvolutionConfiguration::PaddingMode::VALID;
+        }
+        else if (padMode == "SAME")
+        {
+            config.padMode = TransposeConvolutionConfiguration::PaddingMode::SAME;
+        }
+        else
+        {
+            CV_Error(Error::StsNotImplemented, padMode + " padding mode not supported by DeconvolutionLayer");
+        }
+
+        config.input_shape.assign(std::begin(input_shape), std::end(input_shape));
+        config.output_shape.assign(std::begin(output_shape), std::end(output_shape));
+        config.groups = groups;
+
+        CV_Assert(blobs.size() >= 1);
+        Mat filtersMat = fusedWeights ? weightsMat.t() : blobs[0];
+        Mat biasMat = (hasBias() || fusedBias) ? biasesMat : Mat();
+        if (countNonZero(biasMat) == 0)
+            biasMat = Mat();
+
+        return make_cuda_node<cuda4dnn::TransposeConvolutionOp>(
+            preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
+    }
 #endif
 
 #ifdef HAVE_CANN
