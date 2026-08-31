@@ -170,7 +170,7 @@ inline void apply(const PreparedFusion& a, Mat& Y)
     parallel_for_(Range(0, (int)n), [&](const Range& r) {
         int c = r.start % nch;
         for (int k = r.start; k < r.end; k++) {
-            p[k] = eval(g, p[k], bufs, c);
+            p[k] = evalElement(g, p[k], bufs, c);
             if (++c == nch) c = 0;
         }
     });

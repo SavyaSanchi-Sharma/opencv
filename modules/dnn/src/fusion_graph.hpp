@@ -341,7 +341,7 @@ inline bool sameGraph(const FusionGraph& a, const FusionGraph& b,
     return true;
 }
 
-inline float eval(const FusionGraph& g, float x,
+inline float evalElement(const FusionGraph& g, float x,
                              const std::vector<const float*>& constBufs, int channelIdx)
 {
     const std::vector<FusionNode>& nodes = g.nodes();

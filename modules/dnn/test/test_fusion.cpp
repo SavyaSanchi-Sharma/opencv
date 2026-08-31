@@ -18,7 +18,7 @@ static float eval1(const LayerMath& r, float x)
 {
     Ptr<FusionGraph> g = fusion::fromMath(r);
     CV_Assert(g);
-    return fusion::eval(*g, x, kNoBufs, 0);
+    return fusion::evalElement(*g, x, kNoBufs, 0);
 }
 
 TEST(Fusion, IdenticalMathCollapsesToTheSameNode)
@@ -76,7 +76,7 @@ TEST(Fusion, ExtractionYieldsAStandaloneGraph)
     EXPECT_EQ(FusionEltwiseOp::INPUT, g->nodes()[0].op);
     EXPECT_EQ((int)g->size() - 1, g->outputNode);
     EXPECT_NEAR(0.5f * 1.5f * (1.f + std::erf(1.5f * 0.70710678118654752440f)),
-                fusion::eval(*g, 1.5f, kNoBufs, 0), 1e-5);
+                fusion::evalElement(*g, 1.5f, kNoBufs, 0), 1e-5);
 
     EXPECT_FALSE(fusion::extract(arena.graph(), -1, std::vector<Mat>()));
     EXPECT_FALSE(fusion::extract(arena.graph(), (int)arena.size(), std::vector<Mat>()));
