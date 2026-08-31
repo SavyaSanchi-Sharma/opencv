@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/stream.hpp"
 #include "../csl/cublas.hpp"
 #include "../csl/tensor.hpp"
@@ -74,6 +80,36 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 } else {
                     bias = csl::TensorView<T>(bias_tensor);
                 }
+
+                kernels::eltwise_sum_2<T>(stream, output, output, bias);
+            }
+        }
+
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            auto input_A = csl::viewOf<T>(inputs[0]);
+
+            csl::TensorView<T> input_B;
+            if (input_B_tensor.empty())
+                input_B = csl::viewOf<T>(inputs[1]);
+            else
+                input_B = csl::TensorView<T>(input_B_tensor);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            csl::tensor_ops::gemmBatched<T>(cublasHandle, batch, 0.f, output, C_offsets, 1.f, transA, input_A, A_offsets, transB, input_B, B_offsets);
+
+            // add bias if exists
+            if (!bias_tensor.empty() || inputs.size() >= 3) {
+                csl::TensorView<T> bias;
+                if (bias_tensor.empty())
+                    bias = csl::viewOf<T>(inputs[2]);
+                else
+                    bias = csl::TensorView<T>(bias_tensor);
 
                 kernels::eltwise_sum_2<T>(stream, output, output, bias);
             }

@@ -163,8 +163,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             /* sometimes a third input is passed to provide the output shape; we won't need it */
@@ -173,14 +173,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             for(int i = 0;  i < outputs.size(); i++)
             {
-                auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
-                auto input_data = input_wrapper->getView();
-
-                auto indices_wrapper = inputs[1].dynamicCast<GetCUDABackendWrapperType<T_INDEX>>();
-                auto input_indices = indices_wrapper->getView();
-
-                auto output_wrapper = outputs[i].dynamicCast<wrapper_type>();
-                auto output_data = output_wrapper->getSpan();
+                auto input_data = csl::viewOf<T>(inputs[0]);
+                auto input_indices = csl::viewOf<T_INDEX>(inputs[1]);
+                auto output_data = csl::spanOf<T>(outputs[i]);
 
                 kernels::max_unpooling<T, T_INDEX>(stream, output_data, input_data, input_indices, window_size, strides, padding_left);
             }
