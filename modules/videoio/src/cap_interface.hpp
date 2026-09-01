@@ -9,6 +9,11 @@
 #include "opencv2/videoio.hpp"
 #include "opencv2/videoio/utils.private.hpp"
 
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+
 //===================================================
 
 // Modern classes
@@ -196,6 +201,197 @@ public:
     virtual bool retrieveFrame(int, OutputArray) = 0;
     virtual bool isOpened() const = 0;
     virtual int getCaptureDomain() { return CAP_ANY; } // Return the type of the capture object: CAP_DSHOW, etc...
+};
+
+// Decorator adding read-ahead prefetching to any IVideoCapture backend
+class PrefetchCapture CV_FINAL : public IVideoCapture
+{
+public:
+    PrefetchCapture(const Ptr<IVideoCapture>& backend, size_t depth)
+        : inner(backend), prefetchDepth(depth), prefetchDrop(false), prefetchStop(false) {}
+
+    ~PrefetchCapture() CV_OVERRIDE { stopWorker(); }
+
+    Ptr<IVideoCapture> unwrap()
+    {
+        stopWorker();
+        return inner;
+    }
+
+    double getProperty(int propId) const CV_OVERRIDE
+    {
+        switch (propId)
+        {
+            case cv::CAP_PROP_PREFETCH_FRAMES:
+                return static_cast<double>(prefetchDepth);
+
+            case cv::CAP_PROP_PREFETCH_DROP:
+                return static_cast<double>(prefetchDrop);
+
+            default:
+            {
+                std::unique_lock<std::mutex> lock(backendMutex);
+                return inner->getProperty(propId);
+            }
+        }
+    }
+
+    bool setProperty(int propId, double value) CV_OVERRIDE
+    {
+        Pause pause(*this);
+        switch (propId)
+        {
+            case cv::CAP_PROP_PREFETCH_FRAMES:
+            {
+                const int depth = cvRound(value);
+                if (depth < 0)
+                    return false;
+                prefetchDepth = static_cast<size_t>(depth);
+                return true;
+            }
+
+            case cv::CAP_PROP_PREFETCH_DROP:
+                prefetchDrop = (value != 0);
+                return true;
+
+            default:
+                return inner->setProperty(propId, value);
+        }
+    }
+
+    bool grabFrame() CV_OVERRIDE
+    {
+        if (!ensureWorker())
+        {
+            std::unique_lock<std::mutex> lock(backendMutex);
+            return inner->grabFrame();
+        }
+
+        std::unique_lock<std::mutex> lock(prefetchMutex);
+        prefetchCond.wait(lock, [this]{ return prefetchStop || !prefetchQueue.empty(); });
+        return !prefetchQueue.empty() && !prefetchQueue.front().empty();
+    }
+
+    bool retrieveFrame(int channel, OutputArray image) CV_OVERRIDE
+    {
+        if (!ensureWorker())
+        {
+            std::unique_lock<std::mutex> lock(backendMutex);
+            return inner->retrieveFrame(channel, image);
+        }
+
+        if (channel != 0)
+            return false;
+
+        Mat frame;
+        {
+            std::unique_lock<std::mutex> lock(prefetchMutex);
+            prefetchCond.wait(lock, [this]{ return prefetchStop || !prefetchQueue.empty(); });
+            if (prefetchQueue.empty())
+            {
+                image.release();
+                return false;
+            }
+            frame = prefetchQueue.front();
+            if (!frame.empty())
+                prefetchQueue.pop_front();
+            prefetchCond.notify_all();
+        }
+
+        if (frame.empty())
+        {
+            image.release();
+            return false;
+        }
+        image.move(frame);
+        return true;
+    }
+
+    bool isOpened() const CV_OVERRIDE { return inner->isOpened(); }
+    int getCaptureDomain() CV_OVERRIDE { return inner->getCaptureDomain(); }
+
+private:
+    struct Pause
+    {
+        PrefetchCapture& cap;
+        explicit Pause(PrefetchCapture& c) : cap(c) { cap.stopWorker(); }
+        ~Pause() { try { cap.startWorker(); } catch (...) {} }
+    };
+
+    bool ensureWorker()
+    {
+        if (prefetchDepth != 0 && !prefetchWorker.joinable())
+            startWorker();
+        return prefetchDepth != 0 && prefetchWorker.joinable();
+    }
+
+    void startWorker()
+    {
+        if (prefetchDepth == 0 || !inner->isOpened())
+            return;
+        prefetchWorker = std::thread(&PrefetchCapture::loop, this);
+    }
+
+    void stopWorker()
+    {
+        if (!prefetchWorker.joinable())
+            return;
+        {
+            std::unique_lock<std::mutex> lock(prefetchMutex);
+            prefetchStop = true;
+            prefetchCond.notify_all();
+        }
+        prefetchWorker.join();
+        prefetchStop = false;
+        prefetchQueue.clear();
+    }
+
+    void loop()
+    {
+        for (;;)
+        {
+            Mat frame;
+            bool ok = false;
+            try
+            {
+                std::unique_lock<std::mutex> lock(backendMutex);
+                if (inner->grabFrame())
+                    ok = inner->retrieveFrame(0, frame);
+            }
+            catch (...)
+            {
+                ok = false;
+            }
+
+            std::unique_lock<std::mutex> lock(prefetchMutex);
+            if (prefetchDrop)
+            {
+                while (!prefetchQueue.empty() && prefetchQueue.size() >= prefetchDepth)
+                    prefetchQueue.pop_front();
+            }
+            else
+            {
+                prefetchCond.wait(lock, [this]{ return prefetchStop || prefetchQueue.size() < prefetchDepth; });
+            }
+            if (prefetchStop)
+                return;
+
+            prefetchQueue.push_back(ok ? frame : Mat());
+            prefetchCond.notify_all();
+            if (!ok)
+                return;
+        }
+    }
+
+    Ptr<IVideoCapture> inner;
+    mutable std::mutex backendMutex;
+    std::mutex prefetchMutex;
+    std::condition_variable prefetchCond;
+    std::deque<Mat> prefetchQueue;
+    std::thread prefetchWorker;
+    size_t prefetchDepth;
+    bool prefetchDrop;
+    bool prefetchStop;
 };
 
 class IVideoWriter
