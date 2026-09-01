@@ -220,20 +220,17 @@ public:
 
     double getProperty(int propId) const CV_OVERRIDE
     {
-        switch (propId)
-        {
-            case cv::CAP_PROP_PREFETCH_FRAMES:
-                return static_cast<double>(prefetchDepth);
+        if (propId == cv::CAP_PROP_PREFETCH_FRAMES)
+            return static_cast<double>(prefetchDepth);
+        if (propId == cv::CAP_PROP_PREFETCH_DROP)
+            return static_cast<double>(prefetchDrop);
 
-            case cv::CAP_PROP_PREFETCH_DROP:
-                return static_cast<double>(prefetchDrop);
+        const int idx = framePropIndex(propId);
+        if (idx >= 0 && prefetchWorker.joinable() && !current.mat.empty())
+            return current.meta[idx];
 
-            default:
-            {
-                std::unique_lock<std::mutex> lock(backendMutex);
-                return inner->getProperty(propId);
-            }
-        }
+        std::unique_lock<std::mutex> lock(backendMutex);
+        return inner->getProperty(propId);
     }
 
     bool setProperty(int propId, double value) CV_OVERRIDE
@@ -269,7 +266,15 @@ public:
 
         std::unique_lock<std::mutex> lock(prefetchMutex);
         prefetchCond.wait(lock, [this]{ return prefetchStop || !prefetchQueue.empty(); });
-        return !prefetchQueue.empty() && !prefetchQueue.front().empty();
+        if (prefetchQueue.empty() || prefetchQueue.front().mat.empty())
+        {
+            current = Frame();
+            return false;
+        }
+        current = std::move(prefetchQueue.front());
+        prefetchQueue.pop_front();
+        prefetchCond.notify_all();
+        return true;
     }
 
     bool retrieveFrame(int channel, OutputArray image) CV_OVERRIDE
@@ -280,30 +285,16 @@ public:
             return inner->retrieveFrame(channel, image);
         }
 
-        if (channel != 0)
-            return false;
-
-        Mat frame;
-        {
-            std::unique_lock<std::mutex> lock(prefetchMutex);
-            prefetchCond.wait(lock, [this]{ return prefetchStop || !prefetchQueue.empty(); });
-            if (prefetchQueue.empty())
-            {
-                image.release();
-                return false;
-            }
-            frame = prefetchQueue.front();
-            if (!frame.empty())
-                prefetchQueue.pop_front();
-            prefetchCond.notify_all();
-        }
-
-        if (frame.empty())
+        if (channel != 0 || current.mat.empty())
         {
             image.release();
             return false;
         }
-        image.move(frame);
+
+        if (image.isMat() && !image.fixedSize() && !image.fixedType())
+            image.assign(current.mat);
+        else
+            current.mat.copyTo(image);
         return true;
     }
 
@@ -311,6 +302,27 @@ public:
     int getCaptureDomain() CV_OVERRIDE { return inner->getCaptureDomain(); }
 
 private:
+    // per-frame properties: travel with the queued frame, since the worker is already ahead of the consumer
+    static constexpr int framePropIds[] = {
+        cv::CAP_PROP_POS_MSEC, cv::CAP_PROP_POS_FRAMES, cv::CAP_PROP_POS_AVI_RATIO,
+        cv::CAP_PROP_PTS, cv::CAP_PROP_FRAME_TYPE, cv::CAP_PROP_LRF_HAS_KEY_FRAME
+    };
+    static constexpr size_t numFrameProps = sizeof(framePropIds) / sizeof(framePropIds[0]);
+
+    struct Frame
+    {
+        Mat mat;
+        double meta[numFrameProps] = {};
+    };
+
+    static int framePropIndex(int propId)
+    {
+        for (size_t i = 0; i < numFrameProps; i++)
+            if (framePropIds[i] == propId)
+                return static_cast<int>(i);
+        return -1;
+    }
+
     struct Pause
     {
         PrefetchCapture& cap;
@@ -344,19 +356,25 @@ private:
         prefetchWorker.join();
         prefetchStop = false;
         prefetchQueue.clear();
+        current = Frame();
     }
 
     void loop()
     {
         for (;;)
         {
-            Mat frame;
+            Frame frame;
             bool ok = false;
             try
             {
                 std::unique_lock<std::mutex> lock(backendMutex);
                 if (inner->grabFrame())
-                    ok = inner->retrieveFrame(0, frame);
+                    ok = inner->retrieveFrame(0, frame.mat);
+                if (ok)
+                {
+                    for (size_t i = 0; i < numFrameProps; i++)
+                        frame.meta[i] = inner->getProperty(framePropIds[i]);
+                }
             }
             catch (...)
             {
@@ -376,7 +394,7 @@ private:
             if (prefetchStop)
                 return;
 
-            prefetchQueue.push_back(ok ? frame : Mat());
+            prefetchQueue.push_back(ok ? std::move(frame) : Frame());
             prefetchCond.notify_all();
             if (!ok)
                 return;
@@ -387,7 +405,8 @@ private:
     mutable std::mutex backendMutex;
     std::mutex prefetchMutex;
     std::condition_variable prefetchCond;
-    std::deque<Mat> prefetchQueue;
+    std::deque<Frame> prefetchQueue;
+    Frame current; // frame taken by the last grabFrame(); only ever touched by the consumer thread
     std::thread prefetchWorker;
     size_t prefetchDepth;
     bool prefetchDrop;
