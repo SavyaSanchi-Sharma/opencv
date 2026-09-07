@@ -1,0 +1,170 @@
+name: OCV PR Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - issue/ppl
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/OCV-PR-Windows.yaml'
+      # TODO: are following paths necessary?
+      - 'checkout-and-merge/*'
+      - 'configure-and-build/*'
+      - 'run-tests/*'
+      - 'scripts/runner.py'
+      - 'scripts/test-plan.json'
+  workflow_call:
+    inputs:
+      workflow_branch:
+        description: "Branch for ci-gha-workflow repository"
+        default: "main"
+        required: false
+        type: string
+
+concurrency:
+  group: OCV-PR-Windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  branch_eval:
+    runs-on: ubuntu-24.04
+    outputs:
+      branches: ${{ steps.determine-branches.outputs.branches }}
+    steps:
+        - id: determine-branches
+          shell: bash
+          run: |
+            if [ "${{ github.event.repository.name == 'ci-gha-workflow' }}" = "true" ] ; then
+              echo "branches=[ '5.x' ]" >> "$GITHUB_OUTPUT"
+            else
+              b='${{ github.base_ref }}'
+              [ -z "$b" ] && b=5.x
+              echo "branches=[ '$b' ]" >> "$GITHUB_OUTPUT"
+            fi
+
+  Windows:
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - branch_eval
+    strategy:
+      # NOTE: Debugging
+      # fail-fast: true
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        arch: [ arm64 ]
+        config: [ base ]
+        include:
+          - arch: arm64
+            config: base
+            runner: windows-11-vs2026-arm
+            vs: 'Visual Studio 18 2026'
+            cmake_arch: ARM64
+            no_opencl: true
+
+        branch: ${{ fromJSON(needs.branch_eval.outputs.branches )}}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CMAKE_OPT: >-
+        -DCL_Z_OPTION=/Z7
+        -DBUILD_EXAMPLES=ON
+        -DOPENCV_ENABLE_NONFREE=ON
+        -DCMAKE_BUILD_TYPE=Release
+        ${{ matrix.no_opencl && '-DWITH_OPENCL=OFF' || '' }}
+        ${{ matrix.arch == 'x86' && '-DBUILD_opencv_python3=OFF' || '' }}
+        -DCMAKE_ASM_COMPILER=CMAKE_ASM_COMPILER-NOTFOUND
+      MAIN_BUILD_DIR: "${{ (github.event.repository.name != 'opencv_contrib') && 'build' || 'build-contrib' }}"
+      OPENCV_FOR_THREADS_NUM: 3
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+
+    # ==========
+
+    steps:
+
+    - name: Propagate environment
+      run: |
+        echo "GIT_CACHE=$(cygpath -u "$GIT_CACHE")" >> "$GITHUB_ENV"
+        echo "DNN_MODELS=$(cygpath -u "$DNN_MODELS")" >> "$GITHUB_ENV"
+        echo "BINARIES_CACHE=$(cygpath -u "$BINARIES_CACHE")" >> "$GITHUB_ENV"
+        echo "OPENCV_DOWNLOAD_PATH=$(cygpath -u "$BINARIES_CACHE")" >> "$GITHUB_ENV"
+
+
+    - name: Checkout workflow repository
+      uses: actions/checkout@v4
+      with:
+        repository: opencv/ci-gha-workflow
+        ref: "${{ github.repository == 'opencv/ci-gha-workflow' && github.ref || inputs.workflow_branch }}"
+
+    - working-directory: '${{ github.workspace }}'
+      shell: bash
+      run: |
+        ls -l
+        export
+        whoami
+        id
+        which bash
+        echo "GIT_CACHE=$GIT_CACHE"
+        echo "DNN_MODELS=$DNN_MODELS"
+        echo "BINARIES_CACHE=$BINARIES_CACHE"
+        echo "OPENCV_DOWNLOAD_PATH=$BINARIES_CACHE"
+
+
+    - name: Checkout and merge OpenCV
+      uses: ./checkout-and-merge
+      with:
+        target_branch: '${{ matrix.branch }}'
+        author: '${{ github.event.pull_request.user.login || github.repository_owner }}'
+        source_branch: "${{ github.event.pull_request.head.ref || github.ref_name }}"
+        gitcache: '${{ env.GIT_CACHE }}'
+        workdir: '${{ github.workspace }}'
+
+    - name: Update extra dnn models
+      if: ${{ matrix.arch != 'arm64' }}
+      timeout-minutes: 60
+      working-directory: '${{ github.workspace }}'
+      run: |
+        python opencv_extra/testdata/dnn/download_models.py \
+          --cleanup \
+          --dst '${{ env.DNN_MODELS }}/dnn'
+        echo "OPENCV_DNN_TEST_DATA_PATH=${{ env.DNN_MODELS }}" >> $GITHUB_ENV
+
+    - if: ${{ github.event.repository.name != 'opencv_contrib' }}
+      name: Configure and build OpenCV
+      uses: ./configure-and-build
+      with:
+        workdir: '${{ github.workspace }}'
+        builddir: 'build'
+        generator: '${{ matrix.vs }}'
+        options: '-A ${{ matrix.cmake_arch }} ${{ env.CMAKE_OPT }}'
+
+    - name: Run OpenCV tests
+      uses: ./run-tests
+      env:
+        OPENCV_TEST_DATA_PATH: '${{ github.workspace }}/opencv_extra/testdata'
+        OPENCV_TEST_REQUIRE_DATA: ${{ matrix.arch == 'arm64' && '0' || '1' }}
+        OPENCV_TEST_CHECK_OPTIONAL_DATA: ${{ matrix.arch == 'arm64' && '0' || '1' }}
+        PYTHONPATH: '${{ github.workspace }}/${{ env.MAIN_BUILD_DIR }}/python_loader:$PYTHONPATH'
+        OPENCV_OPENCL_RUNTIME: 'disabled'
+      with:
+        workdir: '${{ github.workspace }}'
+        builddir: '${{ env.MAIN_BUILD_DIR }}'
+        logdir: '${{ github.workspace }}'
+        plan: "test-plan-win-${{ matrix.branch }}.json"
+        suite: "[ ${{ (github.event.repository.name == 'opencv_contrib') && '''contrib'''  || '''main''' }} ]"
+        enable_python: "false"
+        enable_java: "false"
+        filter: "[ 'windows-common' ]"
+        suffix: '${{ matrix.arch }}_${{ matrix.branch }}'
+        timeout: 15
+
+    - if: ${{ always() && env.WARNINGS == '1' }}
+      name: Warnings check
+      run: |
+        echo "::error Warnings have been found!"
+        exit 1
