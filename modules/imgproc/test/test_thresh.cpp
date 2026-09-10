@@ -261,4 +261,39 @@ TEST(Imgproc_AdaptiveThreshold, gauss_inv)
     EXPECT_EQ(0, cv::norm(result, gt, NORM_INF));
 }
 
+
+typedef testing::TestWithParam<int> Threshold_HalfFloat;
+
+TEST_P(Threshold_HalfFloat, vs_fp32)
+{
+    const int depth = GetParam();
+    const int types[] = { THRESH_BINARY, THRESH_BINARY_INV, THRESH_TRUNC,
+                          THRESH_TOZERO, THRESH_TOZERO_INV };
+    cv::RNG rng(71);
+
+    for (int cn = 1; cn <= 4; cn++)
+    {
+        Mat s32(Size(48, 40), CV_MAKETYPE(CV_32F, cn)), src, wid;
+        rng.fill(s32, cv::RNG::UNIFORM, Scalar::all(0), Scalar::all(1));
+        s32.convertTo(src, CV_MAKETYPE(depth, cn));
+        src.convertTo(wid, CV_MAKETYPE(CV_32F, cn));
+
+        for (int i = 0; i < 5; i++)
+        {
+            SCOPED_TRACE(cv::format("depth=%d cn=%d type=%d", depth, cn, types[i]));
+
+            Mat a, b, a32;
+            ASSERT_NO_THROW(cv::threshold(src, a, 0.5, 1.0, types[i]));
+            ASSERT_EQ(depth, a.depth());
+            cv::threshold(wid, b, 0.5, 1.0, types[i]);
+            a.convertTo(a32, CV_MAKETYPE(CV_32F, cn));
+
+            // thresholding only selects or clamps, never averages, so it is exact
+            EXPECT_EQ(0, cvtest::norm(a32, b, NORM_INF));
+        }
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(Imgproc, Threshold_HalfFloat, testing::Values(CV_16F, CV_16BF));
+
 }} // namespace

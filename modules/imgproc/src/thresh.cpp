@@ -50,13 +50,13 @@ namespace cv
 template <typename T>
 static inline T threshBinary(const T& src, const T& thresh, const T& maxval)
 {
-    return src > thresh ? maxval : 0;
+    return src > thresh ? maxval : (T)0;
 }
 
 template <typename T>
 static inline T threshBinaryInv(const T& src, const T& thresh, const T& maxval)
 {
-    return src <= thresh ? maxval : 0;
+    return src <= thresh ? maxval : (T)0;
 }
 
 template <typename T>
@@ -68,13 +68,13 @@ static inline T threshTrunc(const T& src, const T& thresh)
 template <typename T>
 static inline T threshToZero(const T& src, const T& thresh)
 {
-    return src > thresh ? src : 0;
+    return src > thresh ? src : (T)0;
 }
 
 template <typename T>
 static inline T threshToZeroInv(const T& src, const T& thresh)
 {
-    return src <= thresh ? src : 0;
+    return src <= thresh ? src : (T)0;
 }
 
 template <typename T>
@@ -1390,6 +1390,32 @@ public:
             else
                 thresh_64f(srcStripe, dstStripe, thresh, maxval, thresholdType);
         }
+        else if( srcStripe.depth() == CV_16F || srcStripe.depth() == CV_16BF )
+        {
+            const int d = srcStripe.depth();
+            if ( useMask )
+            {
+                if (d == CV_16F)
+                    threshGenericWithMask<hfloat>( srcStripe, dstStripe, mask.rowRange(row0, row1),
+                                                   (hfloat)(float)thresh, (hfloat)(float)maxval, thresholdType );
+                else
+                    threshGenericWithMask<bfloat>( srcStripe, dstStripe, mask.rowRange(row0, row1),
+                                                   (bfloat)(float)thresh, (bfloat)(float)maxval, thresholdType );
+            }
+            else
+            {
+                Size roi = srcStripe.size();
+                roi.width *= srcStripe.channels();
+                if (d == CV_16F)
+                    threshGeneric<hfloat>(roi, srcStripe.ptr<hfloat>(), srcStripe.step/sizeof(hfloat),
+                                          dstStripe.ptr<hfloat>(), dstStripe.step/sizeof(hfloat),
+                                          (hfloat)(float)thresh, (hfloat)(float)maxval, thresholdType);
+                else
+                    threshGeneric<bfloat>(roi, srcStripe.ptr<bfloat>(), srcStripe.step/sizeof(bfloat),
+                                          dstStripe.ptr<bfloat>(), dstStripe.step/sizeof(bfloat),
+                                          (bfloat)(float)thresh, (bfloat)(float)maxval, thresholdType);
+            }
+        }
     }
 
 private:
@@ -1415,7 +1441,7 @@ static bool ocl_threshold( InputArray _src, OutputArray _dst, InputArray _mask, 
     if ( isDisabled ||
         !(thresh_type == THRESH_BINARY || thresh_type == THRESH_BINARY_INV || thresh_type == THRESH_TRUNC ||
           thresh_type == THRESH_TOZERO || thresh_type == THRESH_TOZERO_INV) ||
-        (!doubleSupport && depth == CV_64F))
+        (!doubleSupport && depth == CV_64F) || isHalfFloat(depth))
         return false;
 
     const char * const thresholdMap[] = { "THRESH_BINARY", "THRESH_BINARY_INV", "THRESH_TRUNC",
@@ -1447,7 +1473,8 @@ static bool ocl_threshold( InputArray _src, OutputArray _dst, InputArray _mask, 
     if (depth <= CV_32S)
         thresh = cvFloor(thresh);
 
-    const double min_vals[] = { 0, CHAR_MIN, 0, SHRT_MIN, INT_MIN, -FLT_MAX, -DBL_MAX, 0 };
+    const double min_vals[CV_DEPTH_MAX] = { 0, CHAR_MIN, 0, SHRT_MIN, INT_MIN,
+                                            -FLT_MAX, -DBL_MAX, -65504., -FLT_MAX };
     double min_val = min_vals[depth];
 
     if (!useMask)
@@ -1603,6 +1630,8 @@ double cv::threshold( InputArray _src, OutputArray _dst, double thresh, double m
         ;
     else if( src.depth() == CV_64F )
         ;
+    else if( isHalfFloat(src.depth()) )
+        ;
     else
         CV_Error( cv::Error::StsUnsupportedFormat, "" );
 
@@ -1748,6 +1777,8 @@ double cv::thresholdWithMask( InputArray _src, InputOutputArray _dst, InputArray
     else if( src.depth() == CV_32F )
         ;
     else if( src.depth() == CV_64F )
+        ;
+    else if( isHalfFloat(src.depth()) )
         ;
     else
         CV_Error( cv::Error::StsUnsupportedFormat, "" );
