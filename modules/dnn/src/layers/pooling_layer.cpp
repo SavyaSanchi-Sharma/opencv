@@ -323,6 +323,40 @@ public:
     }
 #endif
 
+    // Global pooling in FP16/BF16: per-channel reduction over the spatial plane,
+    // each accumulation step rounded to 16 bits.
+    template <typename _Tp>
+    void globalPoolHalf(const Mat& src, Mat& dst)
+    {
+        CV_Assert(src.isContinuous() && dst.isContinuous());
+        MatShape s = src.shape();
+        CV_Assert(s.dims >= 3);
+        const int NC = s[0]*s[1];
+        const size_t plane = src.total() / (size_t)NC;
+        CV_Assert(plane > 0 && dst.total() == (size_t)NC);
+
+        const _Tp* sp = src.ptr<_Tp>();
+        _Tp* dp = dst.ptr<_Tp>();
+        const bool isMax = (type == MAX);
+
+        parallel_for_(Range(0, NC), [&](const Range& r) {
+            for (int nc = r.start; nc < r.end; nc++) {
+                const _Tp* p = sp + (size_t)nc*plane;
+                if (isMax) {
+                    float m = (float)p[0];
+                    for (size_t i = 1; i < plane; i++)
+                        m = std::max(m, (float)p[i]);
+                    dp[nc] = _Tp(m);
+                } else {
+                    float acc = 0.f;
+                    for (size_t i = 0; i < plane; i++)
+                        acc = (float)_Tp(acc + (float)p[i]);
+                    dp[nc] = _Tp(acc/(float)plane);
+                }
+            }
+        });
+    }
+
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
@@ -333,7 +367,19 @@ public:
             CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
                        forward_ocl(inputs_arr, outputs_arr, internals_arr))
         }
-        if (inputs_arr.depth() == CV_16F)
+        const int inpdepth = inputs_arr.depth();
+        if (globalPooling && (inpdepth == CV_16F || inpdepth == CV_16BF))
+        {
+            std::vector<Mat> inps, outs;
+            inputs_arr.getMatVector(inps);
+            outputs_arr.getMatVector(outs);
+            if (inpdepth == CV_16F)
+                globalPoolHalf<hfloat>(inps[0], outs[0]);
+            else
+                globalPoolHalf<bfloat>(inps[0], outs[0]);
+            return;
+        }
+        if (inpdepth == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
@@ -1266,6 +1312,8 @@ public:
         CV_Assert(inputs.size());
         if (preferableTarget == DNN_TARGET_OPENCL_FP16)
             CV_CheckType(inputs[0], inputs[0] == CV_16F, "");
+        else if (globalPooling && (inputs[0] == CV_16F || inputs[0] == CV_16BF))
+            ; // global half pooling is handled by globalPoolHalf() in forward()
         else
             CV_CheckType(inputs[0], inputs[0] == CV_32F, "");
 
