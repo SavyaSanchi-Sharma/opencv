@@ -80,9 +80,9 @@ Net::Impl::Impl()
     enableFP16 = haveFP16 = false;
     // FP16 is not ready yet in the new DNN engine
     // Ticket: https://github.com/opencv/opencv/issues/26196
-    /*if (checkHardwareSupport(CV_CPU_FP16)) {
+    if (checkHardwareSupport(CV_CPU_FP16)) {
         enableFP16 = haveFP16 = true;
-    }*/
+    }
 
     tracingMode = DNN_TRACE_NONE;
     profilingMode = DNN_PROFILE_NONE;
