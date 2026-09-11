@@ -480,6 +480,9 @@ void transpose( InputArray _src, OutputArray _dst )
     int type = _src.type(), esz = CV_ELEM_SIZE(type);
     CV_Assert( _src.dims() <= 2 && esz <= 32 );
 
+    CV_NON_CPU_HAL_RUN(_src.isUMat() && _dst.isUMat(),
+                       cv_non_cpu_hal_transpose2d(_src, _dst))
+
     CV_OCL_RUN(_dst.isUMat(),
                ocl_transpose(_src, _dst))
 
@@ -1071,6 +1074,9 @@ void flip( InputArray _src, OutputArray _dst, int flip_mode )
     {
         return _src.copyTo(_dst);
     }
+
+    CV_NON_CPU_HAL_RUN(_src.isUMat() && _dst.isUMat(),
+                       cv_non_cpu_hal_flip(_src, _dst, flip_mode))
 
     CV_OCL_RUN( _dst.isUMat(), ocl_flip(_src, _dst, flip_mode))
 
