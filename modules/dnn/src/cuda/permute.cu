@@ -248,6 +248,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             }
         }
 
+        if (rank == 0) {
+            kernels::copy<T>(stream, output, input);
+            return;
+        }
+
         std::vector<std::size_t> inStride(rank), outStride(rank);
         inStride.back() = 1;
         outStride.back() = 1;

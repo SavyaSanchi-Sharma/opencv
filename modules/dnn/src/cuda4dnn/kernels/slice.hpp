@@ -15,7 +15,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     template <class T>
     void slice(const csl::Stream& stream,
         csl::TensorSpan<T> output, csl::TensorView<T> input,
-        std::vector<std::size_t> offsets);
+        std::vector<std::size_t> offsets,
+        std::vector<std::size_t> steps = {});
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 

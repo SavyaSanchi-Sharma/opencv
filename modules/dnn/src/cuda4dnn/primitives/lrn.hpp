@@ -63,6 +63,21 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            for (int i = 0; i < inputs.size(); i++)
+            {
+                auto input = csl::viewOf<T>(inputs[i]);
+                auto output = csl::spanOf<T>(outputs[i]);
+
+                csl::WorkspaceAllocator allocator(workspace);
+                lrn.normalize(input, output, allocator.get_instance());
+            }
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:
