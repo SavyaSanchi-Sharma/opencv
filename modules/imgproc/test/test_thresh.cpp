@@ -294,8 +294,11 @@ TEST_P(Threshold_HalfFloat, vs_fp32)
                 cv::threshold(wid, b, threshes[t], 1.0, types[i]);
                 a.convertTo(a32, CV_MAKETYPE(CV_32F, cn));
 
-                // thresholding only selects or clamps, never averages, so it is exact
-                EXPECT_EQ(0, cvtest::norm(a32, b, NORM_INF));
+                // TRUNC writes min(src, thresh), which rounds when thresh is not
+                // representable; the other four only select src, maxval or 0
+                const double tol = types[i] != THRESH_TRUNC ? 0.0 :
+                    (depth == CV_16F ? 1e-3 : 8e-3) * std::max(1.0, cvtest::norm(b, NORM_INF));
+                EXPECT_LE(cvtest::norm(a32, b, NORM_INF), tol);
             }
     }
 }
