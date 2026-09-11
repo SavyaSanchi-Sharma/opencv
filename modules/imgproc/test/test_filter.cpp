@@ -1260,6 +1260,11 @@ TEST_P(Filter_HalfFloat, sqrBoxFilter_vs_fp32)
         cv::sqrBoxFilter(wid, b, CV_32F, Size(3, 3));
         ASSERT_EQ(CV_32F, a.depth());
         EXPECT_LE(cvtest::norm(a, b, NORM_INF), eps * std::max(1.0, cvtest::norm(b, NORM_INF)));
+
+        // default ddepth must pick CV_32F for a narrow input, not CV_64F
+        Mat d;
+        ASSERT_NO_THROW(cv::sqrBoxFilter(src, d, -1, Size(3, 3)));
+        EXPECT_EQ(CV_32F, d.depth());
     }
 }
 

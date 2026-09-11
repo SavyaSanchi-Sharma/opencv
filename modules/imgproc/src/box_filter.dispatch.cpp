@@ -405,7 +405,7 @@ void sqrBoxFilter(InputArray _src, OutputArray _dst, int ddepth,
     Size size = _src.size();
 
     if( ddepth < 0 )
-        ddepth = sdepth < CV_32F ? CV_32F : CV_64F;
+        ddepth = isHalfFloat(sdepth) || sdepth < CV_32F ? CV_32F : CV_64F;
 
     if( borderType != BORDER_CONSTANT && normalize )
     {

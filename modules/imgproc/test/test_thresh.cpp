@@ -278,20 +278,51 @@ TEST_P(Threshold_HalfFloat, vs_fp32)
         s32.convertTo(src, CV_MAKETYPE(depth, cn));
         src.convertTo(wid, CV_MAKETYPE(CV_32F, cn));
 
+        // 0.5 is exact; 0.3 rounds up on both depths; 0.1 rounds down on fp16
+        // and up on bf16, so both directions get exercised
+        const double threshes[] = { 0.5, 0.3, 0.1 };
+
         for (int i = 0; i < 5; i++)
-        {
-            SCOPED_TRACE(cv::format("depth=%d cn=%d type=%d", depth, cn, types[i]));
+            for (int t = 0; t < 3; t++)
+            {
+                SCOPED_TRACE(cv::format("depth=%d cn=%d type=%d thresh=%g",
+                                        depth, cn, types[i], threshes[t]));
 
-            Mat a, b, a32;
-            ASSERT_NO_THROW(cv::threshold(src, a, 0.5, 1.0, types[i]));
-            ASSERT_EQ(depth, a.depth());
-            cv::threshold(wid, b, 0.5, 1.0, types[i]);
-            a.convertTo(a32, CV_MAKETYPE(CV_32F, cn));
+                Mat a, b, a32;
+                ASSERT_NO_THROW(cv::threshold(src, a, threshes[t], 1.0, types[i]));
+                ASSERT_EQ(depth, a.depth());
+                cv::threshold(wid, b, threshes[t], 1.0, types[i]);
+                a.convertTo(a32, CV_MAKETYPE(CV_32F, cn));
 
-            // thresholding only selects or clamps, never averages, so it is exact
-            EXPECT_EQ(0, cvtest::norm(a32, b, NORM_INF));
-        }
+                // thresholding only selects or clamps, never averages, so it is exact
+                EXPECT_EQ(0, cvtest::norm(a32, b, NORM_INF));
+            }
     }
+}
+
+
+// a pixel equal to the rounded threshold must follow the true threshold
+TEST_P(Threshold_HalfFloat, threshold_is_not_quantized)
+{
+    const int depth = GetParam();
+
+    // 0.3 is not representable; the nearest half-float value is above it
+    const double thresh = 0.3;
+    Mat probe32(1, 1, CV_32FC1, Scalar::all((float)thresh)), probe, roundTrip;
+    probe32.convertTo(probe, depth);
+    probe.convertTo(roundTrip, CV_32F);
+    const float rounded = roundTrip.at<float>(0, 0);
+    ASSERT_GT(rounded, (float)thresh) << "pick a threshold that rounds up for this depth";
+
+    Mat src(1, 1, CV_MAKETYPE(depth, 1));
+    probe.copyTo(src);
+
+    Mat dst, dst32;
+    cv::threshold(src, dst, thresh, 1.0, THRESH_BINARY);
+    dst.convertTo(dst32, CV_32F);
+
+    // rounded > thresh, so the pixel is above the threshold and takes maxval
+    EXPECT_EQ(1.f, dst32.at<float>(0, 0));
 }
 
 INSTANTIATE_TEST_CASE_P(Imgproc, Threshold_HalfFloat, testing::Values(CV_16F, CV_16BF));

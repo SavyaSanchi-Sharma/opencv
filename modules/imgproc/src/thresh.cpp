@@ -47,39 +47,40 @@
 namespace cv
 {
 
-template <typename T>
-static inline T threshBinary(const T& src, const T& thresh, const T& maxval)
+// WT is the compare type; half depths pass float so thresh is not quantized first
+template <typename T, typename WT = T>
+static inline T threshBinary(const T& src, const WT& thresh, const T& maxval)
 {
-    return src > thresh ? maxval : (T)0;
+    return (WT)src > thresh ? maxval : (T)0;
 }
 
-template <typename T>
-static inline T threshBinaryInv(const T& src, const T& thresh, const T& maxval)
+template <typename T, typename WT = T>
+static inline T threshBinaryInv(const T& src, const WT& thresh, const T& maxval)
 {
-    return src <= thresh ? maxval : (T)0;
+    return (WT)src <= thresh ? maxval : (T)0;
 }
 
-template <typename T>
-static inline T threshTrunc(const T& src, const T& thresh)
+template <typename T, typename WT = T>
+static inline T threshTrunc(const T& src, const WT& thresh)
 {
-    return std::min(src, thresh);
+    return saturate_cast<T>(std::min((WT)src, thresh));
 }
 
-template <typename T>
-static inline T threshToZero(const T& src, const T& thresh)
+template <typename T, typename WT = T>
+static inline T threshToZero(const T& src, const WT& thresh)
 {
-    return src > thresh ? src : (T)0;
+    return (WT)src > thresh ? src : (T)0;
 }
 
-template <typename T>
-static inline T threshToZeroInv(const T& src, const T& thresh)
+template <typename T, typename WT = T>
+static inline T threshToZeroInv(const T& src, const WT& thresh)
 {
-    return src <= thresh ? src : (T)0;
+    return (WT)src <= thresh ? src : (T)0;
 }
 
-template <typename T>
+template <typename T, typename WT = T>
 static void threshGeneric(Size roi, const T* src, size_t src_step, T* dst,
-                          size_t dst_step, T thresh, T maxval, int type)
+                          size_t dst_step, WT thresh, T maxval, int type)
 {
     int i = 0, j;
     switch (type)
@@ -87,31 +88,31 @@ static void threshGeneric(Size roi, const T* src, size_t src_step, T* dst,
     case THRESH_BINARY:
         for (; i < roi.height; i++, src += src_step, dst += dst_step)
             for (j = 0; j < roi.width; j++)
-                dst[j] = threshBinary<T>(src[j], thresh, maxval);
+                dst[j] = threshBinary<T, WT>(src[j], thresh, maxval);
         return;
 
     case THRESH_BINARY_INV:
         for (; i < roi.height; i++, src += src_step, dst += dst_step)
             for (j = 0; j < roi.width; j++)
-                dst[j] = threshBinaryInv<T>(src[j], thresh, maxval);
+                dst[j] = threshBinaryInv<T, WT>(src[j], thresh, maxval);
         return;
 
     case THRESH_TRUNC:
         for (; i < roi.height; i++, src += src_step, dst += dst_step)
             for (j = 0; j < roi.width; j++)
-                  dst[j] = threshTrunc<T>(src[j], thresh);
+                  dst[j] = threshTrunc<T, WT>(src[j], thresh);
         return;
 
     case THRESH_TOZERO:
         for (; i < roi.height; i++, src += src_step, dst += dst_step)
             for (j = 0; j < roi.width; j++)
-                dst[j] = threshToZero<T>(src[j], thresh);
+                dst[j] = threshToZero<T, WT>(src[j], thresh);
         return;
 
     case THRESH_TOZERO_INV:
         for (; i < roi.height; i++, src += src_step, dst += dst_step)
             for (j = 0; j < roi.width; j++)
-                dst[j] = threshToZeroInv<T>(src[j], thresh);
+                dst[j] = threshToZeroInv<T, WT>(src[j], thresh);
         return;
 
     default:
@@ -119,9 +120,9 @@ static void threshGeneric(Size roi, const T* src, size_t src_step, T* dst,
     }
 }
 
-template <typename T>
+template <typename T, typename WT = T>
 static void threshGenericWithMask(const Mat& _src, Mat& _dst, const Mat& _mask,
-                                  T thresh, T maxval, int type)
+                                  WT thresh, T maxval, int type)
 {
     Size roi = _src.size();
     const int cn = _src.channels();
@@ -141,35 +142,35 @@ static void threshGenericWithMask(const Mat& _src, Mat& _dst, const Mat& _mask,
         for (; i < roi.height; i++, src += src_step, dst += dst_step, mask += mask_step)
             for (j = 0; j < roi.width; j++)
                 if (mask[j/cn] != 0)
-                    dst[j] = threshBinary<T>(src[j], thresh, maxval);
+                    dst[j] = threshBinary<T, WT>(src[j], thresh, maxval);
         return;
 
     case THRESH_BINARY_INV:
         for (; i < roi.height; i++, src += src_step, dst += dst_step, mask += mask_step)
             for (j = 0; j < roi.width; j++)
                 if (mask[j/cn] != 0)
-                    dst[j] = threshBinaryInv<T>(src[j], thresh, maxval);
+                    dst[j] = threshBinaryInv<T, WT>(src[j], thresh, maxval);
         return;
 
     case THRESH_TRUNC:
         for (; i < roi.height; i++, src += src_step, dst += dst_step, mask += mask_step)
             for (j = 0; j < roi.width; j++)
                 if (mask[j/cn] != 0)
-                    dst[j] = threshTrunc<T>(src[j], thresh);
+                    dst[j] = threshTrunc<T, WT>(src[j], thresh);
         return;
 
     case THRESH_TOZERO:
         for (; i < roi.height; i++, src += src_step, dst += dst_step, mask += mask_step)
             for (j = 0; j < roi.width; j++)
                 if (mask[j/cn] != 0)
-                    dst[j] = threshToZero<T>(src[j], thresh);
+                    dst[j] = threshToZero<T, WT>(src[j], thresh);
         return;
 
     case THRESH_TOZERO_INV:
         for (; i < roi.height; i++, src += src_step, dst += dst_step, mask += mask_step)
             for (j = 0; j < roi.width; j++)
                 if (mask[j/cn] != 0)
-                    dst[j] = threshToZeroInv<T>(src[j], thresh);
+                    dst[j] = threshToZeroInv<T, WT>(src[j], thresh);
         return;
 
     default:
@@ -1396,24 +1397,24 @@ public:
             if ( useMask )
             {
                 if (d == CV_16F)
-                    threshGenericWithMask<hfloat>( srcStripe, dstStripe, mask.rowRange(row0, row1),
-                                                   (hfloat)(float)thresh, (hfloat)(float)maxval, thresholdType );
+                    threshGenericWithMask<hfloat, float>( srcStripe, dstStripe, mask.rowRange(row0, row1),
+                                                          (float)thresh, (hfloat)(float)maxval, thresholdType );
                 else
-                    threshGenericWithMask<bfloat>( srcStripe, dstStripe, mask.rowRange(row0, row1),
-                                                   (bfloat)(float)thresh, (bfloat)(float)maxval, thresholdType );
+                    threshGenericWithMask<bfloat, float>( srcStripe, dstStripe, mask.rowRange(row0, row1),
+                                                          (float)thresh, (bfloat)(float)maxval, thresholdType );
             }
             else
             {
                 Size roi = srcStripe.size();
                 roi.width *= srcStripe.channels();
                 if (d == CV_16F)
-                    threshGeneric<hfloat>(roi, srcStripe.ptr<hfloat>(), srcStripe.step/sizeof(hfloat),
-                                          dstStripe.ptr<hfloat>(), dstStripe.step/sizeof(hfloat),
-                                          (hfloat)(float)thresh, (hfloat)(float)maxval, thresholdType);
+                    threshGeneric<hfloat, float>(roi, srcStripe.ptr<hfloat>(), srcStripe.step/sizeof(hfloat),
+                                                 dstStripe.ptr<hfloat>(), dstStripe.step/sizeof(hfloat),
+                                                 (float)thresh, (hfloat)(float)maxval, thresholdType);
                 else
-                    threshGeneric<bfloat>(roi, srcStripe.ptr<bfloat>(), srcStripe.step/sizeof(bfloat),
-                                          dstStripe.ptr<bfloat>(), dstStripe.step/sizeof(bfloat),
-                                          (bfloat)(float)thresh, (bfloat)(float)maxval, thresholdType);
+                    threshGeneric<bfloat, float>(roi, srcStripe.ptr<bfloat>(), srcStripe.step/sizeof(bfloat),
+                                                 dstStripe.ptr<bfloat>(), dstStripe.step/sizeof(bfloat),
+                                                 (float)thresh, (bfloat)(float)maxval, thresholdType);
             }
         }
     }
