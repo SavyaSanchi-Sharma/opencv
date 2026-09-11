@@ -70,6 +70,34 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernels::resize_bilinear<T>(stream, output, input, scale_height, scale_width, half_pixel_centers);
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert((inputs.size() == 1 || inputs.size() == 2) && outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            const auto compute_scale = [this](std::size_t input_size, std::size_t output_size) {
+                return (align_corners && output_size > 1) ?
+                            static_cast<float>(input_size - 1) / (output_size - 1) :
+                            static_cast<float>(input_size) / output_size;
+            };
+
+            auto out_height = output.get_axis_size(-2), out_width = output.get_axis_size(-1);
+            auto in_height = input.get_axis_size(-2), in_width = input.get_axis_size(-1);
+            float scale_height = compute_scale(in_height, out_height),
+                  scale_width = compute_scale(in_width, out_width);
+
+            if (type == InterpolationType::NEAREST_NEIGHBOUR)
+                kernels::resize_nn<T>(stream, output, input, scale_height, scale_width, align_corners, half_pixel_centers);
+            else if (type == InterpolationType::BILINEAR)
+                kernels::resize_bilinear<T>(stream, output, input, scale_height, scale_width, half_pixel_centers);
+        }
+
     private:
         csl::Stream stream;
         InterpolationType type;

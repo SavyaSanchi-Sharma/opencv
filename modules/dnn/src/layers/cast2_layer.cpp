@@ -7,6 +7,11 @@
 #include "../ie_ngraph.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/cast.hpp"
+#include "../cuda4dnn/primitives/reshape.hpp"
+#endif
 
 #include "opencv-onnx.pb.h"
 #include "../onnx/onnx_dtype_convert.hpp"
@@ -100,9 +105,39 @@ public:
         // Exotic dtypes (FP8/FP4/INT4/UINT4) are handled on the CPU path only.
         if (onnx_dtype::isExotic(toOnnxType_))
             return backendId == DNN_BACKEND_OPENCV;
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            int inType = (netimpl_ && inputs.size() == 1) ? netimpl_->argType(inputs[0]) : -1;
+            if (!hasToParam || inputs.size() != 1 || !netimpl_)
+                return false;
+            if (toCvDepth_ == inType)
+                return true;
+            if (toCvDepth_ == CV_32F)
+                return inType == CV_64S;
+            if (toCvDepth_ == CV_64S)
+                return inType == CV_32F;
+            return false;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        int inDepth = inputs_arr.depth(0);
+        if (toCvDepth_ == inDepth)
+            return make_cuda_node_with_type<cuda4dnn::ReshapeOp>(preferableTarget, inDepth, std::move(context->stream));
+        if (inDepth == CV_64S)
+            return Ptr<BackendNode>(new cuda4dnn::CastInt64ToFp32Op(std::move(context->stream)));
+        return Ptr<BackendNode>(new cuda4dnn::CastFp32ToInt64Op(std::move(context->stream)));
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                 const int requiredOutputs,

@@ -45,6 +45,24 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(inputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+
+            for (int i = 0; i < outputs.size(); i++)
+            {
+                auto output = csl::spanOf<T>(outputs[i]);
+
+                csl::tensor_ops::copy<T>(stream, output, input);
+            }
+        }
+
     private:
         csl::Stream stream;
     };

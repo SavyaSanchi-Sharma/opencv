@@ -5,6 +5,11 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/transform_layout.hpp"
+#endif
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -355,6 +360,31 @@ public:
         layout = (DataLayout)params.get<int>("layout");
         C0 = params.get<int>("C0", 1);
     }
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+        {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            return netimpl_ && netimpl_->originalLayout == DATA_LAYOUT_NCHW;
+        }
+#endif
+        return backendId == DNN_BACKEND_OPENCV;
+    }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        int origLayout = (int)getNetImpl(this)->originalLayout;
+        return make_cuda_node_with_type<cuda4dnn::TransformLayoutOp>(preferableTarget, inputs[0].type(), std::move(context->stream), (int)layout, C0, origLayout);
+    }
+#endif
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE
     {

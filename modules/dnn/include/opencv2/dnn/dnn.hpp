@@ -325,6 +325,10 @@ CV__DNN_INLINE_NS_BEGIN
 
         virtual bool dynamicOutputShapes() const;
 
+        virtual void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                      int requiredOutputs,
+                                                      std::vector<MatShape>& outputs) const;
+
         virtual bool isDataShuffling() const;
 
         virtual void getScaleShift(Mat& scale, Mat& shift) const;
@@ -1083,7 +1087,8 @@ CV__DNN_INLINE_NS_BEGIN
         bool haveArg(const std::string& name) const;
 
         bool isConstArg(Arg arg) const;
-        Mat& argTensor(Arg arg) const;
+        // by value: UMat::getMat() returns a temporary Mat, so there is nothing to reference
+        Mat argTensor(Arg arg) const;
         int argType(Arg arg) const;
 
         int findDim(const std::string& name, bool insert=false);

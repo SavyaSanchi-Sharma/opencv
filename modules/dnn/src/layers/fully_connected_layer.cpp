@@ -636,6 +636,34 @@ public:
         auto flatten_start_axis = normalize_axis(axis, input_wrapper->getRank());
         return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, weightsMat, biasMat_);
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto biasMat_ = bias ? biasMat : Mat();
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        if (weightsMat.empty() || isMatMul)
+        {
+            int inp2Dim;
+            // broadcast is not supported with CUDA
+            if(weightsMat.empty())
+                inp2Dim = inputs_arr.shape(1).dims;
+            else
+                inp2Dim = oriMat.dims;
+
+            if(inputs_arr.shape(0).dims == inp2Dim)
+                return make_cuda_node<cuda4dnn::MatMulOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), oriMat, biasMat_, transA, transB);
+            else {
+                CV_LOG_INFO(NULL, "DNN/CUDA: no implementation for MatMul with rank " << inputs_arr.shape(0).dims);
+                return Ptr<BackendNode>();
+            }
+        }
+
+        auto flatten_start_axis = normalize_axis(axis, inputs_arr.shape(0).dims);
+        return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, weightsMat, biasMat_);
+    }
 #endif
 
 #ifdef HAVE_VULKAN

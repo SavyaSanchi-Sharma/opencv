@@ -8,6 +8,12 @@
 #include "layers_common.hpp"
 #include "cpu_kernels/fast_norm.hpp"
 
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/layer_norm.hpp"
+using namespace cv::dnn::cuda4dnn;
+#endif
+
 namespace cv {
 namespace dnn {
 
@@ -29,7 +35,8 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        return backendId == DNN_BACKEND_OPENCV ||
+               (backendId == DNN_BACKEND_CUDA && !blobs.empty());
     }
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -104,6 +111,23 @@ public:
             fastNorm(input, scale, output, epsilon, (size_t)axis_);
         }
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void *context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        int axis_ = normalize_axis(axis0, inputs_arr.shape(0).dims);
+        auto input_shape = inputs_arr.shape(0);
+        size_t loops = static_cast<size_t>(total(input_shape, 0, axis_));
+
+        const auto scale = blobs.front(),
+                   bias = blobs.size() >= 2 ? blobs.back() : Mat();
+
+        return make_cuda_node<cuda4dnn::LayerNormOp>(preferableTarget, std::move(context->stream), scale, bias, axis_, epsilon, loops);
+    }
+#endif // HAVE_CUDA
 };
 
 Ptr<LayerNorm2Layer> LayerNorm2Layer::create(const LayerParams& params)

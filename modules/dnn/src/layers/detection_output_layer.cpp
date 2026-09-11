@@ -995,6 +995,51 @@ public:
         config.keepTopK = _keepTopK;
         return make_cuda_node<cuda4dnn::DetectionOutputOp>(preferableTarget, std::move(context->stream), config);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        auto locations_shape = inputs_arr.shape(0);
+        auto priors_shape = inputs_arr.shape(2);
+
+        cuda4dnn::DetectionOutputConfiguration config;
+        config.batch_size = locations_shape[0];
+
+        if (_codeType == "CORNER")
+        {
+            config.code_type = cuda4dnn::DetectionOutputConfiguration::CodeType::CORNER;
+        }
+        else if(_codeType == "CENTER_SIZE")
+        {
+            config.code_type = cuda4dnn::DetectionOutputConfiguration::CodeType::CENTER_SIZE;
+        }
+        else
+        {
+            CV_Error(Error::StsNotImplemented, _codeType + " code type not supported by CUDA backend in DetectionOutput layer");
+        }
+
+        config.share_location = _shareLocation;
+        config.num_priors = priors_shape[2] / 4;
+        config.num_classes = _numClasses;
+        config.background_class_id = _backgroundLabelId;
+
+        config.transpose_location = _locPredTransposed;
+        config.variance_encoded_in_target = _varianceEncodedInTarget;
+        config.normalized_bbox = _bboxesNormalized;
+        config.clip_box = _clip;
+
+        config.classwise_topK = _topK;
+        config.confidence_threshold = _confidenceThreshold;
+        config.nms_threshold = _nmsThreshold;
+
+        config.keepTopK = _keepTopK;
+        return make_cuda_node<cuda4dnn::DetectionOutputOp>(preferableTarget, std::move(context->stream), config);
+    }
 #endif
 
 

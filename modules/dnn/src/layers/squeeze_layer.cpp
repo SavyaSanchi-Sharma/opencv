@@ -5,7 +5,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
-//#include "../op_cuda.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/reshape.hpp"
+#endif
 //#include "../op_inf_engine.hpp"
 //#include "../ie_ngraph.hpp"
 //#include "../op_webnn.hpp"
@@ -45,10 +48,30 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        return backendId == DNN_BACKEND_OPENCV
+#ifdef HAVE_CUDA
+        || backendId == DNN_BACKEND_CUDA
+#endif
+;
     }
 
     virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
+
+    // Squeeze just re-interprets the same contiguous buffer (see reshape2_layer.cpp);
+    // reuse the same cuda4dnn::ReshapeOp used there instead of a dedicated kernel.
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::ReshapeOp>(std::move(context->stream));
+        else
+            return make_cuda_node_with_type<cuda4dnn::ReshapeOp>(preferableTarget, inputs_arr.depth(0),
+                                                                  std::move(context->stream));
+    }
+#endif
 
     MatShape getOutShape(const MatShape& inpShape, const std::vector<int>& axes_) const
     {
@@ -100,13 +123,23 @@ public:
             CV_Assert(axes.empty()); // if we have a dedicated 'axes' input,
                                      // we should not have 'axes' attribute at the same time
             Net::Impl* netimpl_ = getNetImpl(this);
-            Mat axesTensor = netimpl_->argTensor(this->inputs[1]);
+            Mat axesTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
             tensorToIntVec(axesTensor, tempAxes);
             axes_ = &tempAxes;
         }
         outputs.assign(1, getOutShape(inputs[0], *axes_));
         internals.clear();
         return true;
+    }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        std::vector<MatShape> inpShapes(inputs.size());
+        for (size_t i = 0; i < inputs.size(); i++)
+            inpShapes[i] = inputs[i].shape();
+        std::vector<MatShape> internals;
+        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
     }
 
     void getTypes(const std::vector<MatType>& inputs,
