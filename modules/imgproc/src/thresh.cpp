@@ -1325,6 +1325,30 @@ getThreshVal_Triangle_8u( const Mat& _src, const Mat& _mask = cv::Mat() )
     return thresh;
 }
 
+template <typename T>
+static void threshHalf(const Mat& src, Mat& dst, const Mat& mask, int row0, int row1,
+                       double thresh, double maxval, int type)
+{
+    if (!mask.empty())
+    {
+        threshGenericWithMask<T, float>(src, dst, mask.rowRange(row0, row1),
+                                        (float)thresh, (T)(float)maxval, type);
+        return;
+    }
+
+    Size roi = src.size();
+    roi.width *= src.channels();
+    if( src.isContinuous() && dst.isContinuous() )
+    {
+        roi.width *= roi.height;
+        roi.height = 1;
+    }
+
+    threshGeneric<T, float>(roi, src.ptr<T>(), src.step/sizeof(T),
+                            dst.ptr<T>(), dst.step/sizeof(T),
+                            (float)thresh, (T)(float)maxval, type);
+}
+
 class ThresholdRunner : public ParallelLoopBody
 {
 public:
@@ -1391,32 +1415,10 @@ public:
             else
                 thresh_64f(srcStripe, dstStripe, thresh, maxval, thresholdType);
         }
-        else if( srcStripe.depth() == CV_16F || srcStripe.depth() == CV_16BF )
-        {
-            const int d = srcStripe.depth();
-            if ( useMask )
-            {
-                if (d == CV_16F)
-                    threshGenericWithMask<hfloat, float>( srcStripe, dstStripe, mask.rowRange(row0, row1),
-                                                          (float)thresh, (hfloat)(float)maxval, thresholdType );
-                else
-                    threshGenericWithMask<bfloat, float>( srcStripe, dstStripe, mask.rowRange(row0, row1),
-                                                          (float)thresh, (bfloat)(float)maxval, thresholdType );
-            }
-            else
-            {
-                Size roi = srcStripe.size();
-                roi.width *= srcStripe.channels();
-                if (d == CV_16F)
-                    threshGeneric<hfloat, float>(roi, srcStripe.ptr<hfloat>(), srcStripe.step/sizeof(hfloat),
-                                                 dstStripe.ptr<hfloat>(), dstStripe.step/sizeof(hfloat),
-                                                 (float)thresh, (hfloat)(float)maxval, thresholdType);
-                else
-                    threshGeneric<bfloat, float>(roi, srcStripe.ptr<bfloat>(), srcStripe.step/sizeof(bfloat),
-                                                 dstStripe.ptr<bfloat>(), dstStripe.step/sizeof(bfloat),
-                                                 (float)thresh, (bfloat)(float)maxval, thresholdType);
-            }
-        }
+        else if( srcStripe.depth() == CV_16F )
+            threshHalf<hfloat>( srcStripe, dstStripe, mask, row0, row1, thresh, maxval, thresholdType );
+        else if( srcStripe.depth() == CV_16BF )
+            threshHalf<bfloat>( srcStripe, dstStripe, mask, row0, row1, thresh, maxval, thresholdType );
     }
 
 private:
