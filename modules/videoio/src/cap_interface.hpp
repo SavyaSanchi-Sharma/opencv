@@ -291,10 +291,7 @@ public:
             return false;
         }
 
-        if (image.isMat() && !image.fixedSize() && !image.fixedType())
-            image.assign(current.mat);
-        else
-            current.mat.copyTo(image);
+        current.mat.copyTo(image);
         return true;
     }
 

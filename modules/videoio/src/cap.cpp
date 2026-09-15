@@ -597,6 +597,20 @@ VideoCapture& VideoCapture::operator >> (UMat& image)
     return *this;
 }
 
+static bool isPrefetchSupported(const Ptr<IVideoCapture>& cap)
+{
+    switch (cap->getCaptureDomain())
+    {
+        case CAP_MSMF:
+        case CAP_DSHOW:
+        case CAP_OBSENSOR:
+        case CAP_AVFOUNDATION:
+            return false;
+        default:
+            return true;
+    }
+}
+
 bool VideoCapture::set(int propId, double value)
 {
     CV_CheckNE(propId, (int)CAP_PROP_BACKEND, "Can't set read-only property");
@@ -614,6 +628,12 @@ bool VideoCapture::set(int propId, double value)
         }
         if (!prefetch)
         {
+            if (!isPrefetchSupported(icap))
+            {
+                CV_LOG_WARNING(NULL, "VIDEOIO: CAP_PROP_PREFETCH_FRAMES is not supported by backend "
+                                     << videoio_registry::getBackendName((VideoCaptureAPIs)icap->getCaptureDomain()));
+                return false;
+            }
             icap = makePtr<PrefetchCapture>(icap, static_cast<size_t>(depth));
             return true;
         }

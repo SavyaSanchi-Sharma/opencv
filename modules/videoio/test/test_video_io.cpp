@@ -695,6 +695,150 @@ inline static std::string safe_capture_name_printer(const testing::TestParamInfo
 INSTANTIATE_TEST_CASE_P(videoio, safe_capture, testing::ValuesIn(safe_apis), safe_capture_name_printer);
 
 //==================================================================================================
+// TEST_P(prefetch_capture, ...)
+
+typedef testing::TestWithParam<VideoCaptureAPIs> prefetch_capture;
+
+static void openBunnyOrSkip(VideoCapture& cap, VideoCaptureAPIs apiPref)
+{
+    if (!videoio_registry::hasBackend(apiPref))
+        throw SkipTestException(cv::String("Backend is not available/disabled: ") + cv::videoio_registry::getBackendName(apiPref));
+
+    const String video_file = BunnyParameters::getFilename(String(".avi"));
+    EXPECT_NO_THROW(cap.open(video_file, apiPref));
+    if (!cap.isOpened())
+        throw SkipTestException(cv::String("Backend can't open the video: ") + video_file);
+}
+
+TEST_P(prefetch_capture, retrieve_returns_independent_buffer)
+{
+    VideoCapture cap;
+    openBunnyOrSkip(cap, GetParam());
+    ASSERT_TRUE(cap.set(CAP_PROP_PREFETCH_FRAMES, 4));
+
+    ASSERT_TRUE(cap.grab());
+
+    Mat first;
+    ASSERT_TRUE(cap.retrieve(first));
+    ASSERT_FALSE(first.empty());
+    const Mat reference = first.clone();
+
+    first.setTo(Scalar::all(0));
+
+    Mat second;
+    ASSERT_TRUE(cap.retrieve(second));
+    ASSERT_FALSE(second.empty());
+    EXPECT_EQ(0, cv::norm(reference, second, NORM_INF));
+}
+
+TEST_P(prefetch_capture, matches_direct_read)
+{
+    const VideoCaptureAPIs apiPref = GetParam();
+    const int frame_count = 10;
+
+    VideoCapture direct;
+    openBunnyOrSkip(direct, apiPref);
+
+    std::vector<Mat> expected_frames;
+    std::vector<int> expected_positions;
+    for (int i = 0; i < frame_count; i++)
+    {
+        Mat frame;
+        ASSERT_NO_THROW(direct >> frame);
+        ASSERT_FALSE(frame.empty()) << i;
+        expected_frames.push_back(frame);
+        expected_positions.push_back((int)direct.get(CAP_PROP_POS_FRAMES));
+    }
+
+    VideoCapture prefetched;
+    openBunnyOrSkip(prefetched, apiPref);
+    ASSERT_TRUE(prefetched.set(CAP_PROP_PREFETCH_FRAMES, 4));
+
+    for (int i = 0; i < frame_count; i++)
+    {
+        Mat frame;
+        ASSERT_NO_THROW(prefetched >> frame);
+        ASSERT_FALSE(frame.empty()) << i;
+        EXPECT_EQ(0, cv::norm(expected_frames[i], frame, NORM_INF)) << i;
+        EXPECT_EQ(expected_positions[i], (int)prefetched.get(CAP_PROP_POS_FRAMES)) << i;
+    }
+}
+
+TEST_P(prefetch_capture, disable_resumes_direct_read)
+{
+    const VideoCaptureAPIs apiPref = GetParam();
+
+    VideoCapture cap;
+    openBunnyOrSkip(cap, apiPref);
+    ASSERT_TRUE(cap.set(CAP_PROP_PREFETCH_FRAMES, 4));
+    EXPECT_EQ(4, (int)cap.get(CAP_PROP_PREFETCH_FRAMES));
+
+    Mat frame;
+    for (int i = 0; i < 5; i++)
+    {
+        ASSERT_NO_THROW(cap >> frame);
+        ASSERT_FALSE(frame.empty()) << i;
+    }
+
+    ASSERT_TRUE(cap.set(CAP_PROP_PREFETCH_FRAMES, 0));
+
+    for (int i = 0; i < 5; i++)
+    {
+        ASSERT_NO_THROW(cap >> frame);
+        ASSERT_FALSE(frame.empty()) << i;
+    }
+}
+
+TEST_P(prefetch_capture, drop_policy_keeps_reading)
+{
+    VideoCapture cap;
+    openBunnyOrSkip(cap, GetParam());
+    ASSERT_TRUE(cap.set(CAP_PROP_PREFETCH_FRAMES, 2));
+    ASSERT_TRUE(cap.set(CAP_PROP_PREFETCH_DROP, 1));
+    EXPECT_EQ(1, (int)cap.get(CAP_PROP_PREFETCH_DROP));
+
+    int received = 0;
+    Mat frame;
+    while (received < BunnyParameters::getCount())
+    {
+        cap >> frame;
+        if (frame.empty())
+            break;
+        received++;
+    }
+    EXPECT_GT(received, 0);
+}
+
+TEST_P(prefetch_capture, negative_depth_is_rejected)
+{
+    VideoCapture cap;
+    openBunnyOrSkip(cap, GetParam());
+    EXPECT_FALSE(cap.set(CAP_PROP_PREFETCH_FRAMES, -1));
+}
+
+static VideoCaptureAPIs thread_affine_apis[] = {CAP_MSMF, CAP_DSHOW, CAP_OBSENSOR, CAP_AVFOUNDATION};
+
+typedef testing::TestWithParam<VideoCaptureAPIs> prefetch_unsupported;
+
+TEST_P(prefetch_unsupported, set_is_rejected)
+{
+    VideoCapture cap;
+    openBunnyOrSkip(cap, GetParam());
+    EXPECT_FALSE(cap.set(CAP_PROP_PREFETCH_FRAMES, 4));
+}
+
+inline static std::string prefetch_unsupported_name_printer(const testing::TestParamInfo<prefetch_unsupported::ParamType>& info)
+{
+    std::ostringstream os;
+    os << getBackendNameSafe(info.param);
+    return os.str();
+}
+
+INSTANTIATE_TEST_CASE_P(videoio, prefetch_unsupported, testing::ValuesIn(thread_affine_apis), prefetch_unsupported_name_printer);
+
+INSTANTIATE_TEST_CASE_P(videoio, prefetch_capture, testing::ValuesIn(safe_apis), safe_capture_name_printer);
+
+//==================================================================================================
 // TEST_P(videocapture_acceleration, ...)
 
 struct VideoCaptureAccelerationInput
