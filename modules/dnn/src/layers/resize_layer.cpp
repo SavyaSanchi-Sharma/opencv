@@ -105,15 +105,25 @@ public:
             std::vector<int> sizes;
             std::vector<float> scales;
             if (ninputs >= 4) {
-                Mat sizesTensor = netimpl_->argTensor(this->inputs[3]);
+                Mat sizesTensor = netimpl_->argTensor(this->inputs[3]).getMat(ACCESS_READ);
                 tensorToIntVec(sizesTensor, sizes);
             }
-            Mat scalesTensor = netimpl_->argTensor(this->inputs[ninputs >= 4 ? 2 : 1]);
+            Mat scalesTensor = netimpl_->argTensor(this->inputs[ninputs >= 4 ? 2 : 1]).getMat(ACCESS_READ);
             tensorToFloatVec(scalesTensor, scales);
             outputs[0] = getOutShape(inputs[0], sizes, scales);
         }
         // We can work in-place (do nothing) if input shape == output shape.
         return (outputs[0][2] == inputs[0][2]) && (outputs[0][3] == inputs[0][3]);
+    }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                          std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        std::vector<MatShape> inpShapes(inputs.size());
+        for (size_t i = 0; i < inputs.size(); i++)
+            inpShapes[i] = inputs[i].shape();
+        std::vector<MatShape> internals;
+        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
@@ -549,6 +559,36 @@ public:
         const std::vector<Ptr<BackendWrapper>>& inputs,
         const std::vector<Ptr<BackendWrapper>>& outputs
     ) override
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::ResizeConfiguration config;
+        if (interpolation == "nearest")
+        {
+            config.type = InterpolationType::NEAREST_NEIGHBOUR;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+        }
+        else if (interpolation == "bilinear")
+        {
+            config.type = InterpolationType::BILINEAR;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+        }
+        else if (interpolation == "opencv_linear")
+        {
+            config.type = InterpolationType::BILINEAR;
+            config.align_corners = false;
+            config.half_pixel_centers = true;
+        }
+        else
+            CV_Error(Error::StsNotImplemented, "Requested interpolation mode is not available in resize layer.");
+        return make_cuda_node<cuda4dnn::ResizeOp>(preferableTarget, std::move(context->stream), config);
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
 

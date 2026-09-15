@@ -792,6 +792,46 @@ public:
 
         return make_cuda_node<cuda4dnn::EltwiseOp>(preferableTarget, std::move(context->stream), op_, coeffs);
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        CV_Assert(channelsModeInput == ELTWISE_CHANNNELS_INPUT_0 ||
+                  channelsModeInput == ELTWISE_CHANNNELS_INPUT_0_TRUNCATE ||
+                  channelsModeInput == ELTWISE_CHANNNELS_SAME);
+
+        if(channelsModeInput == ELTWISE_CHANNNELS_INPUT_0 || channelsModeInput == ELTWISE_CHANNNELS_INPUT_0_TRUNCATE)
+        {
+            auto input_shape = inputs_arr.shape(0);
+            int ninputs = inputs_arr.size().area();
+            for (int i = 1; i < ninputs; i++)
+            {
+                auto from_shape = inputs_arr.shape(i);
+                if (input_shape[1] != from_shape[1])
+                {
+                    CV_Assert(op == SUM);
+                    CV_Assert(coeffs.empty());
+                    return make_cuda_node<cuda4dnn::ShortcutOp>(preferableTarget, std::move(context->stream));
+                }
+            }
+        }
+
+        auto op_ = [this] {
+            switch (op) {
+            case MAX: return cuda4dnn::EltwiseOpType::MAX;
+            case MIN: return cuda4dnn::EltwiseOpType::MIN;
+            case SUM: return cuda4dnn::EltwiseOpType::SUM;
+            case PROD: return cuda4dnn::EltwiseOpType::PRODUCT;
+            case DIV: return cuda4dnn::EltwiseOpType::DIV;
+            }
+            return cuda4dnn::EltwiseOpType::SUM;
+        }();
+
+        return make_cuda_node<cuda4dnn::EltwiseOp>(preferableTarget, std::move(context->stream), op_, coeffs);
+    }
 #endif
 
 #ifdef HAVE_CANN

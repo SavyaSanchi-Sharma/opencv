@@ -26,9 +26,10 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     public:
         using wrapper_type = GetCUDABackendWrapperType<T>;
 
-        /* offsets is indexed by output number and each subvector is indexed by axis number */
-        SliceOp(csl::Stream stream_, std::vector<std::vector<std::size_t>> offsets)
-            : stream(std::move(stream_)), offsets(std::move(offsets))
+        /* offsets/steps are indexed by output number and each subvector is indexed by axis number */
+        SliceOp(csl::Stream stream_, std::vector<std::vector<std::size_t>> offsets,
+                std::vector<std::vector<std::size_t>> steps = {})
+            : stream(std::move(stream_)), offsets(std::move(offsets)), steps(std::move(steps))
         {
         }
 
@@ -40,7 +41,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             /* sometimes the output shape is passed in the form of a second input tensor
              * it's only required for initialization and not here
              */
-            CV_Assert(inputs.size() == 1 || inputs.size() == 2);
+            CV_Assert(inputs.size() >= 1);
 
             auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
             auto input = input_wrapper->getView();
@@ -52,13 +53,32 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 auto output_wrapper = outputs[i].dynamicCast<wrapper_type>();
                 auto output = output_wrapper->getSpan();
 
-                kernels::slice<T>(stream, output, input, offsets[i]);
+                kernels::slice<T>(stream, output, input, offsets[i], (size_t)i < steps.size() ? steps[i] : std::vector<std::size_t>());
+            }
+        }
+
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(inputs.size() >= 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+
+            CV_Assert(offsets.size() == outputs.size());
+            for (int i = 0; i < (int)outputs.size(); ++i)
+            {
+                auto output = csl::spanOf<T>(outputs[i]);
+                kernels::slice<T>(stream, output, input, offsets[i], (size_t)i < steps.size() ? steps[i] : std::vector<std::size_t>());
             }
         }
 
     private:
         csl::Stream stream;
         std::vector<std::vector<std::size_t>> offsets;
+        std::vector<std::vector<std::size_t>> steps;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

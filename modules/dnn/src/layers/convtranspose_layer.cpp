@@ -8,6 +8,10 @@
 #include "../net_impl.hpp"
 #include "layers_common.hpp"
 #include "conv2_common.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/transpose_convolution.hpp"
+#endif
 
 namespace cv
 {
@@ -33,6 +37,58 @@ public:
         adjust_pads = params.getVector<int>("adj");
         ngroups = params.get<int>("group", 1);
     }
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return !origWeights.empty() && wshape0.dims == 4;
+#endif
+        return backendId == DNN_BACKEND_OPENCV;
+    }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+
+        CV_Assert(inputs_arr.size().area() == 1);
+        MatShape input_shape = inputs_arr.shape(0);
+        CV_Assert(outputs_arr.size().area() == 1);
+        MatShape output_shape = outputs_arr.shape(0);
+
+        const int nspatial = wshape0.dims - 2;
+
+        cuda4dnn::TransposeConvolutionConfiguration config;
+        for (int i = 0; i < nspatial; i++) {
+            config.kernel_size.push_back((size_t)wshape0[2 + i]);
+            config.strides.push_back(strides.empty() ? 1 : (size_t)strides[i]);
+            config.dilations.push_back(dilations.empty() ? 1 : (size_t)dilations[i]);
+        }
+
+        if (auto_pad == AUTO_PAD_VALID) {
+            config.padMode = cuda4dnn::TransposeConvolutionConfiguration::PaddingMode::VALID;
+        } else if (auto_pad == AUTO_PAD_SAME_UPPER || auto_pad == AUTO_PAD_SAME_LOWER) {
+            config.padMode = cuda4dnn::TransposeConvolutionConfiguration::PaddingMode::SAME;
+        } else {
+            config.padMode = cuda4dnn::TransposeConvolutionConfiguration::PaddingMode::MANUAL;
+            for (int i = 0; i < nspatial; i++) {
+                config.pads_begin.push_back(pads.empty() ? 0 : (size_t)pads[i]);
+                config.pads_end.push_back(pads.empty() ? 0 : (size_t)pads[i + nspatial]);
+            }
+        }
+
+        config.input_shape.assign(input_shape.begin(), input_shape.end());
+        config.output_shape.assign(output_shape.begin(), output_shape.end());
+        config.groups = (size_t)ngroups;
+
+        return make_cuda_node<cuda4dnn::TransposeConvolutionOp>(
+            preferableTarget, std::move(context->stream), std::move(context->cudnn_handle),
+            config, origWeights, bias);
+    }
+#endif
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE
     {
@@ -95,6 +151,7 @@ public:
             rawWeights.convertTo(wfloat, CV_32F);
         else
             wfloat = rawWeights;
+        wfloat.copyTo(origWeights);
         repackDeconvWeights(wfloat, weights, CV_32F, ngroups, C0);
 
         if (!rawBias.empty())
@@ -274,6 +331,7 @@ public:
 
     std::vector<int> emptyKernelShape;
     Mat weights, bias;
+    Mat origWeights;
     MatShape wshape0, prevInpshape;
     ConvState cs;
 };
