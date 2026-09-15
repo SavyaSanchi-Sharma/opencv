@@ -63,7 +63,7 @@ public:
         std::vector<MatType>& outputs,
         std::vector<MatType>& internals) const CV_OVERRIDE
     {
-        if (preferableTarget == DNN_TARGET_OPENCL_FP16
+        if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
             && blobs[0].type() == CV_32F)
             outputs.assign(1, CV_16F);
         else
@@ -167,6 +167,22 @@ public:
         const std::vector<Ptr<BackendWrapper>>& inputs,
         const std::vector<Ptr<BackendWrapper>>& outputs
     ) override
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        CV_Assert(blobs.size() == 1);
+        Mat blob = blobs[0];
+        if (blob.type() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::ConstOp>(std::move(context->stream), blob);
+        else
+            return make_cuda_node_with_type<cuda4dnn::ConstOp>(preferableTarget, blob.type(), std::move(context->stream), blob);
+    }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays,
+        InputArrayOfArrays
+    ) CV_OVERRIDE
     {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
 

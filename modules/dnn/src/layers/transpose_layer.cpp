@@ -11,7 +11,11 @@
 
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
-//#include "../op_cuda.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/permute.hpp"
+#endif
 //#include "../op_inf_engine.hpp"
 //#include "../ie_ngraph.hpp"
 //#include "../op_webnn.hpp"
@@ -216,8 +220,29 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return true;
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        MatShape inpShape = cv::dnn::shape(inputs[0]);
+        const int rank = inpShape.dims;
+        std::vector<std::size_t> order(rank);
+        for (int i = 0; i < rank; i++)
+            order[i] = perm.empty() ? (std::size_t)(rank - i - 1) : (std::size_t)perm[i];
+        return make_cuda_node_with_type<cuda4dnn::PermuteOp>(preferableTarget, inputs[0].type(), std::move(context->stream), order);
+    }
+#endif
 
     MatShape getOutShape(const MatShape& inpShape) const
     {

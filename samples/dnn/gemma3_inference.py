@@ -157,9 +157,6 @@ if __name__ == '__main__':
     tokenizer = cv.dnn.Tokenizer.load(args.tokenizer_path)
 
     net = cv.dnn.readNetFromONNX(args.model, cv.dnn.ENGINE_OPENCV)
-    if net.empty():
-        raise SystemExit('Failed to load the model - readNetFromONNX() only warns, it does not raise. '
-                         'Re-run with OPENCV_LOG_LEVEL=INFO to see which node was rejected and why.')
 
     gemma3_prompt = build_gemma3_prompt(args.prompt)
     print(f"Prompt:\n{gemma3_prompt}")
