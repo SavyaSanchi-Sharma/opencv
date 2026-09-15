@@ -338,6 +338,30 @@ public:
         const auto& weightsMat = blobs.empty() ? Mat() : blobs[0];
         return make_cuda_node<cuda4dnn::NormalizeOp>(preferableTarget, std::move(context->stream), weightsMat, config);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void* context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        if(pnorm != 1 && pnorm != 2)
+            CV_Error(Error::StsNotImplemented, "Unsupported normalization mode");
+
+        MatShape input_shape = inputs_arr.shape(0);
+
+        NormalizeConfiguration<float> config;
+        config.input_shape.assign(std::begin(input_shape), std::end(input_shape));
+        config.axis_start = normalize_axis(startAxis, input_shape.size());
+        config.axis_end = normalize_axis(endAxis, input_shape.size()) + 1; /* +1 because NormalizeOp follows [start, end) convention */
+        config.norm = pnorm;
+        config.eps = epsilon;
+
+        const auto& weightsMat = blobs.empty() ? Mat() : blobs[0];
+        return make_cuda_node<cuda4dnn::NormalizeOp>(preferableTarget, std::move(context->stream), weightsMat, config);
+    }
 #endif
 
 

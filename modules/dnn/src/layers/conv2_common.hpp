@@ -89,6 +89,10 @@ struct ConvState
 
 AutoPadding getAutoPadding(const LayerParams& params);
 
+void getPadding(const std::vector<int>& pads,
+                 int dim, int nspatialdims, AutoPadding autoPad,
+                 int ksize, int& pad0, int& pad1);
+
 typedef void (*ConvFunc)(const void* inp, const void* residual, void* out,
                          const ConvState& cs, const void* weights,
                          const float* scale, const float* bias);

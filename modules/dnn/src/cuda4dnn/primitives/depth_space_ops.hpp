@@ -62,6 +62,26 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             csl::memcpy(output.get(), t.get(), output.size(), stream);
         }
 
+        void forward(const std::vector<UMat> &inputs,
+                     const std::vector<UMat> &outputs,
+                     csl::Workspace &workspace) override {
+            CV_CheckEQ(inputs.size(), size_t(1), "DepthSpaceOps: only one input is accepted");
+            CV_CheckEQ(outputs.size(), size_t(1), "DepthSpaceOps: only one output is accepted");
+
+            auto input = csl::viewOf<T>(inputs.front());
+            CV_CheckEQ(input.rank(), size_t(4), "DepthSpaceOps: input needs to be 4-dimensional [N, C, H, W]");
+            auto output = csl::spanOf<T>(outputs.front());
+            auto ws_allocator = csl::WorkspaceAllocator(workspace);
+            auto transposed_internal = ws_allocator.get_tensor_span<T>(transposed_internal_shape.begin(), transposed_internal_shape.end());
+
+            // Call reshape on input so that it has the correct shape for permutation
+            input.reshape(internal_shape.begin(), internal_shape.end());
+            kernels::permute(stream, transposed_internal, input, permutation);
+            // Only copying is needed as output already has the expected shape
+            auto t = csl::TensorView<T>(transposed_internal);
+            csl::memcpy(output.get(), t.get(), output.size(), stream);
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:

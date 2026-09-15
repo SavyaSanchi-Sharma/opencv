@@ -211,6 +211,40 @@ public:
         CV_Error(Error::BadDepth, "Unsupported indices type");
         return Ptr<BackendNode>();
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::MaxUnpoolingConfiguration config;
+        auto& window_size = config.window_size;
+        window_size.resize(2);
+        window_size[0] = poolKernel.height;
+        window_size[1] = poolKernel.width;
+
+        auto& strides = config.strides;
+        strides.resize(2);
+        strides[0] = poolStride.height;
+        strides[1] = poolStride.width;
+
+        auto& pads_begin = config.pads_begin;
+        pads_begin.resize(2);
+        pads_begin[0] = poolPad.height;
+        pads_begin[1] = poolPad.width;
+
+        int indicesType = inputs_arr.depth(1);
+        CV_CheckType(indicesType, indicesType == CV_32S || indicesType == CV_64S, "Unsupported indices type");
+
+        if (indicesType == CV_32S)
+            return make_cuda_node_with_indices<cuda4dnn::MaxUnpoolingOp, int32_t>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), config);
+        else if (indicesType == CV_64S)
+            return make_cuda_node_with_indices<cuda4dnn::MaxUnpoolingOp, int64_t>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), config);
+
+        CV_Error(Error::BadDepth, "Unsupported indices type");
+        return Ptr<BackendNode>();
+    }
 #endif
 
 #ifdef HAVE_DNN_NGRAPH

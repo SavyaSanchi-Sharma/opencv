@@ -27,25 +27,21 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         ShortcutOp(csl::Stream stream_) : stream(std::move(stream_)) { }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             CV_Assert(outputs.size() == 1);
 
-            auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
-            auto output = output_wrapper->getSpan();
-
-            auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
-            auto input = input_wrapper->getView();
+            auto output = csl::spanOf<T>(outputs[0]);
+            auto input = csl::viewOf<T>(inputs[0]);
 
             /* output shape is determined by the input shape */
             CV_Assert(is_shape_same(output, input));
 
             for (int i = 1; i < inputs.size(); i++)
             {
-                auto from_wrapper = inputs[i].dynamicCast<wrapper_type>();
-                auto from = from_wrapper->getView();
+                auto from = csl::viewOf<T>(inputs[i]);
 
                 CV_Assert(output.rank() == from.rank());
                 for (int i = 0; i < output.rank(); i++) {

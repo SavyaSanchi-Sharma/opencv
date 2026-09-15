@@ -64,12 +64,12 @@ Ptr<BackendNode> Layer::initCUDA(
 {
 #ifdef HAVE_CUDA
     // Adapt the classic wrapper-based entry point to the array-based one, so ops ported to the
-    // new graph engine only need to override initCUDA(context, inputs, outputs) with GpuMatND.
-    std::vector<cuda::GpuMatND> inGpu(inputs.size()), outGpu(outputs.size());
+    // new graph engine only need to override initCUDA(context, inputs, outputs) with UMat.
+    std::vector<UMat> inGpu(inputs.size()), outGpu(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++)
-        inGpu[i] = inputs[i].dynamicCast<CUDABackendWrapper>()->getDeviceMatND();
+        inGpu[i] = inputs[i].dynamicCast<CUDABackendWrapper>()->getDeviceUMat();
     for (size_t i = 0; i < outputs.size(); i++)
-        outGpu[i] = outputs[i].dynamicCast<CUDABackendWrapper>()->getDeviceMatND();
+        outGpu[i] = outputs[i].dynamicCast<CUDABackendWrapper>()->getDeviceUMat();
     return initCUDA(context, inGpu, outGpu);
 #else
     CV_UNUSED(context); CV_UNUSED(inputs); CV_UNUSED(outputs);
@@ -347,6 +347,15 @@ bool LayerInfo::alwaysSupportInplace() const
 bool LayerInfo::dynamicOutputShapes() const
 {
     return false;
+}
+
+void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                 int requiredOutputs,
+                                                 std::vector<MatShape>& outputs) const
+{
+    CV_UNUSED(inputs); CV_UNUSED(requiredOutputs); CV_UNUSED(outputs);
+    CV_Error(Error::StsNotImplemented,
+             format("layer '%s' (%s) does not implement getMemoryShapesForDynamicOutput()", name.c_str(), type.c_str()));
 }
 
 bool LayerInfo::isDataShuffling() const
