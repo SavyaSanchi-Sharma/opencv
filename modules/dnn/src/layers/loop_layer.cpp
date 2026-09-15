@@ -38,7 +38,7 @@ public:
     {
         CV_Assert(inputs.size());
         for (auto input : inputs)
-            CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8U || input == CV_8S ||
+            CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_16F || input == CV_16BF || input == CV_8U || input == CV_8S ||
                                 input == CV_16U || input == CV_16S || input == CV_32U || input == CV_32S ||
                                 input == CV_64U || input == CV_64S || input == CV_Bool,
                          "Loop: unsupported input type");

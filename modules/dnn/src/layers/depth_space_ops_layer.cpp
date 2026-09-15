@@ -186,7 +186,7 @@ public:
         CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) && inputs_arr.depth() != CV_8S,
                    DepthSpaceOps::oclCompute(inputs_arr, outputs_arr, internals_arr))
 
-        if (inputs_arr.depth() == CV_16F) {
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF) {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
         }
@@ -367,7 +367,7 @@ public:
         CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) && inputs_arr.depth() != CV_8S,
                    DepthSpaceOps::oclCompute(inputs_arr, outputs_arr, internals_arr))
 
-        if (inputs_arr.depth() == CV_16F) {
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF) {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
         }

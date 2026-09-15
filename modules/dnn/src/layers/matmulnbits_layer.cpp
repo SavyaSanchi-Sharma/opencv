@@ -72,8 +72,9 @@ class MatMulNBitsLayerImpl CV_FINAL : public MatMulNBitsLayer {
                   std::vector<MatType>& outputs,
                   std::vector<MatType>& internals) const CV_OVERRIDE {
         CV_CheckEQ(inputs.size(), static_cast<size_t>(1), "DNN/MatMulNBits: expected a single activation input");
-        CV_CheckType(inputs[0], inputs[0] == CV_32F, "DNN/MatMulNBits: activation must be CV_32F");
-        outputs.assign(requiredOutputs, CV_32F);
+        CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_16F || inputs[0] == CV_16BF,
+                     "DNN/MatMulNBits: activation must be CV_32F, CV_16F or CV_16BF");
+        outputs.assign(requiredOutputs, inputs[0]);
         internals.assign(requiredInternals, MatType(-1));
     }
 
@@ -151,6 +152,13 @@ class MatMulNBitsLayerImpl CV_FINAL : public MatMulNBitsLayer {
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
+        {
+            forward_fallback(inputs_arr, outputs_arr, internals_arr);
+            return;
+        }
+
 
         std::vector<Mat> inputs, outputs;
         inputs_arr.getMatVector(inputs);

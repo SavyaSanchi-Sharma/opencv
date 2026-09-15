@@ -119,7 +119,8 @@ public:
         int wtype0 = weights_.type();
         CV_Assert(wtype0 == CV_32F || wtype0 == CV_16F || wtype0 == CV_16BF);
         CV_Assert(accuracy == -1 || accuracy == CV_32F);
-        int wtype = accuracy < 0 ? CV_32F : accuracy;
+        // Pack at the weights' own precision: FP16/BF16 stay 2 bytes/element.
+        int wtype = wtype0;
 
         wshape0 = weights_.shape();
 #ifdef HAVE_CUDA

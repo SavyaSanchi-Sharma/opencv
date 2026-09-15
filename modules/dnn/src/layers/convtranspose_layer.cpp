@@ -90,12 +90,13 @@ public:
 
         wshape0 = rawWeights.shape();
 
-        Mat wfloat;
-        if (rawWeights.type() != CV_32F)
-            rawWeights.convertTo(wfloat, CV_32F);
+        const int wtype0 = rawWeights.type();
+        Mat wsrc;
+        if (wtype0 != CV_32F && wtype0 != CV_16F && wtype0 != CV_16BF)
+            rawWeights.convertTo(wsrc, CV_32F);
         else
-            wfloat = rawWeights;
-        repackDeconvWeights(wfloat, weights, CV_32F, ngroups, C0);
+            wsrc = rawWeights;
+        repackDeconvWeights(wsrc, weights, wsrc.type(), ngroups, C0);
 
         if (!rawBias.empty())
             rawBias.convertTo(bias, CV_32F);
@@ -260,6 +261,8 @@ public:
 
         DeconvFunc func = getDeconvFunc(inptype);
         CV_Assert(func != nullptr);
+        CV_CheckTypeEQ(weights.type(), inptype,
+                       "DNN/ConvTranspose: packed weights must match the activation type");
         const float* bias_data = bias.empty() ? nullptr : bias.ptr<float>();
         func(inp.data, nullptr, out.data, cs, weights.data, nullptr, bias_data);
 

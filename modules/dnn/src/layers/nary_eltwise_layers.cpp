@@ -435,7 +435,7 @@ public:
             if (preferableTarget == DNN_TARGET_OPENCL_FP16)
                 CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
             else
-                CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
+                CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_16F || input == CV_16BF || input == CV_8S || input == CV_8U || input == CV_16S || input == CV_16U || input == CV_32S || input == CV_32U || input == CV_64S || input == CV_64U, "");
         }
 
         if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL || op == OPERATION::LESS || op == OPERATION::LESS_EQUAL)
@@ -646,7 +646,8 @@ public:
         const Mat& b = inputs[1];
         Mat& out = outputs[0];
 
-        if (op == OPERATION::POW && std::is_same<T, RESULT_T>::value && b.total() == 1) {
+        if (op == OPERATION::POW && std::is_same<T, RESULT_T>::value && b.total() == 1 &&
+            (std::is_same<T, float>::value || std::is_same<T, double>::value)) {
             cv::pow(a, (double)(*(const T*)b.data), out);
             return;
         }
@@ -918,7 +919,7 @@ public:
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-        if (inputs_arr.depth() == CV_16F)
+        if (preferableTarget == DNN_TARGET_OPENCL_FP16 && inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
@@ -1266,6 +1267,109 @@ public:
         };
     }
 
+    template<typename T, typename... Args>
+    inline void halfOpDispatch(size_t ninputs, Args&&... args)
+    {
+        if (ninputs == 2 && op != OPERATION::WHERE)
+        {
+            switch (op)
+            {
+                case OPERATION::ADD:
+                case OPERATION::SUM:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(float(a) + float(b)); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::SUB:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(float(a) - float(b)); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::PROD:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(float(a) * float(b)); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::DIV:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(float(a) / float(b)); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::MAX:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(std::max(float(a), float(b))); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::MIN:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(std::min(float(a), float(b))); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::MEAN:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T((float(a) + float(b)) / 2.f); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::POW:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(std::pow(float(a), float(b))); },
+                                         std::forward<Args>(args)..., 1e5);
+                    break;
+                case OPERATION::MOD:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T((float)_mod(int(float(a)), int(float(b)))); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::FMOD:
+                    binary_forward<T, T>([](const T &a, const T &b) { return T(std::fmod(float(a), float(b))); },
+                                         std::forward<Args>(args)...);
+                    break;
+                case OPERATION::EQUAL:
+                    binary_forward<T, bool>([](const T &a, const T &b) { return float(a) == float(b); },
+                                            std::forward<Args>(args)...);
+                    break;
+                case OPERATION::GREATER:
+                    binary_forward<T, bool>([](const T &a, const T &b) { return float(a) > float(b); },
+                                            std::forward<Args>(args)...);
+                    break;
+                case OPERATION::GREATER_EQUAL:
+                    binary_forward<T, bool>([](const T &a, const T &b) { return float(a) >= float(b); },
+                                            std::forward<Args>(args)...);
+                    break;
+                case OPERATION::LESS:
+                    binary_forward<T, bool>([](const T &a, const T &b) { return float(a) < float(b); },
+                                            std::forward<Args>(args)...);
+                    break;
+                case OPERATION::LESS_EQUAL:
+                    binary_forward<T, bool>([](const T &a, const T &b) { return float(a) <= float(b); },
+                                            std::forward<Args>(args)...);
+                    break;
+                default:
+                    CV_Error(Error::StsBadArg, "DNN/NaryEltwise: operation has no FP16/BF16 kernel");
+            }
+        }
+        else if (ninputs == 3 && op == OPERATION::WHERE)
+        {
+            ternary_forward<bool, T, T, T>([](const bool &a, const T &b, const T &c) { return a ? b : c; },
+                                           std::forward<Args>(args)...);
+        }
+        else
+        {
+            switch (op)
+            {
+                case OPERATION::MAX:
+                    nary_forward<T>([](const T &a, const T &b) { return T(std::max(float(a), float(b))); },
+                                    T(1.f), std::forward<Args>(args)...);
+                    break;
+                case OPERATION::MIN:
+                    nary_forward<T>([](const T &a, const T &b) { return T(std::min(float(a), float(b))); },
+                                    T(1.f), std::forward<Args>(args)...);
+                    break;
+                case OPERATION::SUM:
+                    nary_forward<T>([](const T &a, const T &b) { return T(float(a) + float(b)); },
+                                    T(1.f), std::forward<Args>(args)...);
+                    break;
+                case OPERATION::MEAN:
+                    nary_forward<T>([](const T &a, const T &b) { return T(float(a) + float(b)); },
+                                    T(1.f / (float)ninputs), std::forward<Args>(args)...);
+                    break;
+                default:
+                    CV_Error(Error::StsBadArg, "DNN/NaryEltwise: operation has no FP16/BF16 kernel");
+            }
+        }
+    }
+
     template<typename... Args>
     inline void typeDispatch(const int type, Args&&... args)
     {
@@ -1273,6 +1377,12 @@ public:
         {
             case CV_Bool:
                 boolOpDispatch(std::forward<Args>(args)...);
+                break;
+            case CV_16F:
+                halfOpDispatch<hfloat>(std::forward<Args>(args)...);
+                break;
+            case CV_16BF:
+                halfOpDispatch<bfloat>(std::forward<Args>(args)...);
                 break;
             case CV_8U:
                 opDispatch<uint8_t>(std::forward<Args>(args)...);
