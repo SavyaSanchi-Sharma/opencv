@@ -479,7 +479,7 @@ public:
         if (preferableTarget == DNN_TARGET_OPENCL_FP16)
             CV_CheckType(inputs[0], inputs[0] == CV_16F || inputs[0] == CV_32F || inputs[0] == CV_64F, "");
         else
-            CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_64F || inputs[0] == CV_16F, "");
+            CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_64F || inputs[0] == CV_16F || inputs[0] == CV_16BF, "");
 
         outputs.assign(1, inputs[0]);
         internals.assign(requiredInternals, inputs[0]);
@@ -525,7 +525,7 @@ public:
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
         CV_CheckEQ((size_t)inputs_arr.total(), (size_t)numInputs, "Number of inputs in forward and inputs during graph construction do not match");
 
-        if (inputs_arr.depth() == CV_16F)
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

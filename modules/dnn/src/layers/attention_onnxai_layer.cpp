@@ -211,7 +211,7 @@ class AttentionOnnxAiLayerImpl CV_FINAL : public AttentionOnnxAiLayer {
             with_kv_cache = netimpl->kvCacheManager.isInitialized;
         }
 
-        if (inputs_arr.depth() == CV_16F)
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

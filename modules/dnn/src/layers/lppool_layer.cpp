@@ -429,8 +429,14 @@ public:
 
     void forward(InputArrayOfArrays inputs_arr,
                  OutputArrayOfArrays outputs_arr,
-                 OutputArrayOfArrays) CV_OVERRIDE
+                 OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
+        {
+            forward_fallback(inputs_arr, outputs_arr, internals_arr);
+            return;
+        }
+
         CV_Assert(inputs_arr.total() == 1);
 
         int inptype = inputs_arr.type(0);

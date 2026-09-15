@@ -474,32 +474,16 @@ MatShape deconvInferShape(const MatShape& inpShape, const MatShape& wshape,
     return outshape;
 }
 
-void repackDeconvWeights(const Mat& weights, Mat& Wpack, int outtype, int ngroups, int C0_)
+template <typename InpT, typename OutT>
+static void repackDeconvWeightsT(const Mat& weights, Mat& Wpack, int ngroups, int C0_,
+                                 const MatShape& wpackShape, int C_in, int Kg, int K_out)
 {
-    CV_Assert(weights.isContinuous());
-    CV_Assert_N(weights.type() == CV_32F, outtype == CV_32F);
-    CV_Assert(ngroups > 0);
-    CV_Assert((C0_ & (C0_ - 1)) == 0 && C0_ >= 4);
-
-    MatShape wshape = weights.shape();
-    CV_Assert(wshape.dims >= 3);
-    int C_in = wshape[0], Kg = wshape[1];
-    CV_Assert(C_in % ngroups == 0);
-    int K_out = ngroups * Kg;
-
-    if (!Wpack.isContinuous())
-        Wpack.release();
-
-    MatShape wpackShape = getDeconvWpackShape(wshape, ngroups, C0_);
-    Wpack.create(wpackShape, CV_32F);
-    Wpack.setZero();
-
     parallel_for_(Range(0, K_out), [&](const Range& range) {
         int Cg = C_in / ngroups;
         int ksize = wpackShape[2], Kblk = wpackShape[1], C1Max = wpackShape[3];
         int C0 = C0_, K0 = C0;
-        const float* wdata = weights.ptr<float>();
-        float* Wpackdata = Wpack.ptr<float>();
+        const InpT* wdata = weights.ptr<InpT>();
+        OutT* Wpackdata = Wpack.ptr<OutT>();
 
         for (int k = range.start; k < range.end; ++k) {
             int g   = k / Kg;
@@ -516,14 +500,55 @@ void repackDeconvWeights(const Mat& weights, Mat& Wpack, int outtype, int ngroup
                 int c0  = ch & (C0 - 1);
 
                 int c_global = g * Cg + c;
-                const float* wptr = wdata + (c_global * Kg + kin) * ksize;
-                float* wpackptr = Wpackdata + (((g * Kblk + kblk) * ksize * C1Max + c1) * C0 + c0) * K0 + k0;
+                const InpT* wptr = wdata + (c_global * Kg + kin) * ksize;
+                OutT* wpackptr = Wpackdata + (((g * Kblk + kblk) * ksize * C1Max + c1) * C0 + c0) * K0 + k0;
                 for (int i = 0; i < ksize; ++i) {
-                    wpackptr[i * (C1Max * C0 * K0)] = wptr[i];
+                    wpackptr[i * (C1Max * C0 * K0)] = OutT(float(wptr[i]));
                 }
             }
         }
     });
+}
+
+void repackDeconvWeights(const Mat& weights, Mat& Wpack, int outtype, int ngroups, int C0_)
+{
+    CV_Assert(weights.isContinuous());
+    int inptype = weights.type();
+    CV_Assert(inptype == CV_32F || inptype == CV_16F || inptype == CV_16BF);
+    CV_Assert(outtype == CV_32F || outtype == CV_16F || outtype == CV_16BF);
+    CV_Assert(ngroups > 0);
+    CV_Assert((C0_ & (C0_ - 1)) == 0 && C0_ >= 4);
+
+    MatShape wshape = weights.shape();
+    CV_Assert(wshape.dims >= 3);
+    int C_in = wshape[0], Kg = wshape[1];
+    CV_Assert(C_in % ngroups == 0);
+    int K_out = ngroups * Kg;
+
+    if (!Wpack.isContinuous())
+        Wpack.release();
+
+    MatShape wpackShape = getDeconvWpackShape(wshape, ngroups, C0_);
+    Wpack.create(wpackShape, outtype);
+    Wpack.setZero();
+
+    #define CV_DNN_REPACK_DECONV_W(InpT) \
+        if (outtype == CV_32F) \
+            repackDeconvWeightsT<InpT, float>(weights, Wpack, ngroups, C0_, wpackShape, C_in, Kg, K_out); \
+        else if (outtype == CV_16F) \
+            repackDeconvWeightsT<InpT, hfloat>(weights, Wpack, ngroups, C0_, wpackShape, C_in, Kg, K_out); \
+        else \
+            repackDeconvWeightsT<InpT, bfloat>(weights, Wpack, ngroups, C0_, wpackShape, C_in, Kg, K_out)
+
+    if (inptype == CV_32F) {
+        CV_DNN_REPACK_DECONV_W(float);
+    } else if (inptype == CV_16F) {
+        CV_DNN_REPACK_DECONV_W(hfloat);
+    } else {
+        CV_DNN_REPACK_DECONV_W(bfloat);
+    }
+
+    #undef CV_DNN_REPACK_DECONV_W
 }
 
 void ConvState::initDeconv(const MatShape& inpshape_,

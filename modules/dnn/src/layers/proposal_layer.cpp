@@ -265,7 +265,7 @@ public:
                    OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
-        if (inputs_arr.depth() == CV_16F)
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

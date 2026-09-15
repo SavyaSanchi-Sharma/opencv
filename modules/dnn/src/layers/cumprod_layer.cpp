@@ -43,13 +43,13 @@ public:
     {
         CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_64F ||
                      inputs[0] == CV_32S || inputs[0] == CV_64S ||
-                     inputs[0] == CV_32U || inputs[0] == CV_64U || inputs[0] == CV_16F, "");
+                     inputs[0] == CV_32U || inputs[0] == CV_64U || inputs[0] == CV_16F || inputs[0] == CV_16BF, "");
         outputs.assign(1, inputs[0]);
     }
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
-        if (inputs_arr.depth() == CV_16F)
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

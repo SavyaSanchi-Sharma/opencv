@@ -237,7 +237,7 @@ public:
                   std::vector<MatType>& outputs,
                   std::vector<MatType>& internals) const CV_OVERRIDE
     {
-        CV_Assert(inputs[0] == CV_32F || inputs[0] == CV_64F);
+        CV_Assert(inputs[0] == CV_32F || inputs[0] == CV_64F || inputs[0] == CV_16F || inputs[0] == CV_16BF);
         outputs.assign(requiredOutputs, inputs[0]);
         internals.assign(requiredInternals, inputs[0]);
     }
@@ -247,7 +247,7 @@ public:
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-        if (inputs_arr.depth() == CV_16F)
+        if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

@@ -1315,7 +1315,7 @@ public:
         else if (globalPooling && (inputs[0] == CV_16F || inputs[0] == CV_16BF))
             ; // global half pooling is handled by globalPoolHalf() in forward()
         else
-            CV_CheckType(inputs[0], inputs[0] == CV_32F, "");
+            CV_CheckType(inputs[0], inputs[0] == CV_32F || inputs[0] == CV_16F || inputs[0] == CV_16BF, "");
 
         outputs.push_back(inputs[0]);
         if (type == MAX && requiredOutputs == 2) {

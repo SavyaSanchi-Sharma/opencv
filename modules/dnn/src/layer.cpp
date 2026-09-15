@@ -260,6 +260,61 @@ void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays 
         internals_arr.assign(orig_internals);
         return;
     }
+    {
+        const int d = inputs_arr.depth();
+        if (d == CV_16F || d == CV_16BF)
+        {
+            std::vector<Mat> orig_inputs, orig_outputs, orig_internals;
+            inputs_arr.getMatVector(orig_inputs);
+            outputs_arr.getMatVector(orig_outputs);
+            internals_arr.getMatVector(orig_internals);
+
+            std::vector<Mat> inputs(orig_inputs.size());
+            std::vector<Mat> outputs(orig_outputs.size());
+            std::vector<Mat> internals(orig_internals.size());
+
+            for (size_t i = 0; i < orig_inputs.size(); i++)
+            {
+                const int di = orig_inputs[i].depth();
+                if (di == CV_16F || di == CV_16BF)
+                    orig_inputs[i].convertTo(inputs[i], CV_32F);
+                else
+                    inputs[i] = orig_inputs[i];
+            }
+            for (size_t i = 0; i < orig_outputs.size(); i++)
+            {
+                const int di = orig_outputs[i].depth();
+                if (di == CV_16F || di == CV_16BF)
+                    outputs[i].fit(orig_outputs[i].shape(), CV_32F);
+                else
+                    outputs[i] = orig_outputs[i];
+            }
+            for (size_t i = 0; i < orig_internals.size(); i++)
+            {
+                const int di = orig_internals[i].depth();
+                if (di == CV_16F || di == CV_16BF)
+                    internals[i].fit(orig_internals[i].shape(), CV_32F);
+                else
+                    internals[i] = orig_internals[i];
+            }
+
+            this->forward(inputs, outputs, internals);
+
+            for (size_t i = 0; i < orig_outputs.size(); i++)
+            {
+                const int di = orig_outputs[i].depth();
+                if (di == CV_16F || di == CV_16BF)
+                    outputs[i].convertTo(orig_outputs[i], di);
+                else
+                    orig_outputs[i] = outputs[i];
+            }
+
+            outputs_arr.assign(orig_outputs);
+            internals_arr.assign(orig_internals);
+            return;
+        }
+    }
+
     std::vector<Mat> inpvec;
     std::vector<Mat> outputs;
     std::vector<Mat> internals;

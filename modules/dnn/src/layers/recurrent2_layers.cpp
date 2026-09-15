@@ -229,7 +229,7 @@ class LSTM2LayerImpl CV_FINAL : public LSTM2Layer
                       std::vector<MatType>& outputs,
                       std::vector<MatType>& internals) const CV_OVERRIDE
         {
-            CV_Assert(inputs[0] == CV_32F || inputs[0] == CV_64F);  // Only floating-point types are supported currently
+            CV_Assert(inputs[0] == CV_32F || inputs[0] == CV_64F || inputs[0] == CV_16F || inputs[0] == CV_16BF);
             outputs.assign(requiredOutputs, inputs[0]);
             internals.clear();
         }
@@ -435,6 +435,12 @@ class LSTM2LayerImpl CV_FINAL : public LSTM2Layer
                      OutputArrayOfArrays outputs_arr,
                      OutputArrayOfArrays internals_arr) CV_OVERRIDE
         {
+            if (inputs_arr.depth() == CV_16F || inputs_arr.depth() == CV_16BF)
+            {
+                forward_fallback(inputs_arr, outputs_arr, internals_arr);
+                return;
+            }
+
 
             std::vector<Mat> input, output;
             inputs_arr.getMatVector(input);
