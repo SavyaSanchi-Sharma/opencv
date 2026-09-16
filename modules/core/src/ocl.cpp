@@ -3762,10 +3762,10 @@ int Kernel::set(int i, const KernelArg& arg)
         }
         // a UMat from another allocator (e.g. CUDA) has no cl_mem; decline so the caller falls back to CPU
         if (arg.m->u && arg.m->u->currAllocator != getOpenCLAllocator())
+        if (arg.m->u && arg.m->u->currAllocator != getOpenCLAllocator())
         {
             CV_LOG_DEBUG(NULL, cv::format("OpenCL: Kernel(%s)::set(arg_index=%d): UMat is not backed by the OpenCL allocator, declining",
                     p->name.c_str(), (int)i));
-            p->cleanupUMats();
             p->release();
             p = 0;
             return -1;
