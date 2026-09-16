@@ -144,7 +144,6 @@ struct Net::Impl : public detail::NetImplBase
     size_t totalLayers;
     std::vector<std::string> dimnames_vec;
     std::vector<ArgData> args;
-    std::map<int, int> declaredOutputTypes;
     std::vector<UMat> __tensors__;
     std::vector<int> bufidxs;
     std::unordered_map<int, int> declaredOutputTypes;

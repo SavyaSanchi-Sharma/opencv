@@ -662,7 +662,8 @@ enum CudaPlacementReason
     CUDA_PLACEMENT_NO_ENGINE,
     CUDA_PLACEMENT_BELOW_THRESHOLD,
     CUDA_PLACEMENT_WHOLE_GRAPH_GATE,
-    CUDA_PLACEMENT_SHORT_GPU_RUN
+    CUDA_PLACEMENT_SHORT_GPU_RUN,
+    CUDA_PLACEMENT_WINDOW_TOO_SPARSE
 };
 
 static const char* cudaPlacementReasonName(int reason)
@@ -680,6 +681,7 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_BELOW_THRESHOLD:  return "below-flops-threshold";
     case CUDA_PLACEMENT_WHOLE_GRAPH_GATE: return "whole-graph-gate";
     case CUDA_PLACEMENT_SHORT_GPU_RUN:    return "short-gpu-run";
+    case CUDA_PLACEMENT_WINDOW_TOO_SPARSE: return "window-too-sparse";
     }
     return "unknown";
 }
@@ -710,7 +712,7 @@ static std::string formatBytes(size_t n)
 
 static bool useCudaPlacementProbe()
 {
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_PROBE", true);
+    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_PROBE", false);
 }
 
 static double cudaMinGpuFlopsShare()
@@ -728,6 +730,23 @@ static size_t cudaMaxCpuBubble()
 static size_t cudaMinGpuRun()
 {
     return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_RUN", 0);
+}
+
+// ops per sliding window; a window with enough device-capable ops forms a device subgraph
+static size_t cudaPlacementWindow()
+{
+    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_WINDOW", 0);
+}
+
+// device-capable ops a window needs before it is worth forming into a device subgraph
+static size_t cudaMinGpuOpsPerWindow()
+{
+    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_OPS", 0);
+}
+
+static bool blockLayoutEnabled()
+{
+    return utils::getConfigurationParameterBool("OPENCV_DNN_BLOCK_LAYOUT", true);
 }
 
 Ptr<Layer> Net::Impl::makeCpuExec(const Ptr<LayerInfo>& op)
@@ -852,7 +871,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
         bool haveShapes = false;
-        if (allowDevicePlacement && (useCudaPlacementProbe() || cudaMinGpuFlopsShare() > 0.0)) {
+        if (allowDevicePlacement) {
             LayerShapes probeShapes;
             try {
                 haveShapes = tryInferShapes(std::vector<MatShape>(), std::vector<MatType>(),
@@ -987,6 +1006,39 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
+        size_t window = cudaPlacementWindow(), minGpuOps = cudaMinGpuOpsPerWindow();
+        if (demoteReason < 0 && window > 0 && minGpuOps == 0) {
+            CV_LOG_WARNING(NULL, "DNN/NewEngine: OPENCV_DNN_CUDA_WINDOW is set but "
+                                 "OPENCV_DNN_CUDA_MIN_GPU_OPS is 0; window placement is disabled.");
+        }
+        if (demoteReason < 0 && window > 0 && minGpuOps > 0) {
+            std::vector<size_t> ops;
+            for (i = 0; i < nops; i++)
+                if (prog[i])
+                    ops.push_back(i);
+
+            size_t wlen = std::min(window, ops.size());
+            std::vector<uchar> accepted(ops.size(), 0);
+            for (size_t start = 0; wlen > 0 && start + wlen <= ops.size(); start++) {
+                size_t ngpu = 0;
+                for (size_t k = start; k < start + wlen; k++)
+                    if (placed[ops[k]])
+                        ngpu++;
+                if (ngpu < minGpuOps)
+                    continue;
+                for (size_t k = start; k < start + wlen; k++)
+                    if (placed[ops[k]])
+                        accepted[k] = 1;
+            }
+
+            for (size_t k = 0; k < ops.size(); k++) {
+                if (!placed[ops[k]] || accepted[k])
+                    continue;
+                placed[ops[k]] = 0;
+                g->execReason_[ops[k]] = CUDA_PLACEMENT_WINDOW_TOO_SPARSE;
+            }
+        }
+
         size_t maxBubble = cudaMaxCpuBubble(), minRun = cudaMinGpuRun();
         if (maxBubble > 0 || minRun > 1) {
             std::vector<size_t> ops;
@@ -1008,7 +1060,9 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
                     if (cur == 0 && maxBubble > 0 && runLen <= maxBubble && leftDev && rightDev) {
                         bool canPromote = true;
                         for (size_t k = a; k < b; k++)
-                            if (!cudaExecs[ops[k]]) { canPromote = false; break; }
+                            if (!cudaExecs[ops[k]] ||
+                                g->execReason_[ops[k]] == CUDA_PLACEMENT_WINDOW_TOO_SPARSE)
+                            { canPromote = false; break; }
                         if (canPromote) {
                             for (size_t k = a; k < b; k++) {
                                 placed[ops[k]] = 1;
@@ -1145,7 +1199,8 @@ void Net::Impl::finalize()
 
     for (const Ptr<Graph>& g : allgraphs)
         finalizeGraph(g, useCUDA, g == mainGraph);
-    useBlockLayout();
+    if (blockLayoutEnabled())
+        useBlockLayout();
     assignBuffers();
     totalLayers = updateGraphOfs(mainGraph, 0, true);
 #ifdef HAVE_CUDA
@@ -1246,7 +1301,7 @@ void Net::Impl::allocateLayerOutputs(
                 out_t.copyTo(migrated);
                 out_t = migrated;
             } else {
-                rehomeAllocator(out_t, bufAlloc);
+                forceAllocator(out_t, bufAlloc);
             }
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA) {
@@ -2063,12 +2118,16 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             } else {
                 const bool deviceIsNewer = inp.idx < (int)argResidency.size() &&
                                            argResidency[inp.idx] == ARG_RESIDENCY_DEVICE;
-                if (deviceIsNewer && u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
+                // residency bookkeeping is not a reliable gate; a device-resident tensor a host op
+                // is about to read must always be pulled back
+                if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
                     u.u->markHostCopyObsolete(true);
-                if (inp.idx < (int)argWrappers.size()) {
-                    Ptr<CUDABackendWrapper> cw = argWrappers[inp.idx].dynamicCast<CUDABackendWrapper>();
+                // a cached wrapper can still be bound to a freed allocation, so revalidate it here
+                if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator() && cudaInfo) {
+                    Ptr<CUDABackendWrapper> cw =
+                        getCudaArgWrapper(inp, argTensor(inp)).dynamicCast<CUDABackendWrapper>();
                     if (cw) {
-                        if (u.u && u.u->hostCopyObsolete()) {
+                        if (u.u->hostCopyObsolete()) {
                             d2hCount++;
                             d2hBytes += u.total() * u.elemSize();
                         }
@@ -2127,8 +2186,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             if (opBackend == DNN_BACKEND_CUDA) {
                 bool cudaFailed = false;
                 try {
-                    if (finalizeLayers)
-                        layer->finalize(inpMats, outMats);
                     forwardOpCUDA(this, gimpl, opidx, inputs, outputs, h2dCount, h2dBytes);
                 } catch (const cv::Exception& e) {
                     // these CUDA errors are sticky: the context is dead, so a CPU retry only defers the crash
@@ -2163,8 +2220,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             } else
 #endif
             {
-                if (finalizeLayers)
-                    layer->finalize(inpMats, outMats);
                 layer->forward(inpMats, outMats, tempMats);
             }
         }

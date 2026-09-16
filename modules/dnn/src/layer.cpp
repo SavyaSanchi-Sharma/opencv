@@ -132,6 +132,15 @@ void Layer::forwardCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
     CV_Error(Error::StsNotImplemented, "CUDA forward of " + type + " layers is not defined.");
 }
 
+bool Layer::probeCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
+{
+    return false;
+}
+
+void Layer::discardCUDANode()
+{
+}
+
 void LayerInfo::getScaleShift(Mat& scale, Mat& shift) const
 {
     scale = Mat();
@@ -342,6 +351,11 @@ std::vector<Ptr<Graph> >* LayerInfo::subgraphs() const
 bool LayerInfo::alwaysSupportInplace() const
 {
     return false;
+}
+
+bool LayerInfo::needsHostData(int) const
+{
+    return true;
 }
 
 bool LayerInfo::dynamicOutputShapes() const
