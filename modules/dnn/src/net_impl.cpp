@@ -78,9 +78,11 @@ Net::Impl::Impl()
     // (Deriving it from vlanes() made the layout hardware-dependent; see the #29493 discussion.)
     defaultC0 = DEFAULT_C0;
     enableFP16 = haveFP16 = false;
-    // FP16 is not ready yet in the new DNN engine
+    // The half kernels work but are still slower than the float ones, so keep FP16 off
+    // until it is asked for with OPENCV_DNN_ENABLE_FP16=1.
     // Ticket: https://github.com/opencv/opencv/issues/26196
-    if (checkHardwareSupport(CV_CPU_FP16)) {
+    // The same flag also turns on the bf16 paths, which CV_CPU_FP16 says nothing about.
+    if (getParam_DNN_ENABLE_FP16() && checkHardwareSupport(CV_CPU_FP16)) {
         enableFP16 = haveFP16 = true;
     }
 

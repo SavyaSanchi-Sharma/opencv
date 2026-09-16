@@ -2849,13 +2849,12 @@ static void conv16bfC8(const void* inp, const void* residual, void* out,
 
 cv::dnn::ConvFunc getConvFunc_(int depth, int C0)
 {
-    ConvFunc func = nullptr;
-    if (C0 == 8) {
-        if (depth == CV_32F)  func = conv32fC8;
-        if (depth == CV_16F)  func = conv16fC8;
-        if (depth == CV_16BF) func = conv16bfC8;
-    }
-    return func;
+    if (C0 != 8)
+        return nullptr;
+    if (depth == CV_32F)  return conv32fC8;
+    if (depth == CV_16F)  return conv16fC8;
+    if (depth == CV_16BF) return conv16bfC8;
+    return nullptr;
 }
 
 CV_CPU_OPTIMIZATION_NAMESPACE_END

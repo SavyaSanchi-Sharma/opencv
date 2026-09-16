@@ -45,6 +45,12 @@ int getParam_DNN_BACKEND_DEFAULT()
     return PARAM_DNN_BACKEND_DEFAULT;
 }
 
+bool getParam_DNN_ENABLE_FP16()
+{
+    static bool DNN_ENABLE_FP16 = utils::getConfigurationParameterBool("OPENCV_DNN_ENABLE_FP16", false);
+    return DNN_ENABLE_FP16;
+}
+
 // Additional checks (slowdowns execution!)
 bool getParam_DNN_CHECK_NAN_INF()
 {
