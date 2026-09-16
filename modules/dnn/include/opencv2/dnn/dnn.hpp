@@ -323,6 +323,8 @@ CV__DNN_INLINE_NS_BEGIN
 
         virtual bool alwaysSupportInplace() const;
 
+        virtual bool needsHostData(int inputIndex) const;
+
         virtual bool dynamicOutputShapes() const;
 
         virtual bool isDataShuffling() const;
@@ -502,6 +504,12 @@ CV__DNN_INLINE_NS_BEGIN
         virtual void forwardCUDA(InputArrayOfArrays inputs,
                                  OutputArrayOfArrays outputs,
                                  void* workspace);
+
+        virtual bool probeCUDA(InputArrayOfArrays inputs,
+                               OutputArrayOfArrays outputs,
+                               void* workspace);
+
+        virtual void discardCUDANode();
 
         /**
          * @brief "Detaches" all the layers, attached to particular layer.

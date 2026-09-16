@@ -144,6 +144,7 @@ struct Net::Impl : public detail::NetImplBase
     size_t totalLayers;
     std::vector<std::string> dimnames_vec;
     std::vector<ArgData> args;
+    std::map<int, int> declaredOutputTypes;
     std::vector<UMat> __tensors__;
     std::vector<int> bufidxs;
     std::unordered_map<int, int> declaredOutputTypes;
@@ -179,6 +180,8 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<FusedGraphSnapshot> fusedSnapshot;
     std::vector<Ptr<BackendWrapper> > argWrappers;
     std::vector<const void*> argWrapperData;
+    enum ArgResidency { ARG_RESIDENCY_UNKNOWN = 0, ARG_RESIDENCY_HOST, ARG_RESIDENCY_DEVICE };
+    std::vector<uchar> argResidency;
     TracingMode tracingMode;
     ProfilingMode profilingMode;
     std::vector<int64_t> dimvalues;
@@ -447,7 +450,16 @@ struct Net::Impl : public detail::NetImplBase
     void prepareForInference();
     void finalize();
     // Selects executors for a single graph (recursing into subgraphs).
-    void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA);
+    void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement);
+    Ptr<Layer> makeCpuExec(const Ptr<LayerInfo>& op);
+    void logGraphPlacement(const Ptr<Graph>& graph) const;
+    bool gatherOpShapes(const Ptr<LayerInfo>& op,
+                        const std::vector<MatShape>& shapeCache,
+                        const std::vector<MatType>& typeCache,
+                        std::vector<MatShape>& inpShapes,
+                        std::vector<MatShape>& outShapes,
+                        std::vector<MatType>& inpTypes,
+                        std::vector<MatType>& outTypes) const;
     // Save/restore the fused graph so finalize() is re-entrant across backend changes.
     void saveFusedSnapshot();
     void restoreFusedSnapshot();
