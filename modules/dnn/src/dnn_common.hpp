@@ -37,6 +37,9 @@ bool getParam_DNN_OPENCL_ALLOW_ALL_DEVICES();
 
 int getParam_DNN_BACKEND_DEFAULT();
 
+/// Let the engine keep tensors in fp16/bf16 instead of widening them to float
+bool getParam_DNN_ENABLE_FP16();
+
 // Additional checks (slowdowns execution!)
 bool getParam_DNN_CHECK_NAN_INF();
 bool getParam_DNN_CHECK_NAN_INF_DUMP();

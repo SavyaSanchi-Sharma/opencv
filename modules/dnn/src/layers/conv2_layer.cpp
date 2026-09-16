@@ -119,7 +119,6 @@ public:
         int wtype0 = weights_.type();
         CV_Assert(wtype0 == CV_32F || wtype0 == CV_16F || wtype0 == CV_16BF);
         CV_Assert(accuracy == -1 || accuracy == CV_32F);
-        int wtype = accuracy < 0 ? CV_32F : accuracy;
 
         wshape0 = weights_.shape();
 #ifdef HAVE_CUDA
@@ -128,11 +127,9 @@ public:
 #endif
         bool depthwise = ngroups == wshape0[0] && wshape0[1] == 1;
 
-        if (depthwise) {
-            repackDepthwiseConvWeights(weights_, weights, wtype, C0);
-        } else {
-            repackConvWeights(weights_, weights, wtype, ngroups, C0);
-        }
+        rawWeights = weights_;
+        packC0 = C0;
+        weights.release();
 
         if (!bias_.empty()) {
             CV_Assert(bias_.isContinuous() && bias_.total() == wshape0[0]);
@@ -143,8 +140,7 @@ public:
         // >= 256*256 so the reorder cost is amortized).
         mlas_packed_B_.release();
         mlas_packed_M_ = mlas_packed_K_ = 0;
-        if (!depthwise && ngroups == 1 && wtype0 == CV_32F &&
-            wtype == CV_32F && mlasAvailable())
+        if (!depthwise && ngroups == 1 && wtype0 == CV_32F && mlasAvailable())
         {
             bool ksize_all_one = wshape0.dims >= 3;
             for (int k = 2; k < wshape0.dims; k++)
@@ -173,6 +169,17 @@ public:
                 }
             }
         }
+    }
+
+    void packWeights(int wtype)
+    {
+        CV_Assert(!rawWeights.empty());
+        CV_Assert(wtype == CV_32F || wtype == CV_16F || wtype == CV_16BF);
+        if (ngroups == wshape0[0] && wshape0[1] == 1)
+            repackDepthwiseConvWeights(rawWeights, weights, wtype, packC0);
+        else
+            repackConvWeights(rawWeights, weights, wtype, ngroups, packC0);
+        rawWeights.release();
     }
 
     void fuseBatchNormWeights(const BatchNorm2Layer* bn)
@@ -422,10 +429,12 @@ public:
             if (!netimpl_->isConstArg(inputs[i]))
                 dynamicWeights = true;
         }
-        if (dynamicWeights || weights.empty()) {
+        if (dynamicWeights || (weights.empty() && rawWeights.empty())) {
             setWeights(input_arrs.getMat(1), ninputs > 2 ? input_arrs.getMat(2) : Mat(),
                        inpshape.back(), netimpl_->accuracy);
         }
+        if (!rawWeights.empty())
+            packWeights(inptype);
 
         MatShape outshape = convInferShape(inpshape, wshape0, emptyKernelShape,
                                            ngroups, strides, dilations,
@@ -500,6 +509,8 @@ public:
             }
         }
 
+        CV_CheckTypeEQ(weights.type(), inptype,
+                       "DNN/Conv: packed weights and activations must have the same type");
         ConvFunc func = cs.depthwise ? getDepthwiseConvFunc(inptype) : getConvFunc(inptype, C0);
         CV_Assert(func != nullptr);
         func(inptr, resptr, outptr, cs, wptr, scale_data, bias_data);
@@ -513,6 +524,7 @@ public:
             // very rare situation of dynamic convolution weights,
             // we release temporarily allocated and reordered copy of the weights
             weights.release();
+            rawWeights.release();
         }
     }
 
@@ -806,6 +818,8 @@ public:
     Ptr<Layer> activ, batchNorm;
     Mat weights, bias, fusedScale, fusedBias;
     Mat origWeights;  // original NCHW filter (FP32), kept for the CUDA path
+    Mat rawWeights;
+    int packC0 = 0;
     MatShape wshape0, prevInpshape;
     ConvState cs;
     bool fusedBatchNorm;

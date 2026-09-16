@@ -258,6 +258,7 @@ public:
             out.fit(outshape, outtype);
         }
 
+        CV_CheckTypeEQ(inptype, CV_32F, "DNN/ConvTranspose: only FP32 activations are supported");
         DeconvFunc func = getDeconvFunc(inptype);
         CV_Assert(func != nullptr);
         const float* bias_data = bias.empty() ? nullptr : bias.ptr<float>();
