@@ -40,6 +40,16 @@ public:
         ngroups = params.get<int>("group", 1);
     }
 
+    void applyExplicitOutShape(MatShape& outshape) const
+    {
+        if (explicit_out_shape.empty())
+            return;
+        int nsd = outshape.dims - 2 - int(outshape.layout == DATA_LAYOUT_BLOCK);
+        CV_CheckEQ((int)explicit_out_shape.size(), nsd, "output_shape must cover all spatial dims");
+        for (int i = 0; i < nsd; i++)
+            outshape[i + 2] = explicit_out_shape[i];
+    }
+
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
 #ifdef HAVE_CUDA
