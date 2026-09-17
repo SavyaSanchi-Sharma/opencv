@@ -910,7 +910,11 @@ public:
             config.padMode = ConvolutionConfiguration::PaddingMode::MANUAL;
             for (int i = 0; i < nspatial; i++) {
                 int pad0, pad1;
-                getPadding(pads, i, nspatial, auto_pad, (int)wshape0[2 + i], pad0, pad1);
+                getPadding(pads, i, nspatial, auto_pad,
+                           {(int)wshape0[2 + i], inpShape[i + 2],
+                            strides.empty() ? 1 : strides[i],
+                            dilations.empty() ? 1 : dilations[i]},
+                           pad0, pad1);
                 config.pads_begin.push_back((size_t)pad0);
                 config.pads_end.push_back((size_t)pad1);
             }

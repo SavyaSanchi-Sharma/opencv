@@ -12,7 +12,6 @@
 #include <cuda_runtime.h>
 #include <opencv2/core/cuda_stream_accessor.hpp>
 #include <opencv2/core/cuda.hpp>
-#include <opencv2/core/cuda.hpp>
 #endif
 
 #ifdef HAVE_ONNXRUNTIME
@@ -464,6 +463,11 @@ ArgKind Net::Impl::argKind(Arg arg) const
     return argData(arg).kind;
 }
 
+int Net::Impl::argType(Arg arg) const
+{
+    return argData(arg).type;
+}
+
 UMat& Net::Impl::argTensor(Arg arg) const
 {
     const ArgData& adata = argData(arg);
@@ -471,7 +475,6 @@ UMat& Net::Impl::argTensor(Arg arg) const
         CV_Assert(__tensors__.at(arg.idx).empty());
         int bufidx = bufidxs.at(arg.idx);
         CV_Assert(bufidx >= 0);
-        return const_cast<UMat&>(buffers.at(bufidx));
         return const_cast<UMat&>(buffers.at(bufidx));
     }
     return const_cast<UMat&>(__tensors__.at(arg.idx));
@@ -546,43 +549,9 @@ Arg Net::Impl::newArg(const std::string& name, ArgKind kind, bool allowEmptyName
     adata.kind = kind;
     args.push_back(adata);
     __tensors__.push_back(UMat());
-    __tensors__.push_back(UMat());
     bufidxs.push_back(-1);
 
     return Arg(idx);
-}
-
-int Net::Impl::findDim(const std::string& dimname, bool insert)
-{
-    if (!dimname.empty()) {
-        auto it = dimnames.find(dimname);
-        if (it != dimnames.end()) {
-            return (int)it->second;
-        }
-    }
-    if (!insert) {
-        CV_Error_(Error::StsObjectNotFound, ("symbolic dimension '%s' is not found",
-                                             dimname.empty() ? "<some unique name>" : dimname.c_str()));
-    }
-    int value = -(int)dimnames_vec.size() - 1;
-    std::string inserted_dimname = dimname.empty() ? format("N!%d", -value) : dimname;
-    dimnames.insert(std::make_pair(inserted_dimname, (int64_t)value));
-    dimnames_vec.push_back(inserted_dimname);
-    return value;
-}
-
-Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>& inpargs, bool ismain)
-{
-    if (ismain)
-        globGraphIdx = 0;
-    std::string name = name_;
-    if (name_.empty())
-        name = ismain ? std::string("main") : format("subgraph_%d", globGraphIdx);
-    globGraphIdx++;
-    Ptr<Graph> graph = Graph::create(this, name, inpargs);
-    if (ismain)
-        mainGraph = graph;
-    return graph;
 }
 
 void Net::Impl::inferArgTypes()
@@ -641,6 +610,39 @@ void Net::Impl::inferArgTypes()
     visit(mainGraph);
 }
 
+int Net::Impl::findDim(const std::string& dimname, bool insert)
+{
+    if (!dimname.empty()) {
+        auto it = dimnames.find(dimname);
+        if (it != dimnames.end()) {
+            return (int)it->second;
+        }
+    }
+    if (!insert) {
+        CV_Error_(Error::StsObjectNotFound, ("symbolic dimension '%s' is not found",
+                                             dimname.empty() ? "<some unique name>" : dimname.c_str()));
+    }
+    int value = -(int)dimnames_vec.size() - 1;
+    std::string inserted_dimname = dimname.empty() ? format("N!%d", -value) : dimname;
+    dimnames.insert(std::make_pair(inserted_dimname, (int64_t)value));
+    dimnames_vec.push_back(inserted_dimname);
+    return value;
+}
+
+Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>& inpargs, bool ismain)
+{
+    if (ismain)
+        globGraphIdx = 0;
+    std::string name = name_;
+    if (name_.empty())
+        name = ismain ? std::string("main") : format("subgraph_%d", globGraphIdx);
+    globGraphIdx++;
+    Ptr<Graph> graph = Graph::create(this, name, inpargs);
+    if (ismain)
+        mainGraph = graph;
+    return graph;
+}
+
 // No half kernels yet, so half constants are widened just as setGraphInput() widens inputs.
 void Net::Impl::widenHalfConstants()
 {
@@ -662,8 +664,8 @@ void Net::Impl::widenHalfConstants()
             UMat widened;
             forceAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
             widened.fit(t.shape(), accuracy);
-            t.getMat(ACCESS_READ).convertTo(widened, accuracy);
-            t = toArgTensor(widened);
+            t.convertTo(widened, accuracy);
+            t = widened;
         }
         adata.type = accuracy;
     }
@@ -680,27 +682,7 @@ void Net::Impl::prepareForInference()
 #endif
 
     if (!prepared) {
-#if CV_SIMD_SCALABLE
-        // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
-        // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
-        // so a wider block gives no benefit and breaks them. Only fp32 graphs use the wider
-        // vlanes()-based defaultC0. Signed-int8 (CV_8S) args are the quantization signature
-        // (uint8 image inputs are CV_8U, so they don't trigger this).
-        for (const ArgData& a : args) {
-            if (a.type == CV_8S) { defaultC0 = 8; break; }
-        }
-#endif
         widenHalfConstants();
-#if CV_SIMD_SCALABLE
-        // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
-        // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
-        // so a wider block gives no benefit and breaks them. Only fp32 graphs use the wider
-        // vlanes()-based defaultC0. Signed-int8 (CV_8S) args are the quantization signature
-        // (uint8 image inputs are CV_8U, so they don't trigger this).
-        for (const ArgData& a : args) {
-            if (a.type == CV_8S) { defaultC0 = 8; break; }
-        }
-#endif
 #if CV_SIMD_SCALABLE
         // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
         // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
@@ -1264,17 +1246,11 @@ void Net::Impl::finalize()
             CV_LOG_WARNING(NULL, "DNN/NewEngine: CUDA FP16 target is not supported; switching to FP32 target.");
             preferableTarget = DNN_TARGET_CUDA;
         }
-        if (preferableTarget == DNN_TARGET_CUDA_FP16) {
-            // no FP16 execution path on the new engine; run FP32 rather than reinterpret FP32 buffers as half
-            CV_LOG_WARNING(NULL, "DNN/NewEngine: CUDA FP16 target is not supported; switching to FP32 target.");
-            preferableTarget = DNN_TARGET_CUDA;
-        }
         if (!cudaInfo) {
             cuda4dnn::csl::CSLContext context;
             context.stream = cuda4dnn::csl::Stream(true);
             context.cublas_handle = cuda4dnn::csl::cublas::Handle(context.stream);
             context.cudnn_handle = cuda4dnn::csl::cudnn::Handle(context.stream);
-            cudaInfo = std::make_unique<CudaInfo_t>(std::move(context));
             cudaInfo = std::make_unique<CudaInfo_t>(std::move(context));
         }
     }
@@ -1342,8 +1318,6 @@ void Net::Impl::allocateLayerOutputs(
                           std::vector<MatShape>& tempShapes,
                           std::vector<Mat>& temps,
                           std::vector<Mat>& globalTemps,
-                          bool useBufferPool,
-                          int opBackend)
                           bool useBufferPool,
                           int opBackend)
 {
@@ -1560,14 +1534,11 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
             const ArgData& adata = args.at(targetArg.idx);
             Mat result;
             UMat* srcUMat;
-            UMat* srcUMat;
             if (adata.kind == DNN_ARG_TEMP) {
                 int bufidx = bufidxs.at(targetArg.idx);
                 CV_Assert(bufidx >= 0 && bufidx < (int)buffers.size());
                 srcUMat = &buffers[bufidx];
-                srcUMat = &buffers[bufidx];
             } else {
-                srcUMat = &__tensors__.at(targetArg.idx);
                 srcUMat = &__tensors__.at(targetArg.idx);
             }
 #ifdef HAVE_CUDA
@@ -1748,7 +1719,6 @@ void Net::Impl::traceArg(std::ostream& strm_, const char* prefix, size_t i, Arg 
     const int PPRINT_CONST_THRESHOLD = 16;
     const int PPRINT_ALL_THRESHOLD = 100;
     const Mat& m = argTensor(arg).getMat(ACCESS_READ);
-    const Mat& m = argTensor(arg).getMat(ACCESS_READ);
     const ArgData& adata = args.at(arg.idx);
     bool constArg = adata.kind == DNN_ARG_CONST;
     // [TODO] replace with type compatibility check
@@ -1876,18 +1846,6 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
     }
     Arg inp = gr_inputs[idx];
     const ArgData& adata = args.at(inp.idx);
-    MatAllocator* bufAlloc = Mat::getDefaultAllocator();
-#ifdef HAVE_CUDA
-    bool graphOnCuda = false;
-    {
-        const std::vector<Ptr<LayerInfo> >& gprog = graph->prog();
-        for (size_t k = 0; k < gprog.size(); k++) {
-            if (gprog[k] && graph->opBackend((int)k) == DNN_BACKEND_CUDA) { graphOnCuda = true; break; }
-        }
-    }
-    if (graphOnCuda)
-        bufAlloc = tensorAllocator();
-#endif
     MatAllocator* bufAlloc = Mat::getDefaultAllocator();
 #ifdef HAVE_CUDA
     bool graphOnCuda = false;
@@ -2107,10 +2065,6 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
                                         .dynamicCast<CUDABackendWrapper>();
         cw->setDeviceDirty();
         outG[i] = cw->getDeviceUMat();
-        Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(outputs[i], netimpl->argTensor(outputs[i]))
-                                        .dynamicCast<CUDABackendWrapper>();
-        cw->setDeviceDirty();
-        outG[i] = cw->getDeviceUMat();
     }
     exec->forwardCUDA(inpG, outG, &netimpl->cudaInfo->workspace);
 }
@@ -2219,9 +2173,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             const UMat& u = argTensor(inp);
             inpTypes[i] = u.type();
             inpShapes[i] = u.shape();
-            const UMat& u = argTensor(inp);
-            inpTypes[i] = u.type();
-            inpShapes[i] = u.shape();
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA || !layer->needsHostData((int)i)) {
                 inpMats[i].release();
@@ -2270,7 +2221,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {
                 Arg out = outputs[i];
-                outMats[i] = argTensor(out).getMat(ACCESS_WRITE);
                 outMats[i] = argTensor(out).getMat(ACCESS_WRITE);
             }
             tempMats = scratchBufs;
@@ -2523,7 +2473,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             if (adata.kind == DNN_ARG_TEMP) {
                 int bufidx = bufidxs.at(out.idx);
                 UMat& buf = buffers.at(bufidx);
-                UMat& buf = buffers.at(bufidx);
 
                 if (!dynamicOutShapes) {
                     // a sanity check: make sure that the data was not reallocated during Layer::forward()
@@ -2601,15 +2550,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         }
 #endif
         const UMat& outm = argTensor(out);
-        const UMat& outm = argTensor(out);
         if (isMainGraph) {
-            auto declared_it = declaredOutputTypes.find(out.idx);
-            int declaredType = declared_it != declaredOutputTypes.end() ? declared_it->second : -1;
-            auto isFloatDepth = [](int d) {
-                return d == CV_32F || d == CV_64F || d == CV_16F || d == CV_16BF;
-            };
-            bool widenToDeclared = declaredType >= 0 && isFloatDepth(CV_MAT_DEPTH(declaredType)) &&
-                                   !isFloatDepth(outm.depth());
             auto declared_it = declaredOutputTypes.find(out.idx);
             int declaredType = declared_it != declaredOutputTypes.end() ? declared_it->second : -1;
             auto isFloatDepth = [](int d) {
@@ -2639,8 +2580,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 outputsVec[i] = tmp;
             }
         } else {
-            outputsVec[i].fit(outm.shape(), outm.type());
-            outm.copyTo(outputsVec[i]);
             outputsVec[i].fit(outm.shape(), outm.type());
             outm.copyTo(outputsVec[i]);
         }
@@ -2750,7 +2689,6 @@ bool Net::Impl::tryInferShapes(const std::vector<MatShape>& suggestedInpShapes,
 
         int type;
         MatShape shape;
-        const UMat& tensor = argTensor(inp);
         const UMat& tensor = argTensor(inp);
         if (!tensor.empty()) {
             type = tensor.type();

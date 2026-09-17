@@ -484,9 +484,14 @@ public:
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
 
         int nsd = (int)kernel_shape.size();
+        MatShape inpShape = inputs_arr.shape(0);
         std::vector<int> padBegin(nsd), padEnd(nsd);
         for (int i = 0; i < nsd; i++)
-            getPadding(pads, i, nsd, auto_pad, kernel_shape[i], padBegin[i], padEnd[i]);
+            getPadding(pads, i, nsd, auto_pad,
+                       {kernel_shape[i], inpShape[i + 2],
+                        strides.empty() ? 1 : strides[i],
+                        dilations.empty() ? 1 : dilations[i]},
+                       padBegin[i], padEnd[i]);
 
         cuda4dnn::AveragePoolingConfiguration apconfig;
         for (int i = 0; i < nsd; i++) {
@@ -499,7 +504,6 @@ public:
         apconfig.count_include_pad = count_include_pad;
         apconfig.ceil_mode = ceil_mode;
 
-        MatShape inpShape = inputs_arr.shape(0);
         MatShape outShape = outputs_arr.shape(0);
 #if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         return make_cuda_node<cuda4dnn::AveragePoolingOp>(preferableTarget, std::move(context->stream),
