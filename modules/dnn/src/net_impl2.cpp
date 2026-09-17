@@ -2063,6 +2063,34 @@ Ptr<BackendWrapper> Net::Impl::getCudaArgWrapper(Arg arg, UMat& t)
     return argWrappers[idx];
 }
 
+static void syncShapeSpecInputs(Net::Impl* netimpl, const std::vector<Arg>& inputs,
+                                size_t& d2hCount, size_t& d2hBytes)
+{
+    if (!netimpl->cudaInfo)
+        return;
+    MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
+    for (size_t i = 1; i < inputs.size(); i++) {
+        if (inputs[i].empty())
+            continue;
+        UMat& meta = netimpl->argTensor(inputs[i]);
+        const int metaDepth = meta.depth();
+        if (metaDepth != CV_32S && metaDepth != CV_64S)
+            continue;
+        if (meta.total() > 1024)
+            continue;
+        if (!meta.u || meta.u->currAllocator != cudaAlloc)
+            continue;
+        meta.u->markHostCopyObsolete(true);
+        Ptr<CUDABackendWrapper> cw =
+            netimpl->getCudaArgWrapper(inputs[i], meta).dynamicCast<CUDABackendWrapper>();
+        if (cw) {
+            d2hCount++;
+            d2hBytes += meta.total() * meta.elemSize();
+            cw->copyToHost();
+        }
+    }
+}
+
 static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
                           const std::vector<Arg>& inputs, const std::vector<Arg>& outputs,
                           size_t& h2dCount, size_t& h2dBytes)
@@ -2346,31 +2374,17 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             }
         }
         bool dynamicOutShapes = op->dynamicOutputShapes();
+#ifdef HAVE_CUDA
+        if (opBackend == DNN_BACKEND_CUDA)
+            syncShapeSpecInputs(this, inputs, d2hCount, d2hBytes);
+#endif
         if (!dynamicOutShapes) {
             allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
         } else if (opBackend == DNN_BACKEND_CUDA) {
             std::vector<UMat> inpUMats(ninputs);
-            for (i = 0; i < ninputs; i++) {
-                if (i > 0 && !inputs[i].empty() && cudaInfo) {
-                    UMat& meta = argTensor(inputs[i]);
-                    const int metaDepth = meta.depth();
-                    const bool isShapeSpec = meta.dims <= 1 &&
-                                             (metaDepth == CV_32S || metaDepth == CV_64S);
-                    if (isShapeSpec && meta.u &&
-                        meta.u->currAllocator == cv::cuda::getCudaAllocator()) {
-                        meta.u->markHostCopyObsolete(true);
-                        Ptr<CUDABackendWrapper> cw =
-                            getCudaArgWrapper(inputs[i], meta).dynamicCast<CUDABackendWrapper>();
-                        if (cw) {
-                            d2hCount++;
-                            d2hBytes += meta.total() * meta.elemSize();
-                            cw->copyToHost();
-                        }
-                    }
-                }
+            for (i = 0; i < ninputs; i++)
                 inpUMats[i] = argTensor(inputs[i]);
-            }
             std::vector<MatShape> dynOutShapes;
             op->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
             CV_Assert(dynOutShapes.size() == noutputs);

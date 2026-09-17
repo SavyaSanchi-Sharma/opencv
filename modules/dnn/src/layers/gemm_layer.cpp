@@ -8,7 +8,7 @@
 // backends
 #include "../op_cuda.hpp"
 #ifdef HAVE_CUDA
-// #include "../cuda4dnn/primitives/matmul.hpp"
+#include "../cuda4dnn/primitives/matmul.hpp"
 #include "../cuda4dnn/primitives/inner_product.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
@@ -92,7 +92,11 @@ public:
         if (fusion.expr)
             return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
-               (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && inpType == CV_32F) ||
+               (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && (!have_bias || const_C) &&
+                alpha == 1.0f && beta == 1.0f && (inpType == CV_32F || inpType < 0)) ||
+               (backendId == DNN_BACKEND_CUDA && !const_B && !trans_a &&
+                alpha == 1.0f && (!have_bias || const_C) &&
+                (inpType == CV_32F || inpType < 0)) ||
                backendId == DNN_BACKEND_CANN ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !have_bias && !trans_a);
@@ -609,12 +613,39 @@ public:
                               InputArrayOfArrays inputs_,
                               InputArrayOfArrays outputs) CV_OVERRIDE {
         CV_CheckFalse(trans_a, "DNN/Gemm/Cuda: does not support transA");
-        CV_CheckTrue(const_B, "DNN/Gemm/Cuda: input B (weight) is required to be constant");
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
+
+        if (!const_B) {
+            CV_CheckEQ((double)alpha, 1.0, "DNN/Gemm/Cuda: non-constant B requires alpha == 1");
+            CV_Assert(inputs.size() >= 2);
+            CV_CheckTypeEQ(inputs[0].depth(), CV_32F, "DNN/Gemm/Cuda: non-constant B requires CV_32F");
+            CV_CheckTypeEQ(inputs[1].depth(), CV_32F, "DNN/Gemm/Cuda: non-constant B requires CV_32F");
+            Mat bias;
+            if (have_bias) {
+                CV_CheckTrue(const_C, "DNN/Gemm/Cuda: non-constant B requires a constant C");
+                std::vector<UMat> outs;
+                outputs.getUMatVector(outs);
+                CV_Assert(!outs.empty());
+                MatShape oshape = cv::dnn::shape(outs[0]);
+                int effectiveRank = oshape.dims;
+                for (int i = 0; i < oshape.dims && oshape[i] == 1; i++)
+                    effectiveRank--;
+                CV_CheckLE(effectiveRank, 2,
+                           "DNN/Gemm/Cuda: bias with non-constant B is only supported for 2D output");
+                bias = blobs.back();
+            }
+            return make_cuda_node<cuda4dnn::MatMulOp>(preferableTarget, std::move(context->stream),
+                                                      std::move(context->cublas_handle),
+                                                      Mat(), bias, trans_a, trans_b);
+        }
+
+        CV_CheckEQ((double)alpha, 1.0, "DNN/Gemm/Cuda: alpha must be 1");
+        if (have_bias)
+            CV_CheckTrue(const_C, "DNN/Gemm/Cuda: a non-constant C is not supported");
         auto B = blobs[0];
-        auto C = have_bias && const_C ? blobs[1] : Mat(); // in most cases C is constant
+        auto C = have_bias ? blobs.back() : Mat();
 
         if (!trans_b)
             cv::transpose(B, B);

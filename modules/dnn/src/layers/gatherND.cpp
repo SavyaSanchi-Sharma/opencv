@@ -145,7 +145,14 @@ public:
                 size_t offset = 0;
                 for (size_t j = 0; j < last_indices_dim; ++j)
                 {
-                    offset += sliced_indices[j] * data_strides[batch_dims + j];
+                    int64_t idx = static_cast<int64_t>(sliced_indices[j]);
+                    const int64_t dim = data.size[batch_dims + j];
+                    if (idx < 0)
+                        idx += dim;
+                    if (idx < 0 || idx >= dim)
+                        CV_Error(Error::StsOutOfRange,
+                                 "DNN/GatherND: index is outside of the data dimension");
+                    offset += static_cast<size_t>(idx) * data_strides[batch_dims + j];
                 }
 
                 if (batch_dims > 0)
