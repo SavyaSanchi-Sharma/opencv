@@ -229,5 +229,94 @@ inline static std::string gstreamer_bunny_name_printer(const testing::TestParamI
 
 INSTANTIATE_TEST_CASE_P(videoio, gstreamer_bunny, testing::ValuesIn(bunny_params), gstreamer_bunny_name_printer);
 
+static bool writeWithGstEncoderParams(const std::string& file, const std::vector<int>& params,
+                                      int count, double* readBack = NULL, int prop = -1)
+{
+    const Size size(320, 240);
+    VideoWriter writer;
+    if (!writer.open(file, CAP_GSTREAMER, VideoWriter::fourcc('X', '2', '6', '4'), 25, size, params))
+        return false;
+    if (readBack && prop >= 0)
+        *readBack = writer.get(prop);
+
+    RNG rng(12345);
+    for (int i = 0; i < count; i++)
+    {
+        Mat frame(size, CV_8UC3);
+        rng.fill(frame, RNG::UNIFORM, 0, 255);
+        writer.write(frame);
+    }
+    writer.release();
+    return true;
+}
+
+TEST(videoio_gstreamer_encoder_props, round_trip)
+{
+    if (!videoio_registry::hasBackend(CAP_GSTREAMER))
+        throw SkipTestException("GStreamer backend was not found");
+
+    const string file = cv::tempfile(".mkv");
+    double readBack = -1;
+    if (!writeWithGstEncoderParams(file, {VIDEOWRITER_PROP_BITRATE, 2000000}, 20,
+                                   &readBack, VIDEOWRITER_PROP_BITRATE))
+        throw SkipTestException("No GStreamer encoder with bitrate support available");
+    EXPECT_EQ(2000000, (int)readBack);
+    remove(file.c_str());
+
+    const string gopFile = cv::tempfile(".mkv");
+    double gopReadBack = -1;
+    if (!writeWithGstEncoderParams(gopFile, {VIDEOWRITER_PROP_GOP_SIZE, 5}, 20,
+                                   &gopReadBack, VIDEOWRITER_PROP_GOP_SIZE))
+        throw SkipTestException("No GStreamer encoder with GOP support available");
+    EXPECT_EQ(5, (int)gopReadBack);
+    remove(gopFile.c_str());
+}
+
+TEST(videoio_gstreamer_encoder_props, crf_and_preset)
+{
+    if (!videoio_registry::hasBackend(CAP_GSTREAMER))
+        throw SkipTestException("GStreamer backend was not found");
+
+    const string crfFile = cv::tempfile(".mkv");
+    double crfReadBack = -1;
+    if (!writeWithGstEncoderParams(crfFile, {VIDEOWRITER_PROP_CRF, 25}, 20,
+                                   &crfReadBack, VIDEOWRITER_PROP_CRF))
+        throw SkipTestException("No GStreamer encoder with CRF support available");
+    EXPECT_EQ(25, (int)crfReadBack);
+    remove(crfFile.c_str());
+
+    const string presetFile = cv::tempfile(".mkv");
+    double presetReadBack = -1;
+    if (!writeWithGstEncoderParams(presetFile, {VIDEOWRITER_PROP_PRESET, VIDEOWRITER_PRESET_ULTRAFAST}, 20,
+                                   &presetReadBack, VIDEOWRITER_PROP_PRESET))
+        throw SkipTestException("No GStreamer encoder with preset support available");
+    EXPECT_EQ(VIDEOWRITER_PRESET_ULTRAFAST, (int)presetReadBack);
+    remove(presetFile.c_str());
+}
+
+TEST(videoio_gstreamer_encoder_props, unsupported_property_fails_open)
+{
+    if (!videoio_registry::hasBackend(CAP_GSTREAMER))
+        throw SkipTestException("GStreamer backend was not found");
+
+    const string file = cv::tempfile(".mkv");
+    std::ostringstream pipeline;
+    pipeline << "appsrc ! videoconvert ! avenc_mpeg4 ! matroskamux ! filesink location=" << file;
+
+    VideoWriter writer;
+    EXPECT_FALSE(writer.open(pipeline.str(), CAP_GSTREAMER, 0, 25, Size(320, 240),
+                             {VIDEOWRITER_PROP_PRESET, VIDEOWRITER_PRESET_VERYSLOW}));
+}
+
+TEST(videoio_gstreamer_encoder_props, no_regression_without_properties)
+{
+    if (!videoio_registry::hasBackend(CAP_GSTREAMER))
+        throw SkipTestException("GStreamer backend was not found");
+
+    const string file = cv::tempfile(".mkv");
+    ASSERT_TRUE(writeWithGstEncoderParams(file, std::vector<int>(), 20));
+    remove(file.c_str());
+}
+
 
 }} // namespace
