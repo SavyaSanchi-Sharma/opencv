@@ -597,9 +597,47 @@ VideoCapture& VideoCapture::operator >> (UMat& image)
     return *this;
 }
 
+static bool isPrefetchSupported(const Ptr<IVideoCapture>& cap)
+{
+    switch (cap->getCaptureDomain())
+    {
+        case CAP_MSMF:
+        case CAP_DSHOW:
+        case CAP_OBSENSOR:
+        case CAP_AVFOUNDATION:
+            return false;
+        default:
+            return true;
+    }
+}
+
 bool VideoCapture::set(int propId, double value)
 {
     CV_CheckNE(propId, (int)CAP_PROP_BACKEND, "Can't set read-only property");
+    if (propId == CAP_PROP_PREFETCH_FRAMES && !icap.empty())
+    {
+        Ptr<PrefetchCapture> prefetch = icap.dynamicCast<PrefetchCapture>();
+        const int depth = cvRound(value);
+        if (depth < 0)
+            return false;
+        if (depth == 0)
+        {
+            if (prefetch)
+                icap = prefetch->unwrap();
+            return true;
+        }
+        if (!prefetch)
+        {
+            if (!isPrefetchSupported(icap))
+            {
+                CV_LOG_WARNING(NULL, "VIDEOIO: CAP_PROP_PREFETCH_FRAMES is not supported by backend "
+                                     << videoio_registry::getBackendName((VideoCaptureAPIs)icap->getCaptureDomain()));
+                return false;
+            }
+            icap = makePtr<PrefetchCapture>(icap, static_cast<size_t>(depth));
+            return true;
+        }
+    }
     bool ret = !icap.empty() ? icap->setProperty(propId, value) : false;
     if (!ret && throwOnFail)
     {
@@ -631,6 +669,12 @@ bool VideoCapture::waitAny(const std::vector<VideoCapture>& streams,
                            CV_OUT std::vector<int>& readyIndex, int64 timeoutNs)
 {
     CV_Assert(!streams.empty());
+
+    for (size_t i = 0; i < streams.size(); ++i)
+    {
+        if (streams[i].icap.dynamicCast<PrefetchCapture>())
+            CV_Error(Error::StsBadArg, "VideoCapture::waitAny() is not supported with CAP_PROP_PREFETCH_FRAMES enabled");
+    }
 
     VideoCaptureAPIs backend = (VideoCaptureAPIs)streams[0].icap->getCaptureDomain();
 
