@@ -51,6 +51,14 @@ static void pad(const Mat& inp, const std::vector<int>& pads_, int mode_, const 
     CV_Assert(inp.dims == out.dims);
     CV_Assert(inp.dims <= PAD_MAX_DIMS);
 
+    if (inp.total() == 0) {
+        if (out.total() == 0)
+            return;
+        CV_Error_(Error::StsBadArg,
+                  ("Pad2: empty input cannot be padded into a non-empty output of %zu element(s)",
+                   out.total()));
+    }
+
     if (!value.empty()) {
         CV_Assert(value.dims <= 2 && value.total() == 1 && value.channels() == 1);
         tensorToScalar(value, inptype, &buf);

@@ -1989,6 +1989,8 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
         if (inputs[i].empty())
             continue;
         const UMat& t = netimpl->argTensor(inputs[i]);
+        if (t.total() == 0)
+            continue;
         if (t.u == nullptr) {
             const ArgData& adata = netimpl->args.at(inputs[i].idx);
             CV_Error_(Error::StsError,
