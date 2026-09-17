@@ -275,6 +275,17 @@ public:
 
         return make_cuda_node<cuda4dnn::InstanceNormOp>(preferableTarget, std::move(context->stream), epsilon, loops);
     }
+
+    Ptr<BackendNode> initCUDA(void *context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        auto input_shape = inputs_arr.shape(0);
+        size_t loops = static_cast<size_t>(total(input_shape, 0, 2));
+
+        return make_cuda_node<cuda4dnn::InstanceNormOp>(preferableTarget, std::move(context->stream), epsilon, loops);
+    }
 #endif // HAVE_CUDA
 
 };

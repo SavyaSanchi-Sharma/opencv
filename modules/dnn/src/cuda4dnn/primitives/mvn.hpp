@@ -117,6 +117,50 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(inputs.size() == outputs.size());
+
+            for (int i = 0; i < inputs.size(); i++)
+            {
+                auto input = csl::viewOf<T>(inputs[i]);
+                auto output = csl::spanOf<T>(outputs[i]);
+
+                auto outer_size = input.size_range(0, split_axis);
+                auto inner_size = input.size_range(split_axis, input.rank());
+                if (inner_size == 1)
+                {
+                    kernels::fill<T>(stream, output, 0.0f);
+                    return;
+                }
+                else
+                {
+                    auto ws_allocator = csl::WorkspaceAllocator(workspace);
+
+                    auto means = ws_allocator.get_span<float>(outer_size);
+                    kernels::fill<float>(stream, means, 0);
+
+                    if (normalize_variance)
+                    {
+                        auto scales = ws_allocator.get_span<float>(outer_size);
+                        kernels::fill<float>(stream, scales, 0);
+
+                        kernels::reduce_mean_sqr_sum<T>(stream, means, scales, input, inner_size);
+                        kernels::compute_normalization_scale(stream, scales, means, scales, inner_size, epsilon);
+                        kernels::normalize_mean_variance<T>(stream, output, input, means, scales, inner_size);
+                    }
+                    else
+                    {
+                        kernels::reduce_mean<T>(stream, means, input, inner_size);
+                        kernels::normalize_mean<T>(stream, output, input, means, inner_size);
+                    }
+                }
+            }
+        }
+
         std::size_t get_workspace_memory_in_bytes() const noexcept override { return scratch_mem_in_bytes; }
 
     private:

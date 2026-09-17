@@ -357,6 +357,44 @@ public:
         return make_cuda_node<cuda4dnn::LRNOp>(preferableTarget,
             std::move(context->cudnn_handle), type_, size, alphaSize, beta, bias, largestInputSize);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void *context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        cuda4dnn::LRNType type_;
+        if (type == CHANNEL_NRM)
+            type_ = cuda4dnn::LRNType::ACROSS_CHANNELS;
+        else if (type == SPATIAL_NRM)
+            type_ = cuda4dnn::LRNType::WITHIN_CHANNEL;
+        else
+            CV_Error(Error::StsNotImplemented, "Unknown normalization region");
+
+        float alphaSize = alpha;
+        if (!normBySize) {
+            switch (type) {
+            case CHANNEL_NRM: alphaSize = alpha * size; break;
+            case SPATIAL_NRM: alphaSize = alpha * size * size; break;
+            }
+        }
+
+        std::size_t largestInputSize = 0;
+        std::size_t ninputs = inputs_arr.total();
+        for (std::size_t i = 0; i < ninputs; i++) {
+            MatShape shape = inputs_arr.shape((int)i);
+            largestInputSize = std::max<std::size_t>(
+                largestInputSize,
+                std::accumulate(std::begin(shape), std::end(shape), 1, std::multiplies<int>())
+            );
+        }
+
+        return make_cuda_node<cuda4dnn::LRNOp>(preferableTarget,
+            std::move(context->cudnn_handle), type_, size, alphaSize, beta, bias, largestInputSize);
+    }
 #endif
 
 #ifdef HAVE_CANN

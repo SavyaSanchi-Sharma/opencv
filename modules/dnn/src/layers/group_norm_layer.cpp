@@ -187,6 +187,19 @@ public:
 
     return make_cuda_node<cuda4dnn::GroupNormOp>(preferableTarget, std::move(context->stream), epsilon, loops, num_groups);
 }
+
+Ptr<BackendNode> initCUDA(void *context_,
+                      InputArrayOfArrays inputs_arr,
+                      InputArrayOfArrays) CV_OVERRIDE {
+    auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+    auto input_shape = inputs_arr.shape(0);
+    size_t N = input_shape[0];
+    size_t num_groups = this->num_groups;
+    size_t loops = N * num_groups;
+
+    return make_cuda_node<cuda4dnn::GroupNormOp>(preferableTarget, std::move(context->stream), epsilon, loops, num_groups);
+}
 #endif // HAVE_CUDA
 
 private:
