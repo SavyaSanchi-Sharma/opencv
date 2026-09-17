@@ -132,6 +132,8 @@ public:
         return true;
     }
 
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
     void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
                                           std::vector<MatShape>& outputs) const CV_OVERRIDE
     {

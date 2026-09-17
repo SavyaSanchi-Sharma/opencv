@@ -3,9 +3,14 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/gather_elements.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -32,9 +37,36 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return true;
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_arr.getUMatVector(inputs);
+        CV_Assert(inputs.size() == 2);
+
+        int dataType = inputs[0].type();
+        if (dataType == CV_Bool)
+            dataType = CV_8U;
+
+        const int idxType = inputs[1].type();
+        CV_CheckType(idxType, idxType == CV_32S || idxType == CV_64S,
+                     "GatherElements CUDA: indices must be int32 or int64");
+
+        return make_cuda_node_with_type<cuda4dnn::GatherElementsOp>(
+            preferableTarget, dataType, std::move(context->stream), axis);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,

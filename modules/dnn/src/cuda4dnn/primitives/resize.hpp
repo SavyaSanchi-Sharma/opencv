@@ -45,7 +45,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             csl::Workspace& workspace) override
         {
             // sometimes the target shape is taken from the second input; we don't use it however
-            CV_Assert((inputs.size() == 1 || inputs.size() == 2) && outputs.size() == 1);
+            CV_Assert(inputs.size() >= 1 && outputs.size() == 1);
 
             auto input_wrapper = inputs[0].dynamicCast<wrapper_type>();
             auto input = input_wrapper->getView();
@@ -76,7 +76,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             csl::Workspace& workspace) override
         {
             CV_UNUSED(workspace);
-            CV_Assert((inputs.size() == 1 || inputs.size() == 2) && outputs.size() == 1);
+            CV_Assert(inputs.size() >= 1 && outputs.size() == 1);
 
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);

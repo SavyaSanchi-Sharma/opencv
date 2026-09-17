@@ -104,6 +104,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 std::size_t output_concat_axis_offset = 0;
                 for (int i = 0; i < (int)inputs.size(); i++)
                 {
+                    if (inputs[i].total() == 0)
+                        continue;
                     auto input = csl::viewOf<T>(inputs[i]);
                     auto input_shape = input.shape_as_vector();
 
@@ -122,6 +124,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 std::size_t output_axis_offset = 0;
                 for (int i = 0; i < (int)inputs.size(); i++)
                 {
+                    if (inputs[i].total() == 0)
+                        continue;
                     auto input = csl::viewOf<T>(inputs[i]);
 
                     kernels::concat(stream, output, output_axis_offset, input, concat_axis);

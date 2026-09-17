@@ -363,6 +363,11 @@ bool LayerInfo::dynamicOutputShapes() const
     return false;
 }
 
+bool LayerInfo::canComputeDynamicOutputShapes() const
+{
+    return false;
+}
+
 void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
                                                  int requiredOutputs,
                                                  std::vector<MatShape>& outputs) const

@@ -327,6 +327,8 @@ CV__DNN_INLINE_NS_BEGIN
 
         virtual bool dynamicOutputShapes() const;
 
+        virtual bool canComputeDynamicOutputShapes() const;
+
         virtual void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
                                                       int requiredOutputs,
                                                       std::vector<MatShape>& outputs) const;

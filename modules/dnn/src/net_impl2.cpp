@@ -733,6 +733,7 @@ enum CudaPlacementReason
     CUDA_PLACEMENT_UNSUPPORTED_TYPE,
     CUDA_PLACEMENT_FP16_WHOLE_GRAPH,
     CUDA_PLACEMENT_NO_EXEC,
+    CUDA_PLACEMENT_NO_SUPPORT,
     CUDA_PLACEMENT_NO_ENGINE,
     CUDA_PLACEMENT_BELOW_THRESHOLD,
     CUDA_PLACEMENT_WHOLE_GRAPH_GATE,
@@ -751,6 +752,7 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_UNSUPPORTED_TYPE: return "unsupported-type";
     case CUDA_PLACEMENT_FP16_WHOLE_GRAPH: return "fp16-whole-graph";
     case CUDA_PLACEMENT_NO_EXEC:          return "no-exec";
+    case CUDA_PLACEMENT_NO_SUPPORT:       return "no-support";
     case CUDA_PLACEMENT_NO_ENGINE:        return "no-engine";
     case CUDA_PLACEMENT_BELOW_THRESHOLD:  return "below-flops-threshold";
     case CUDA_PLACEMENT_WHOLE_GRAPH_GATE: return "whole-graph-gate";
@@ -885,8 +887,28 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
         nreal++;
         int backend = g->execBackend_[i];
         std::string note;
-        if (backend != DNN_BACKEND_CUDA && i < g->execReason_.size())
-            note = cv::format(" (%s)", cudaPlacementReasonName(g->execReason_[i]));
+        if (backend != DNN_BACKEND_CUDA && i < g->execReason_.size()) {
+            int reason = g->execReason_[i];
+            note = cv::format(" (%s)", cudaPlacementReasonName(reason));
+            if (reason == CUDA_PLACEMENT_NO_SUPPORT) {
+                auto typeName = [this](const Arg& a) -> std::string {
+                    if (a.empty() || a.idx >= (int)args.size())
+                        return "-";
+                    int t = args.at(a.idx).type;
+                    return t >= 0 ? cv::typeToString(t) : std::string("?");
+                };
+                std::string sig;
+                for (const Arg& a : op->inputs)
+                    sig += (sig.empty() ? "" : ",") + typeName(a);
+                sig += " -> ";
+                bool firstOut = true;
+                for (const Arg& a : op->outputs) {
+                    sig += (firstOut ? "" : ",") + typeName(a);
+                    firstOut = false;
+                }
+                note += " [" + sig + "]";
+            }
+        }
         CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op #%zu '%s' (%s) -> %s%s",
                     i, op->name.c_str(), op->type.c_str(),
                     backend == DNN_BACKEND_CUDA ? "CUDA" : "CPU", note.c_str()));
@@ -1049,7 +1071,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
                 g->execReason_[i] = CUDA_PLACEMENT_HAS_SUBGRAPHS;
                 continue;
             }
-            if (op->dynamicOutputShapes()) {
+            if (op->dynamicOutputShapes() && !op->canComputeDynamicOutputShapes()) {
                 g->execReason_[i] = CUDA_PLACEMENT_DYNAMIC_SHAPES;
                 continue;
             }
@@ -1076,7 +1098,10 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
             if (!e) {
-                g->execReason_[i] = CUDA_PLACEMENT_NO_EXEC;
+                Ptr<Layer> asLayer = op.dynamicCast<Layer>();
+                bool claimsSupport = asLayer && asLayer->supportBackend(DNN_BACKEND_CUDA);
+                g->execReason_[i] = claimsSupport ? CUDA_PLACEMENT_NO_EXEC
+                                                  : CUDA_PLACEMENT_NO_SUPPORT;
                 continue;
             }
             e->preferableTarget = preferableTarget;
@@ -1355,7 +1380,6 @@ void Net::Impl::finalize()
         finalizeGraph(g, useCUDA, g == mainGraph);
     if (blockLayoutEnabled())
         useBlockLayout();
-    assignBuffers();
     totalLayers = updateGraphOfs(mainGraph, 0, true);
 #ifdef HAVE_CUDA
     argResidency.assign(args.size(), (uchar)ARG_RESIDENCY_UNKNOWN);
@@ -1392,6 +1416,8 @@ void Net::Impl::finalize()
 
     for (const Ptr<Graph>& g : allgraphs)
         finalizeGraph(g, useCUDA, g == mainGraph);
+
+    assignBuffers();
 
     for (const Ptr<Graph>& g : allgraphs)
         logGraphPlacement(g);
@@ -2143,8 +2169,12 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
 
     std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
-        if (inputs[i].empty() || netimpl->argTensor(inputs[i]).empty())
+        if (inputs[i].empty())
             continue;
+        if (netimpl->argTensor(inputs[i]).total() == 0) {
+            inpG[i] = netimpl->argTensor(inputs[i]);
+            continue;
+        }
         Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(inputs[i], netimpl->argTensor(inputs[i]))
                                         .dynamicCast<CUDABackendWrapper>();
         const UMat& src = netimpl->argTensor(inputs[i]);
@@ -2321,10 +2351,28 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                                  tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
         } else if (opBackend == DNN_BACKEND_CUDA) {
             std::vector<UMat> inpUMats(ninputs);
-            for (i = 0; i < ninputs; i++)
+            for (i = 0; i < ninputs; i++) {
+                if (i > 0 && !inputs[i].empty() && cudaInfo) {
+                    UMat& meta = argTensor(inputs[i]);
+                    const int metaDepth = meta.depth();
+                    const bool isShapeSpec = meta.dims <= 1 &&
+                                             (metaDepth == CV_32S || metaDepth == CV_64S);
+                    if (isShapeSpec && meta.u &&
+                        meta.u->currAllocator == cv::cuda::getCudaAllocator()) {
+                        meta.u->markHostCopyObsolete(true);
+                        Ptr<CUDABackendWrapper> cw =
+                            getCudaArgWrapper(inputs[i], meta).dynamicCast<CUDABackendWrapper>();
+                        if (cw) {
+                            d2hCount++;
+                            d2hBytes += meta.total() * meta.elemSize();
+                            cw->copyToHost();
+                        }
+                    }
+                }
                 inpUMats[i] = argTensor(inputs[i]);
+            }
             std::vector<MatShape> dynOutShapes;
-            layer->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
+            op->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
             CV_Assert(dynOutShapes.size() == noutputs);
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {
@@ -2335,7 +2383,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                     outType = inpUMats[0].type();
                 rehomeAllocator(out_t, tensorAllocator());
                 out_t.fit(dynOutShapes[i], outType);
-                outMats[i] = out_t.getMat(ACCESS_WRITE);
+                outMats[i] = Mat(dynOutShapes[i], outType, (void*)nullptr);
             }
             tempMats = scratchBufs;
         } else {

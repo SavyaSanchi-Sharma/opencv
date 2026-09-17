@@ -116,6 +116,8 @@ public:
         return (outputs[0][2] == inputs[0][2]) && (outputs[0][3] == inputs[0][3]);
     }
 
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
     void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
                                           std::vector<MatShape>& outputs) const CV_OVERRIDE
     {
