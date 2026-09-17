@@ -516,7 +516,7 @@ bool Net::Impl::haveArg(const std::string& name) const
 UMat Net::Impl::toArgTensor(const Mat& m) const
 {
     UMat t;
-    forceAllocator(t, Mat::getDefaultAllocator());
+    rehomeAllocator(t, Mat::getDefaultAllocator());
     t.fit(m.shape(), m.type());
     m.copyTo(t);
     return t;
@@ -645,62 +645,6 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
     return graph;
 }
 
-void Net::Impl::inferArgTypes()
-{
-    if (!mainGraph)
-        return;
-
-    std::function<void(const Ptr<Graph>&)> visit = [&](const Ptr<Graph>& graph) {
-        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
-        for (const Ptr<LayerInfo>& op : prog) {
-            if (!op)
-                continue;
-
-            size_t ninputs = op->inputs.size();
-            std::vector<MatType> inpTypes(ninputs);
-            bool allKnown = true;
-            for (size_t i = 0; i < ninputs; i++) {
-                Arg in = op->inputs[i];
-                ArgData& adata = args.at(in.idx);
-                if (adata.type < 0 && adata.kind != DNN_ARG_TEMP) {
-                    const UMat& t = argTensor(in);
-                    if (!t.empty())
-                        adata.type = t.type();
-                }
-                inpTypes[i] = adata.type;
-                if (inpTypes[i] < 0)
-                    allKnown = false;
-            }
-
-            const std::vector<Ptr<Graph> >* subs = op->subgraphs();
-            if (subs) {
-                for (const Ptr<Graph>& sub : *subs)
-                    visit(sub);
-                continue;
-            }
-
-            if (!allKnown)
-                continue;
-
-            size_t noutputs = op->outputs.size();
-            std::vector<MatType> outTypes, tempTypes;
-            try {
-                op->getTypes(inpTypes, (int)noutputs, 0, outTypes, tempTypes);
-            } catch (...) {
-                continue;
-            }
-            for (size_t i = 0; i < noutputs && i < outTypes.size(); i++) {
-                Arg out = op->outputs[i];
-                ArgData& adata = args.at(out.idx);
-                if (adata.type < 0)
-                    adata.type = outTypes[i];
-            }
-        }
-    };
-
-    visit(mainGraph);
-}
-
 // No half kernels yet, so half constants are widened just as setGraphInput() widens inputs.
 void Net::Impl::widenHalfConstants()
 {
@@ -720,7 +664,7 @@ void Net::Impl::widenHalfConstants()
         UMat& t = __tensors__[i];
         if (!t.empty()) {
             UMat widened;
-            forceAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
+            rehomeAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
             widened.fit(t.shape(), accuracy);
             t.convertTo(widened, accuracy);
             t = widened;
@@ -1432,7 +1376,7 @@ void Net::Impl::allocateLayerOutputs(
                 out_t.copyTo(migrated);
                 out_t = migrated;
             } else {
-                forceAllocator(out_t, bufAlloc);
+                rehomeAllocator(out_t, bufAlloc);
             }
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA) {
