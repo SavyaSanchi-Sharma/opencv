@@ -116,6 +116,8 @@ public:
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
         CV_Assert(inputs.size() == 2);
+        if (inputs[0].depth() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::GatherOp>(std::move(context->stream), axis);
         return make_cuda_node_with_type<cuda4dnn::GatherOp>(preferableTarget, inputs[0].type(), std::move(context->stream), axis);
     }
 #endif

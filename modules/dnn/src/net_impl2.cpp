@@ -873,8 +873,10 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
 {
     const GraphImpl* g = static_cast<const GraphImpl*>(graph.get());
     const std::vector<Ptr<LayerInfo> >& prog = g->prog_;
-    size_t nops = prog.size(), nreal = 0, ndevice = 0, deviceIslands = 0, hostIslands = 0;
+    size_t nops = prog.size(), nreal = 0, ndevice = 0, deviceSubgraphs = 0, hostSubgraphs = 0;
     int prevBackend = -1;
+    int subgraphId = -1;
+    std::vector<int> subgraphOf(nops, -1);
 
     for (size_t i = 0; i < nops; i++) {
         const Ptr<LayerInfo>& op = prog[i];
@@ -891,12 +893,14 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
         if (backend == DNN_BACKEND_CUDA)
             ndevice++;
         if (backend != prevBackend) {
+            subgraphId++;
             if (backend == DNN_BACKEND_CUDA)
-                deviceIslands++;
+                deviceSubgraphs++;
             else
-                hostIslands++;
+                hostSubgraphs++;
             prevBackend = backend;
         }
+        subgraphOf[i] = subgraphId;
     }
 
     std::vector<int> producedBy(args.size(), -1);
@@ -925,8 +929,84 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
     }
 
     CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': %zu/%zu ops on CUDA, "
-                                 "%zu device island(s), %zu host island(s), %zu boundary tensor(s)",
-                graph->name().c_str(), ndevice, nreal, deviceIslands, hostIslands, nboundary));
+                                 "%zu device subgraph(s), %zu host subgraph(s), %zu boundary tensor(s)",
+                graph->name().c_str(), ndevice, nreal, deviceSubgraphs, hostSubgraphs, nboundary));
+
+    if (ndevice == 0 || ndevice == nreal || subgraphId < 0)
+        return;
+
+    struct PlacementGap
+    {
+        std::string type;
+        size_t count;
+        size_t sandwiched;
+        std::vector<int> subgraphs;
+        std::vector<int> reasons;
+        PlacementGap() : count(0), sandwiched(0) {}
+    };
+
+    std::vector<PlacementGap> gaps;
+    for (size_t i = 0; i < nops; i++) {
+        if (!prog[i] || g->execBackend_[i] == DNN_BACKEND_CUDA)
+            continue;
+        PlacementGap* gap = nullptr;
+        for (PlacementGap& cand : gaps) {
+            if (cand.type == prog[i]->type) {
+                gap = &cand;
+                break;
+            }
+        }
+        if (!gap) {
+            gaps.push_back(PlacementGap());
+            gap = &gaps.back();
+            gap->type = prog[i]->type;
+        }
+        gap->count++;
+        if (std::find(gap->subgraphs.begin(), gap->subgraphs.end(), subgraphOf[i]) == gap->subgraphs.end())
+            gap->subgraphs.push_back(subgraphOf[i]);
+        int reason = i < g->execReason_.size() ? g->execReason_[i] : (int)CUDA_PLACEMENT_BACKEND_OFF;
+        if (std::find(gap->reasons.begin(), gap->reasons.end(), reason) == gap->reasons.end())
+            gap->reasons.push_back(reason);
+    }
+    if (gaps.empty())
+        return;
+
+    for (PlacementGap& gap : gaps) {
+        for (int sg : gap.subgraphs)
+            if (sg > 0 && sg < subgraphId)
+                gap.sandwiched++;
+    }
+
+    std::vector<char> hostSubgraphSeen(subgraphId + 1, 0);
+    for (size_t i = 0; i < nops; i++)
+        if (prog[i] && g->execBackend_[i] != DNN_BACKEND_CUDA)
+            hostSubgraphSeen[subgraphOf[i]] = 1;
+    size_t totalSandwiched = 0;
+    for (int sg = 1; sg < subgraphId; sg++)
+        if (hostSubgraphSeen[sg])
+            totalSandwiched++;
+
+    std::sort(gaps.begin(), gaps.end(), [](const PlacementGap& a, const PlacementGap& b) {
+        if (a.sandwiched != b.sandwiched)
+            return a.sandwiched > b.sandwiched;
+        if (a.subgraphs.size() != b.subgraphs.size())
+            return a.subgraphs.size() > b.subgraphs.size();
+        return a.count > b.count;
+    });
+
+    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': CUDA coverage gaps by op type, ranked by "
+                                 "subgraph impact (%zu sandwiched host subgraph(s), ~%zu transfer(s) per forward)",
+                graph->name().c_str(), totalSandwiched, totalSandwiched * 2));
+    for (const PlacementGap& gap : gaps) {
+        std::string reasons;
+        for (size_t k = 0; k < gap.reasons.size(); k++) {
+            if (k)
+                reasons += ",";
+            reasons += cudaPlacementReasonName(gap.reasons[k]);
+        }
+        CV_LOG_INFO(NULL, cv::format("DNN/NewEngine:   %-24s x%-4zu subgraphs=%-3zu sandwiched=%-3zu %s",
+                    gap.type.c_str(), gap.count, gap.subgraphs.size(), gap.sandwiched, reasons.c_str()));
+    }
 }
 
 void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement)
