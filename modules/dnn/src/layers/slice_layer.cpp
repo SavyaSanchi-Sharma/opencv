@@ -291,8 +291,8 @@ public:
         CV_CheckEQ(inputs.size(), (size_t)1, "");
         for (auto input : inputs)
         {
-            if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-                CV_CheckType(input, input == CV_16F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
+            if (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
+                CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
             else
                 CV_CheckType(input, input == CV_32F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
         }
@@ -829,6 +829,26 @@ public:
         else
             return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, inputs[0]->getHostMatDepth(), std::move(context->stream), std::move(offsets));
     }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        std::vector<std::vector<std::size_t>> offsets;
+        for (const auto& ranges : finalSliceRanges)
+        {
+            std::vector<std::size_t> offsets_i;
+            for (const auto& range : ranges)
+                offsets_i.push_back(range.start);
+            offsets.push_back(std::move(offsets_i));
+        }
+        if (inputs_arr.depth(0) == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), std::move(offsets));
+        else
+            return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, inputs_arr.depth(0), std::move(context->stream), std::move(offsets));
+    }
 #endif
 
 private:
@@ -1024,8 +1044,8 @@ public:
         CV_CheckEQ(inputs.size(), (size_t)2, "");
         for (auto input : inputs)
         {
-            if (preferableTarget == DNN_TARGET_OPENCL_FP16)
-                CV_CheckType(input, input == CV_16F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
+            if (preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16)
+                CV_CheckType(input, input == CV_16F || input == CV_32F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
             else
                 CV_CheckType(input, input == CV_32F || input == CV_8S || input == CV_8U || input == CV_32S || input == CV_64S || input == CV_Bool, "");
         }

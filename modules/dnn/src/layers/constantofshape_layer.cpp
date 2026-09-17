@@ -5,6 +5,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/constant_of_shape.hpp"
+#endif
 
 namespace cv
 {
@@ -60,8 +64,31 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return blobs.size() == 1 && blobs[0].total() == 1 && !dynamicOutputShapes();
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        CV_Assert(blobs.size() == 1);
+        const Mat& value = blobs[0];
+
+        if (value.type() == CV_32F && preferableTarget == DNN_TARGET_CUDA_FP16) {
+            Mat halfValue;
+            value.convertTo(halfValue, CV_16F);
+            return Ptr<BackendNode>(new cuda4dnn::ConstantOfShapeOp<half>(std::move(context->stream), halfValue));
+        }
+        return make_cuda_node_with_type<cuda4dnn::ConstantOfShapeOp>(preferableTarget, value.type(),
+                                                                     std::move(context->stream), value);
+    }
+#endif
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {

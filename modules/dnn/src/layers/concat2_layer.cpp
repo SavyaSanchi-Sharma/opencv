@@ -5,6 +5,11 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/concat.hpp"
+#endif
 
 namespace cv
 {
@@ -101,8 +106,28 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return true;
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        MatShape inpShape = cv::dnn::shape(inputs[0]);
+        std::size_t axis_ = (std::size_t)normalize_axis(axis, inpShape.dims);
+        if (inputs[0].type() == CV_Bool)
+            return make_cuda_node_bool<cuda4dnn::ConcatOp>(std::move(context->stream), axis_, false);
+        return make_cuda_node_with_type<cuda4dnn::ConcatOp>(preferableTarget, inputs[0].type(), std::move(context->stream), axis_, false);
+    }
+#endif
 
     MatShape getOutShape(const std::vector<MatShape>& inpShapes) const
     {
