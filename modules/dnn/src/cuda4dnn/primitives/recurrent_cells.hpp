@@ -75,6 +75,20 @@ public:
         lstm.inference(input, y_output, yc_output, filtersTensor, h0Tensor, c0Tensor, workspace);
     }
 
+    void forward(const std::vector<UMat>& inputs,
+                 const std::vector<UMat>& outputs,
+                 csl::Workspace& workspace) override
+    {
+        CV_Assert(inputs.size() == 1 && !outputs.empty());
+
+        auto input = csl::viewOf<T>(inputs[0]);
+        auto y_output = csl::spanOf<T>(outputs[0]);
+
+        csl::TensorSpan<T> yc_output = outputs.size() == 2 ? csl::spanOf<T>(outputs[1]) : csl::TensorSpan<T>();
+
+        lstm.inference(input, y_output, yc_output, filtersTensor, h0Tensor, c0Tensor, workspace);
+    }
+
     std::size_t get_workspace_memory_in_bytes() const noexcept override
     {
         return lstm.get_workspace_memory_in_bytes();

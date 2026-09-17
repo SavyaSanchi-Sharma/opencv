@@ -116,6 +116,31 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 variance, num_priors, feature_map_width, feature_map_height, image_width, image_height, normalize, clip);
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            // PriorBox uses layer parameters and inputs[0]/inputs[1] shapes; tensor data is never read.
+            // Extra inputs (e.g., in ssd_vgg16.onnx) are ignored, so require >= 2 inputs instead of exactly 2.
+            CV_Assert(inputs.size() >= 2);
+            CV_Assert(outputs.size() == 1);
+
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            /* we had stored all the parameters in a single tensor; now we create appropriate views
+             * for each of the parameter arrays from the single tensor
+             */
+            auto boxWidths  = csl::View<float>(paramsTensor.get(), box_size);
+            auto boxHeights = csl::View<float>(paramsTensor.get() + box_size, box_size);
+            auto offsetsX   = csl::View<float>(paramsTensor.get() + 2 * box_size, offset_size);
+            auto offsetsY   = csl::View<float>(paramsTensor.get() + 2 * box_size + offset_size, offset_size);
+
+            kernels::generate_prior_boxes<T>(stream, output,
+                boxWidths, boxHeights, offsetsX, offsetsY, stepX, stepY,
+                variance, num_priors, feature_map_width, feature_map_height, image_width, image_height, normalize, clip);
+        }
+
     private:
         csl::Stream stream;
         csl::Tensor<float> paramsTensor; /* widths, heights, offsetsX, offsetsY */

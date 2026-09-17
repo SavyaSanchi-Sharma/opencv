@@ -131,6 +131,45 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
         }
 
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_Assert(outputs.size() == 1);
+
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+
+            auto rows = input.get_axis_size(1);
+            auto cols = input.get_axis_size(2);
+
+            auto cell_box_size = classes + 4 + 1;
+
+            /* we squash class scores into probabilities using softmax or sigmoid */
+            bool if_true_sigmoid_else_softmax = (squash_type == SquashMethod::SIGMOID);
+
+            kernels::region<T>(stream, output, input, biasTensor,
+                object_prob_cutoff, class_prob_cutoff,
+                boxes_per_cell, cell_box_size,
+                rows, cols, scale_x_y,
+                height_norm, width_norm,
+                if_true_sigmoid_else_softmax,
+                new_coords
+            );
+
+            if (nms_iou_threshold > static_cast<T>(0.0f)) {
+                stream.synchronize();
+                cv::Mat output_mat = outputs[0].getMat(ACCESS_RW);
+                CV_Assert(output_mat.type() == CV_32F);
+                for (int i = 0; i < input.get_axis_size(0); i++) {
+                    auto sample_size = rows * cols * boxes_per_cell * cell_box_size;
+                    do_nms_sort(reinterpret_cast<float*>(output_mat.data) + i * sample_size, rows * cols * boxes_per_cell, class_prob_cutoff, nms_iou_threshold);
+                }
+                outputs[0].u->markDeviceCopyObsolete(true);
+            }
+        }
+
     private:
         void do_nms_sort(float *detections, int total, float score_thresh, float nms_thresh)
         {

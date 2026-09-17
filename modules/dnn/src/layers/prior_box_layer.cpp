@@ -629,6 +629,41 @@ public:
 
         return make_cuda_node<cuda4dnn::PriorBoxOp>(preferableTarget, std::move(context->stream), config);
     }
+
+    Ptr<BackendNode> initCUDA(
+        void* context_,
+        InputArrayOfArrays inputs_arr,
+        InputArrayOfArrays outputs_arr
+    ) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<csl::CSLContext*>(context_);
+
+        MatShape feature_map_shape = inputs_arr.shape(0);
+        MatShape image_shape = inputs_arr.shape(1);
+
+        PriorBoxConfiguration config;
+        int fm_dims = feature_map_shape.dims;
+        int im_dims = image_shape.dims;
+        config.feature_map_width = feature_map_shape.p[fm_dims-1];
+        config.feature_map_height = feature_map_shape.p[fm_dims-2];
+        config.image_width = image_shape[im_dims-1];
+        config.image_height = image_shape[im_dims-2];
+
+        config.num_priors = _numPriors;
+        config.box_widths = _boxWidths;
+        config.box_heights = _boxHeights;
+        config.offsets_x = _offsetsX;
+        config.offsets_y = _offsetsY;
+        config.stepX = _stepX == 0 ? (static_cast<float>(config.image_width) / config.feature_map_width) : _stepX;
+        config.stepY = _stepY == 0 ? (static_cast<float>(config.image_height) / config.feature_map_height) : _stepY;
+
+        config.variance = _variance;
+
+        config.clip = _clip;
+        config.normalize = _bboxesNormalized;
+
+        return make_cuda_node<cuda4dnn::PriorBoxOp>(preferableTarget, std::move(context->stream), config);
+    }
 #endif
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,

@@ -3,9 +3,14 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
 #include "layers_common.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/scatter_nd.hpp"
+#endif
 
 #include <algorithm> // for std::max & std::min
 
@@ -44,9 +49,35 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return reduction == REDUCTION::NONE;
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH && reduction == REDUCTION::NONE);
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        CV_Assert(inputs.size() == 3);
+
+        int dataType = inputs[0].type();
+        if (dataType == CV_Bool)
+            dataType = CV_8U;
+
+        const int idxType = inputs[1].type();
+        CV_CheckType(idxType, idxType == CV_32S || idxType == CV_64S, "ScatterND CUDA: indices must be int32 or int64");
+        if (idxType == CV_32S)
+            return make_cuda_node_with_indices<cuda4dnn::ScatterNDOp, int32_t>(preferableTarget, dataType, std::move(context->stream));
+        return make_cuda_node_with_indices<cuda4dnn::ScatterNDOp, int64_t>(preferableTarget, dataType, std::move(context->stream));
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,
