@@ -330,7 +330,12 @@ namespace cv { namespace dnn {
     {
         std::size_t total = shape.total();
         if (offsetElems == 0 && total == buf.total())
-            return buf;
+        {
+            if (cv::dnn::shape(buf) == shape)
+                return buf;
+            CV_Assert(buf.isContinuous());
+            return buf.reshape(1, shape);
+        }
 
         if (buf.dims <= 2)
         {

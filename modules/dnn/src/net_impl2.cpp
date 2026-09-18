@@ -808,7 +808,8 @@ static size_t cudaMinGpuRun()
     return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_RUN", 0);
 }
 
-// ops per sliding window; a window with enough device-capable ops forms a device subgraph
+// ops per sliding window; a window with enough device-capable ops forms a device subgraph.
+// 0 leaves the size to resolvePlacementWindow(), which derives it from the graph's op count.
 static size_t cudaPlacementWindow()
 {
     return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_WINDOW", 0);
@@ -818,6 +819,87 @@ static size_t cudaPlacementWindow()
 static size_t cudaMinGpuOpsPerWindow()
 {
     return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_OPS", 0);
+}
+
+// hard cap on device ops, counted from the start of the program; a bisection aid
+static size_t cudaMaxOps()
+{
+    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MAX_OPS", 0);
+}
+
+// size the sliding window from the graph instead of requiring the two env vars to be set by hand.
+// Off by default until it has been validated across the model suite.
+static bool cudaAutoWindowEnabled()
+{
+    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_WINDOW_AUTO", false);
+}
+
+// device-op density, in percent, that an automatically sized window must reach
+static size_t cudaWindowDensityPct()
+{
+    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_WINDOW_DENSITY_PCT", 50);
+}
+
+// Automatic window sizing bounds. The window is a locality probe -- "does this device op sit in a
+// dense enough neighbourhood to pay for its boundary transfers" -- so it tracks sqrt(nops) rather
+// than nops: the natural locality scale of a model grows with depth, but far more slowly than depth
+// itself, and a 500-op model does not want a 250-op window. Below MIN_OPS the window would span a
+// large fraction of the whole graph and quietly turn into a global-density test, which is what
+// OPENCV_DNN_CUDA_MIN_GPU_FLOPS_PCT already does properly.
+static const size_t CUDA_AUTO_WINDOW_MIN_OPS = 32;
+static const size_t CUDA_AUTO_WINDOW_LO = 8;
+static const size_t CUDA_AUTO_WINDOW_HI = 24;
+
+// round(sqrt(n)) in integers, so the bucket edges do not depend on floating-point rounding
+static size_t isqrtRounded(size_t n)
+{
+    size_t r = 0;
+    while ((r + 1) * (r + 1) <= n)
+        r++;
+    if (n - r * r > (r + 1) * (r + 1) - n)
+        r++;
+    return r;
+}
+
+// Resolve the sliding-window geometry for a graph of `nreal` executable ops.
+// Returns false when the window filter should not run at all.
+static bool resolvePlacementWindow(size_t nreal, size_t& window, size_t& minGpuOps)
+{
+    window = cudaPlacementWindow();
+    minGpuOps = cudaMinGpuOpsPerWindow();
+
+    if (window > 0) {
+        // explicit override: both values come from the environment as given
+        if (minGpuOps == 0) {
+            CV_LOG_WARNING(NULL, "DNN/NewEngine: OPENCV_DNN_CUDA_WINDOW is set but "
+                                 "OPENCV_DNN_CUDA_MIN_GPU_OPS is 0; window placement is disabled.");
+            return false;
+        }
+    }
+    else if (cudaAutoWindowEnabled()) {
+        if (nreal < CUDA_AUTO_WINDOW_MIN_OPS)
+            return false;
+        window = std::min(std::max(isqrtRounded(nreal), CUDA_AUTO_WINDOW_LO), CUDA_AUTO_WINDOW_HI);
+        minGpuOps = (window * cudaWindowDensityPct() + 99) / 100;  // ceil
+    }
+    else {
+        return false;
+    }
+
+    // A window can hold at most `wlen` device ops, so a threshold above that demotes every device op
+    // in the graph -- silently, and regardless of how good the placement was. Clamp against the
+    // effective length rather than the requested one, which is what a short graph actually gets.
+    size_t wlen = std::min(window, nreal);
+    if (wlen < 2)
+        return false;
+    if (minGpuOps < 1)
+        minGpuOps = 1;
+    if (minGpuOps > wlen) {
+        CV_LOG_WARNING(NULL, cv::format("DNN/NewEngine: window threshold %zu exceeds the effective "
+                                        "window length %zu; clamping to %zu", minGpuOps, wlen, wlen));
+        minGpuOps = wlen;
+    }
+    return true;
 }
 
 static bool blockLayoutEnabled()
@@ -1137,6 +1219,19 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         for (i = 0; i < nops; i++)
             placed[i] = (prog[i] && cudaExecs[i]) ? 1 : 0;
 
+        size_t maxOps = cudaMaxOps();
+        if (maxOps > 0) {
+            size_t seen = 0;
+            for (i = 0; i < nops; i++) {
+                if (!prog[i])
+                    continue;
+                if (seen++ >= maxOps && placed[i]) {
+                    placed[i] = 0;
+                    g->execReason_[i] = CUDA_PLACEMENT_BACKEND_OFF;
+                }
+            }
+        }
+
         int demoteReason = -1;
         if (preferableTarget == DNN_TARGET_CUDA_FP16) {
             for (i = 0; i < nops; i++)
@@ -1185,20 +1280,18 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        size_t window = cudaPlacementWindow(), minGpuOps = cudaMinGpuOpsPerWindow();
-        if (demoteReason < 0 && window > 0 && minGpuOps == 0) {
-            CV_LOG_WARNING(NULL, "DNN/NewEngine: OPENCV_DNN_CUDA_WINDOW is set but "
-                                 "OPENCV_DNN_CUDA_MIN_GPU_OPS is 0; window placement is disabled.");
-        }
-        if (demoteReason < 0 && window > 0 && minGpuOps > 0) {
-            std::vector<size_t> ops;
-            for (i = 0; i < nops; i++)
-                if (prog[i])
-                    ops.push_back(i);
+        // the compacted program -- indices of the ops that survived fusion -- is the list both the
+        // window filter and the bubble/run smoothing below walk, so build it once
+        std::vector<size_t> ops;
+        for (i = 0; i < nops; i++)
+            if (prog[i])
+                ops.push_back(i);
 
+        size_t window = 0, minGpuOps = 0;
+        if (demoteReason < 0 && resolvePlacementWindow(ops.size(), window, minGpuOps)) {
             size_t wlen = std::min(window, ops.size());
             std::vector<uchar> accepted(ops.size(), 0);
-            for (size_t start = 0; wlen > 0 && start + wlen <= ops.size(); start++) {
+            for (size_t start = 0; start + wlen <= ops.size(); start++) {
                 size_t ngpu = 0;
                 for (size_t k = start; k < start + wlen; k++)
                     if (placed[ops[k]])
@@ -1210,21 +1303,22 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
                         accepted[k] = 1;
             }
 
+            size_t demoted = 0;
             for (size_t k = 0; k < ops.size(); k++) {
                 if (!placed[ops[k]] || accepted[k])
                     continue;
                 placed[ops[k]] = 0;
                 g->execReason_[ops[k]] = CUDA_PLACEMENT_WINDOW_TOO_SPARSE;
+                demoted++;
             }
+
+            CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': sliding window %zu op(s), "
+                                         "threshold %zu device op(s); %zu op(s) demoted as too sparse",
+                        graph->name().c_str(), wlen, minGpuOps, demoted));
         }
 
         size_t maxBubble = cudaMaxCpuBubble(), minRun = cudaMinGpuRun();
         if (maxBubble > 0 || minRun > 1) {
-            std::vector<size_t> ops;
-            for (i = 0; i < nops; i++)
-                if (prog[i])
-                    ops.push_back(i);
-
             for (int pass = 0; pass < 8; pass++) {
                 bool changed = false;
                 for (size_t a = 0; a < ops.size(); ) {

@@ -3,9 +3,14 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../op_cuda.hpp"
 #include "cpu_kernels/fast_gemm.hpp"
 #include "cpu_kernels/softmax.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/attention.hpp"
+#endif
 
 #include <opencv2/dnn/shape_utils.hpp>
 
@@ -156,8 +161,43 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return !do_rotary && blobs.size() >= 2 && this->inputs.size() == 1 &&
+                   output_ndims == 3 && qkv_head_sizes[0] == qkv_head_sizes[1];
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        CV_CheckEQ(inputs.size(), (size_t)1, "DNN/Attention/Cuda: expects a single runtime input");
+        CV_CheckTypeEQ(inputs[0].depth(), CV_32F, "DNN/Attention/Cuda: only CV_32F is supported");
+
+        MatShape ishape = cv::dnn::shape(inputs[0]);
+        CV_CheckEQ(ishape.dims, 3, "DNN/Attention/Cuda: input must be 3-dimensional");
+        CV_CheckEQ((size_t)qkv_hidden_sizes.size(), (size_t)3, "");
+
+        cuda4dnn::AttentionConfiguration cfg;
+        cfg.num_heads = num_heads;
+        cfg.qkv_hidden_sizes = qkv_hidden_sizes;
+        cfg.input_hidden_size = static_cast<size_t>(ishape[2]);
+        cfg.batch_size = static_cast<size_t>(ishape[0]);
+        cfg.seq_len = static_cast<size_t>(ishape[1]);
+        cfg.scale = scale;
+
+        return make_cuda_node<cuda4dnn::AttentionOp>(preferableTarget,
+                                                     std::move(context->stream),
+                                                     std::move(context->cublas_handle),
+                                                     blobs.front(), blobs.back(), cfg);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,
