@@ -652,9 +652,18 @@ namespace cv { namespace dnn {
                     u->markDeviceCopyObsolete(false);
                     u->markHostCopyObsolete(false);
                 }
-                // the upload runs on the default stream; DNN's stream is non-blocking, so kernels
-                // would otherwise start reading this buffer before the transfer completes
-                CUDA4DNN_CHECK_CUDA(cudaDeviceSynchronize());
+                // the upload runs on the default stream; DNN's stream is non-blocking, so order it
+                // behind the copy with an event rather than draining every stream on the device
+                if (shared_block->stream) {
+                    if (!shared_block->uploadDone)
+                        CUDA4DNN_CHECK_CUDA(cudaEventCreateWithFlags(&shared_block->uploadDone,
+                                                                     cudaEventDisableTiming));
+                    CUDA4DNN_CHECK_CUDA(cudaEventRecord(shared_block->uploadDone, 0));
+                    CUDA4DNN_CHECK_CUDA(cudaStreamWaitEvent(shared_block->stream.get(),
+                                                            shared_block->uploadDone, 0));
+                } else {
+                    CUDA4DNN_CHECK_CUDA(cudaDeviceSynchronize());
+                }
             }
         }
 
@@ -745,6 +754,14 @@ namespace cv { namespace dnn {
             cuda4dnn::csl::Stream stream;
 
             cv::UMat boundUMat;
+
+            // orders DNN's non-blocking stream behind an upload issued on the default stream
+            cudaEvent_t uploadDone = nullptr;
+
+            ~shared_block_type() {
+                if (uploadDone)
+                    cudaEventDestroy(uploadDone);
+            }
         };
 
         std::shared_ptr<shared_block_type> shared_block;

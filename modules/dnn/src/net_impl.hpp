@@ -451,6 +451,7 @@ struct Net::Impl : public detail::NetImplBase
     void finalize();
     // Selects executors for a single graph (recursing into subgraphs).
     void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement);
+    void buildTransferSchedule(const Ptr<Graph>& graph);
     Ptr<Layer> makeCpuExec(const Ptr<LayerInfo>& op);
     void logGraphPlacement(const Ptr<Graph>& graph) const;
     bool gatherOpShapes(const Ptr<LayerInfo>& op,

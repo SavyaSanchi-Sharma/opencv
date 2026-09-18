@@ -418,6 +418,7 @@ public:
         exec_.clear();
         execBackend_.clear();
         execReason_.clear();
+        transfers_.clear();
     }
 
     Net::Impl* netimpl_;
@@ -428,6 +429,15 @@ public:
     std::vector<Ptr<Layer> > exec_;
     std::vector<int> execBackend_;
     std::vector<int> execReason_;
+
+    // one entry per arg that actually crosses the bus, in op order; args that merely flow past a
+    // host op never appear here. Rebuilt whenever placement or the input signature changes.
+    struct TransferPoint {
+        int opIdx;
+        int argIdx;
+        bool toHost;   // false: upload before this op runs
+    };
+    std::vector<TransferPoint> transfers_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -752,6 +762,20 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_SHORT_GPU_RUN:    return "short-gpu-run";
     }
     return "unknown";
+}
+
+// drive host-side downloads from the precomputed schedule instead of per-input residency checks
+static bool cudaScheduleEnabled()
+{
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_SCHEDULE", false);
+    return flag;
+}
+
+// trust the UMat dirty flags instead of forcing a download before every host read
+static bool cudaTrustResidency()
+{
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", false);
+    return flag;
 }
 
 static bool useWholeGraphCudaGate()
@@ -1234,6 +1258,65 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         g->exec_[i] = exec;
         g->execBackend_[i] = backend;
     }
+
+    buildTransferSchedule(graph);
+}
+
+// Walks the placed program once and records every arg that actually crosses the bus. An arg is
+// downloaded before the first host op that reads it and uploaded before the first device op that
+// reads it; anything merely live across a boundary without being read there never appears.
+void Net::Impl::buildTransferSchedule(const Ptr<Graph>& graph)
+{
+    GraphImpl* g = static_cast<GraphImpl*>(graph.get());
+    const std::vector<Ptr<LayerInfo> >& prog = g->prog_;
+    const size_t nops = prog.size(), nargs = args.size();
+    g->transfers_.clear();
+
+    std::vector<int> producerBackend(nargs, -1);   // -1: not produced in this graph
+    std::vector<uchar> onDevice(nargs, 0);         // latest copy is device-resident
+    std::vector<uchar> onHost(nargs, 0);           // latest copy is host-resident
+
+    for (size_t i = 0; i < nops; i++) {
+        const Ptr<LayerInfo>& op = prog[i];
+        if (!op)
+            continue;
+        const bool devOp = g->execBackend_[i] == DNN_BACKEND_CUDA;
+
+        for (const Arg& a : op->inputs) {
+            if (a.idx <= 0 || a.idx >= (int)nargs)
+                continue;
+            if (args[a.idx].kind == DNN_ARG_CONST)
+                continue;                          // uploaded once in finalize(), never per forward
+            if (devOp) {
+                if (!onDevice[a.idx]) {
+                    g->transfers_.push_back(GraphImpl::TransferPoint{ (int)i, a.idx, false });
+                    onDevice[a.idx] = 1;
+                }
+            } else {
+                if (!onHost[a.idx]) {
+                    // a graph input starts on the host, so it only crosses if a device op wrote it
+                    if (producerBackend[a.idx] == DNN_BACKEND_CUDA)
+                        g->transfers_.push_back(GraphImpl::TransferPoint{ (int)i, a.idx, true });
+                    onHost[a.idx] = 1;
+                }
+            }
+        }
+
+        for (const Arg& a : op->outputs) {
+            if (a.idx <= 0 || a.idx >= (int)nargs)
+                continue;
+            producerBackend[a.idx] = devOp ? DNN_BACKEND_CUDA : DNN_BACKEND_OPENCV;
+            onDevice[a.idx] = devOp ? 1 : 0;
+            onHost[a.idx] = devOp ? 0 : 1;
+        }
+    }
+
+    size_t nh2d = 0, nd2h = 0;
+    for (const GraphImpl::TransferPoint& t : g->transfers_)
+        (t.toHost ? nd2h : nh2d)++;
+    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': transfer schedule %zu point(s), "
+                                 "%zu H2D, %zu D2H", graph->name().c_str(),
+                g->transfers_.size(), nh2d, nd2h));
 }
 
 void Net::Impl::saveFusedSnapshot()
@@ -2038,7 +2121,8 @@ static void syncShapeSpecInputs(Net::Impl* netimpl, const std::vector<Arg>& inpu
             continue;
         if (!meta.u || meta.u->currAllocator != cudaAlloc)
             continue;
-        meta.u->markHostCopyObsolete(true);
+        if (!cudaTrustResidency())
+            meta.u->markHostCopyObsolete(true);
         Ptr<CUDABackendWrapper> cw =
             netimpl->getCudaArgWrapper(inputs[i], meta).dynamicCast<CUDABackendWrapper>();
         if (cw) {
@@ -2290,6 +2374,32 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         bool needMats = opBackend != DNN_BACKEND_CUDA || !layer->finalizedOnce ||
                         layer->packedWeightEpoch != op->weightEpoch;
 
+        bool useSchedule = false;
+#ifdef HAVE_CUDA
+        useSchedule = cudaScheduleEnabled() && !gimpl->transfers_.empty() && cudaInfo;
+        if (useSchedule) {
+            // only the args this op actually reads cross here; anything flowing past stays resident
+            auto lo = std::lower_bound(gimpl->transfers_.begin(), gimpl->transfers_.end(), (int)opidx,
+                                       [](const GraphImpl::TransferPoint& t, int v) { return t.opIdx < v; });
+            for (; lo != gimpl->transfers_.end() && lo->opIdx == (int)opidx; ++lo) {
+                if (!lo->toHost)
+                    continue;
+                UMat& t = argTensor(Arg(lo->argIdx));
+                if (!t.u || t.u->currAllocator != cv::cuda::getCudaAllocator())
+                    continue;
+                Ptr<CUDABackendWrapper> cw =
+                    getCudaArgWrapper(Arg(lo->argIdx), t).dynamicCast<CUDABackendWrapper>();
+                if (!cw)
+                    continue;
+                if (t.u->hostCopyObsolete()) {
+                    d2hCount++;
+                    d2hBytes += t.total() * t.elemSize();
+                }
+                cw->copyToHost();
+            }
+        }
+#endif
+
         for (i = 0; i < ninputs; i++) {
             Arg inp = inputs[i];
             const UMat& u = argTensor(inp);
@@ -2304,12 +2414,15 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             } else if (!layer->needsHostData((int)i)) {
                 // shape/type carrier only, like the output side: never allocate what nothing reads
                 inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
+            } else if (useSchedule) {
+                // the schedule already brought this down; nothing to check per input
+                inpMats[i] = u.getMat(ACCESS_READ);
             } else {
                 const bool deviceIsNewer = inp.idx < (int)argResidency.size() &&
                                            argResidency[inp.idx] == ARG_RESIDENCY_DEVICE;
-                // residency bookkeeping is not a reliable gate; a device-resident tensor a host op
-                // is about to read must always be pulled back
-                if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
+                // forced unless OPENCV_DNN_CUDA_TRUST_RESIDENCY=1; setDeviceDirty() already marks
+                // CUDA op outputs host-obsolete, so the flag should suffice on its own
+                if (!cudaTrustResidency() && u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
                     u.u->markHostCopyObsolete(true);
                 // a cached wrapper can still be bound to a freed allocation, so revalidate it here
                 if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator() && cudaInfo) {

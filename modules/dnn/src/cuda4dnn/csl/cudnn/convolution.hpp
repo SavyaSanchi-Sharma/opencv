@@ -20,7 +20,16 @@
 #include <type_traits>
 #include <iterator>
 
+#include <opencv2/core/utils/configuration.private.hpp>
+
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cudnn {
+
+    inline bool cudaFmaMathOnly()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
+        return flag;
+    }
 
     /** describe convolution filters
      *
@@ -231,7 +240,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
                  * giving near-FP16 throughput at slightly reduced precision. ONNXRuntime enables
                  * this by default; we follow suit. (Was CUDNN_FMA_MATH to force exact FP32.)
                  */
-                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(descriptor, CUDNN_DEFAULT_MATH));
+                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(
+                    descriptor, cudaFmaMathOnly() ? CUDNN_FMA_MATH : CUDNN_DEFAULT_MATH));
 #endif
 
                 if (std::is_same<T, half>::value)

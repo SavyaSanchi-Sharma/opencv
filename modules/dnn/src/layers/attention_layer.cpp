@@ -178,7 +178,7 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
                     "DNN/Attention supportBackend: '%s' FAIL do_rotary=%d blobs=%zu inputs=%zu "
                     "output_ndims=%d qkv_head_sizes=[%d,%d]",
                     name.c_str(), (int)do_rotary, blobs.size(), this->inputs.size(),
-                    output_ndims,
+                    (int)output_ndims,
                     qkv_head_sizes.empty() ? -1 : (int)qkv_head_sizes[0],
                     qkv_head_sizes.size() < 2 ? -1 : (int)qkv_head_sizes[1]));
             return ok;
