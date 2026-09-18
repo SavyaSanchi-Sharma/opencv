@@ -1410,34 +1410,20 @@ void Net::Impl::finalize()
 #ifdef HAVE_CUDA
     if (useCUDA) {
         std::vector<bool> constUsedByCuda(args.size(), false);
-        std::vector<bool> constIsShapeSpec(args.size(), false);
         for (const Ptr<Graph>& g : allgraphs) {
             const std::vector<Ptr<LayerInfo> >& prog = g->prog();
             for (size_t opidx = 0; opidx < prog.size(); opidx++) {
                 const Ptr<LayerInfo>& op = prog[opidx];
                 if (!op || g->opBackend((int)opidx) != DNN_BACKEND_CUDA)
                     continue;
-                for (size_t k = 0; k < op->inputs.size(); k++) {
-                    const Arg& inp = op->inputs[k];
-                    if (inp.idx <= 0 || inp.idx >= (int)args.size())
-                        continue;
+                for (const Arg& inp : op->inputs)
                     constUsedByCuda[inp.idx] = true;
-                    // mirrors syncShapeSpecInputs(): these get pulled straight back every forward
-                    if (k >= 1) {
-                        const UMat& t = __tensors__.at(inp.idx);
-                        const int d = t.empty() ? -1 : t.depth();
-                        if ((d == CV_32S || d == CV_64S) && t.total() <= 1024)
-                            constIsShapeSpec[inp.idx] = true;
-                    }
-                }
             }
         }
         // Only consts a CUDA op actually reads are worth moving to the device.
         MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
         for (size_t i = 0; i < args.size(); i++) {
             if (args[i].kind != DNN_ARG_CONST || !constUsedByCuda[i])
-                continue;
-            if (constIsShapeSpec[i])
                 continue;
             UMat& t = __tensors__.at(i);
             if (t.empty() || !t.u || t.u->currAllocator == cudaAlloc)
