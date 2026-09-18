@@ -5,6 +5,11 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/broadcast_copy.hpp"
+#endif
 
 namespace cv
 {
@@ -28,8 +33,51 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    /* supportBackend() is the only place placement can be declined -- initCUDA() runs
+     * later, from inside forwardCUDA(), where returning nothing would crash rather than
+     * fall back. So every constraint the kernel has is checked here. */
+    bool cudaSupported() const
+    {
+        if (dynamicOutputShapes())
+            return false;
+
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.empty() || this->outputs.empty())
+            return false;
+
+        // make_cuda_node_with_type() hard-errors outside this set -- notably on CV_Bool,
+        // which the engine's own placement type-gate happily lets through.
+        const int t = netimpl_->argType(this->inputs[0]);
+        if (t != CV_32F && t != CV_16F && t != CV_8S && t != CV_8U && t != CV_32S && t != CV_64S)
+            return false;
+
+        // the coordinate mapping is unrolled over a fixed-size layout struct
+        const MatShape& outShape = netimpl_->argData(this->outputs[0]).shape;
+        if (outShape.dims > cuda4dnn::kernels::kMaxBroadcastRank)
+            return false;
+
+        return true;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+        return make_cuda_node_with_type<cuda4dnn::BroadcastCopyOp>(
+            preferableTarget, inputsU[0].type(), std::move(context->stream));
+    }
+#endif
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {

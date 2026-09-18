@@ -5,6 +5,12 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "cpu_kernels/fast_norm.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/rms_norm.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -29,8 +35,39 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    bool cudaSupported() const
+    {
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.size() < 2)
+            return false;
+
+        // the kernel reduces in fp32 and is instantiated for fp32/fp16 only
+        const int t = netimpl_->argType(this->inputs[0]);
+        if (t != CV_32F && t != CV_16F)
+            return false;
+        // scale is read with the same element type as the input
+        return netimpl_->argType(this->inputs[1]) == t;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+        return make_cuda_node_with_type<cuda4dnn::RMSNormOp>(
+            preferableTarget, inputsU[0].type(), std::move(context->stream), axis, epsilon);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,

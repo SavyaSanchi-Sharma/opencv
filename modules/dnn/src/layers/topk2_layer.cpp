@@ -4,6 +4,12 @@
 
 #include "../precomp.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/topk.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -62,8 +68,42 @@ public:
 
     bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    /* The kernel compares in fp32 and is instantiated for fp32/fp16 values only; the
+     * CPU path covers every numeric depth. A dynamic K is rejected upstream by
+     * dynamicOutputShapes(), but it is spelled out here too since supportBackend() is
+     * the only place placement can be declined. */
+    bool cudaSupported() const
+    {
+        if (dynamicK)
+            return false;
+
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.empty())
+            return false;
+
+        const int t = netimpl_->argType(this->inputs[0]);
+        return t == CV_32F || t == CV_16F;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+        return make_cuda_node_with_type<cuda4dnn::TopKOp>(
+            preferableTarget, inputsU[0].type(), std::move(context->stream), axis, largest);
+    }
+#endif
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {

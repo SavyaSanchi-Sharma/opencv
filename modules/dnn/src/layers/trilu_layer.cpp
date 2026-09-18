@@ -4,6 +4,12 @@
 
 #include "../precomp.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/trilu.hpp"
+#endif
 using namespace std;
 namespace cv { namespace dnn {
 
@@ -13,6 +19,55 @@ class TriluLayerImpl CV_FINAL : public TriluLayer {
             setParamsFrom(params);
             upperTri = params.get<bool>("upper", true);
         }
+
+        virtual bool supportBackend(int backendId) CV_OVERRIDE
+        {
+#ifdef HAVE_CUDA
+            if (backendId == DNN_BACKEND_CUDA)
+                return cudaSupported();
+#endif
+            return backendId == DNN_BACKEND_OPENCV;
+        }
+
+#ifdef HAVE_CUDA
+        /* k arrives as an int64 input tensor; the CUDA path bakes it in at init, so a
+         * non-const k stays on the CPU. */
+        bool cudaSupported() const
+        {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || this->inputs.empty())
+                return false;
+
+            const int t = netimpl_->argType(this->inputs[0]);
+            if (t != CV_32F && t != CV_16F && t != CV_32S && t != CV_64S)
+                return false;
+
+            if (this->inputs.size() > 1 && !netimpl_->isConstArg(this->inputs[1]))
+                return false;
+
+            return true;
+        }
+
+        Ptr<BackendNode> initCUDA(void* context_,
+                                  InputArrayOfArrays inputs_,
+                                  InputArrayOfArrays) CV_OVERRIDE
+        {
+            auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+            std::vector<UMat> inputsU;
+            inputs_.getUMatVector(inputsU);
+
+            int k = 0;
+            if (this->inputs.size() > 1) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                CV_Assert(netimpl_ && netimpl_->isConstArg(this->inputs[1]));
+                Mat kTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
+                k = static_cast<int>(kTensor.at<int64_t>(0, 0));
+            }
+
+            return make_cuda_node_with_type<cuda4dnn::TriluOp>(
+                preferableTarget, inputsU[0].type(), std::move(context->stream), k, upperTri);
+        }
+#endif
 
         virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                     const int requiredOutputs,

@@ -8,6 +8,12 @@
 #include "layers_common.hpp"
 
 #include <opencv2/dnn/shape_utils.hpp>
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/cum_scan.hpp"
+#endif
 
 namespace cv {
 namespace dnn {
@@ -29,7 +35,55 @@ public:
         setParamsFrom(params);
     }
 
-    bool supportBackend(int backendId) CV_OVERRIDE { return backendId == DNN_BACKEND_OPENCV; }
+    bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
+        return backendId == DNN_BACKEND_OPENCV;
+    }
+
+#ifdef HAVE_CUDA
+    /* The axis can arrive as an input tensor; the CUDA path needs it resolvable once, at
+     * init, so a non-const axis stays on the CPU. */
+    bool cudaSupported() const
+    {
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.empty())
+            return false;
+
+        const int t = netimpl_->argType(this->inputs[0]);
+        if (t != CV_32F && t != CV_16F && t != CV_32S && t != CV_64S)
+            return false;
+
+        if (this->inputs.size() > 1 && !netimpl_->isConstArg(this->inputs[1]))
+            return false;
+
+        return true;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+
+        int resolved_axis = axis_raw;
+        if (this->inputs.size() > 1) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            CV_Assert(netimpl_ && netimpl_->isConstArg(this->inputs[1]));
+            Mat axisTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
+            resolved_axis = parseAxis(axisTensor);
+        }
+
+        return make_cuda_node_with_type<cuda4dnn::CumScanOp>(
+            preferableTarget, inputsU[0].type(), std::move(context->stream),
+            resolved_axis, true, exclusive_raw == 1, reverse_raw == 1);
+    }
+#endif
 
     bool getMemoryShapes(const std::vector<MatShape>& inputs, const int,
                          std::vector<MatShape>& outputs, std::vector<MatShape>&) const CV_OVERRIDE

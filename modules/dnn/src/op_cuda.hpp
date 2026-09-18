@@ -567,12 +567,12 @@ namespace cv { namespace dnn {
         }
 
         void copyToHost() override {
-            // Drain the stream first; hostCopyObsolete() says nothing about in-flight kernels.
-            shared_block->stream.synchronize();
-
             UMatData* u = shared_block->boundUMat.u;
             if (!u || !u->hostCopyObsolete())
                 return;
+
+            // every CUDA op marks its outputs host-obsolete, so a clean tensor has no kernel in flight
+            shared_block->stream.synchronize();
 
             if (!hostMat.empty())
             {

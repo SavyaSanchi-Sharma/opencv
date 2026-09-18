@@ -418,8 +418,6 @@ public:
         exec_.clear();
         execBackend_.clear();
         execReason_.clear();
-        inH2D_.clear();
-        outD2H_.clear();
     }
 
     Net::Impl* netimpl_;
@@ -430,8 +428,6 @@ public:
     std::vector<Ptr<Layer> > exec_;
     std::vector<int> execBackend_;
     std::vector<int> execReason_;
-    std::vector<std::vector<uchar> > inH2D_;
-    std::vector<std::vector<uchar> > outD2H_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -734,11 +730,12 @@ enum CudaPlacementReason
     CUDA_PLACEMENT_FP16_WHOLE_GRAPH,
     CUDA_PLACEMENT_NO_EXEC,
     CUDA_PLACEMENT_NO_SUPPORT,
-    CUDA_PLACEMENT_NO_ENGINE,
     CUDA_PLACEMENT_BELOW_THRESHOLD,
     CUDA_PLACEMENT_WHOLE_GRAPH_GATE,
     CUDA_PLACEMENT_SHORT_GPU_RUN,
-    CUDA_PLACEMENT_WINDOW_TOO_SPARSE
+    CUDA_PLACEMENT_WINDOW_TOO_SPARSE,
+    CUDA_PLACEMENT_WINDOW_COST,
+    CUDA_PLACEMENT_SEGMENT_COST
 };
 
 static const char* cudaPlacementReasonName(int reason)
@@ -753,11 +750,12 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_FP16_WHOLE_GRAPH: return "fp16-whole-graph";
     case CUDA_PLACEMENT_NO_EXEC:          return "no-exec";
     case CUDA_PLACEMENT_NO_SUPPORT:       return "no-support";
-    case CUDA_PLACEMENT_NO_ENGINE:        return "no-engine";
     case CUDA_PLACEMENT_BELOW_THRESHOLD:  return "below-flops-threshold";
     case CUDA_PLACEMENT_WHOLE_GRAPH_GATE: return "whole-graph-gate";
     case CUDA_PLACEMENT_SHORT_GPU_RUN:    return "short-gpu-run";
     case CUDA_PLACEMENT_WINDOW_TOO_SPARSE: return "window-too-sparse";
+    case CUDA_PLACEMENT_WINDOW_COST:      return "window-cost";
+    case CUDA_PLACEMENT_SEGMENT_COST:     return "segment-cost";
     }
     return "unknown";
 }
@@ -784,11 +782,6 @@ static std::string formatBytes(size_t n)
     if (n >= (size_t)1 << 20) return cv::format("%.1f MB", n / 1048576.0);
     if (n >= (size_t)1 << 10) return cv::format("%.1f KB", n / 1024.0);
     return cv::format("%zu B", n);
-}
-
-static bool useCudaPlacementProbe()
-{
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_PROBE", false);
 }
 
 static double cudaMinGpuFlopsShare()
@@ -1188,30 +1181,6 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
             e->preferableTarget = preferableTarget;
 
-            if (haveShapes && useCudaPlacementProbe() &&
-                gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes)) {
-                std::vector<UMat> probeIn(inpShapes.size()), probeOut(outShapes.size());
-                for (size_t k = 0; k < inpShapes.size(); k++)
-                    probeIn[k].fit(inpShapes[k], inpTypes[k]);
-                for (size_t k = 0; k < outShapes.size(); k++)
-                    probeOut[k].fit(outShapes[k], outTypes[k]);
-                try {
-                    if (!e->probeCUDA(probeIn, probeOut, &cudaInfo->workspace)) {
-                        CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has a CUDA exec but no usable "
-                                                     "engine for this configuration",
-                                                     op->name.c_str(), op->type.c_str()));
-                        g->execReason_[i] = CUDA_PLACEMENT_NO_ENGINE;
-                        continue;
-                    }
-                    e->discardCUDANode();
-                } catch (const cv::Exception& ex) {
-                    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has a CUDA exec but no usable "
-                                                 "engine (%s)", op->name.c_str(), op->type.c_str(), ex.what()));
-                    g->execReason_[i] = CUDA_PLACEMENT_NO_ENGINE;
-                    continue;
-                }
-            }
-
             cudaExecs[i] = e;
             g->execReason_[i] = CUDA_PLACEMENT_OK;
         }
@@ -1548,8 +1517,25 @@ void Net::Impl::allocateLayerOutputs(
     outTypes.clear();
     tempShapes.clear();
     tempTypes.clear();
-    layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
-    layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
+    // inference is a pure function of the input signature, so re-run it only when that changes
+    if (layer->inferCacheValid && layer->inferWeightEpoch == layer->weightEpoch &&
+        layer->inferInpShapes == inpShapes && layer->inferInpTypes == inpTypes) {
+        outShapes = layer->inferOutShapes;
+        outTypes = layer->inferOutTypes;
+        tempShapes = layer->inferTempShapes;
+        tempTypes = layer->inferTempTypes;
+    } else {
+        layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
+        layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
+        layer->inferInpShapes = inpShapes;
+        layer->inferInpTypes = inpTypes;
+        layer->inferOutShapes = outShapes;
+        layer->inferOutTypes = outTypes;
+        layer->inferTempShapes = tempShapes;
+        layer->inferTempTypes = tempTypes;
+        layer->inferWeightEpoch = layer->weightEpoch;
+        layer->inferCacheValid = true;
+    }
     CV_Assert(tempShapes.size() == tempTypes.size());
     CV_Assert(outShapes.size() == outTypes.size());
     CV_Assert(outShapes.size() == noutputs);
@@ -2429,8 +2415,8 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             inpShapes[i] = u.shape();
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA || !layer->needsHostData((int)i)) {
-                inpMats[i].release();
-                inpMats[i].fit(u.shape(), u.type());
+                // shape/type carrier only, like the output side: never allocate what nothing reads
+                inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
             } else {
                 const bool deviceIsNewer = inp.idx < (int)argResidency.size() &&
                                            argResidency[inp.idx] == ARG_RESIDENCY_DEVICE;

@@ -46,6 +46,59 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             std::int64_t reduction_count{};
         };
 
+        // Collapses `dims` into runs of reduced / non-reduced axes so the kernels can
+        // walk the output and the reduction with one coordinate decode each, instead of
+        // decoding the full rank per element. Host-side only.
+        static inline void build_reduce_metadata(const std::vector<std::int64_t>& dims,
+                                                 const std::vector<std::int64_t>& axes,
+                                                 ReduceSumNdMetadata& metadata) {
+            const int rank = static_cast<int>(dims.size());
+            std::array<std::int64_t, kMaxReduceRank> strides{};
+            std::int64_t stride = 1;
+            for (int axis = rank - 1; axis >= 0; --axis) {
+                CV_Assert(dims[axis] > 0);
+                strides[axis] = stride;
+                stride *= dims[axis];
+            }
+
+            std::array<bool, kMaxReduceRank> reduced{};
+            if (axes.empty()) {
+                for (int axis = 0; axis < rank; ++axis) reduced[axis] = true;
+            } else {
+                for (std::int64_t axis : axes) {
+                    if (axis < 0) axis += rank;
+                    CV_Assert(axis >= 0 && axis < rank);
+                    reduced[axis] = true;
+                }
+            }
+
+            std::int64_t output_count = 1;
+            std::int64_t reduction_count = 1;
+            for (int axis = 0; axis < rank;) {
+                const bool is_reduced = reduced[axis];
+                std::int64_t segment_size = 1;
+                int last_axis = axis;
+                do {
+                    segment_size *= dims[axis];
+                    last_axis = axis++;
+                } while (axis < rank && reduced[axis] == is_reduced);
+
+                if (is_reduced) {
+                    const int segment = metadata.reduction_segment_count++;
+                    metadata.reduction_segment_sizes[segment] = segment_size;
+                    metadata.reduction_segment_strides[segment] = strides[last_axis];
+                    reduction_count *= segment_size;
+                } else {
+                    const int segment = metadata.output_segment_count++;
+                    metadata.output_segment_sizes[segment] = segment_size;
+                    metadata.output_segment_strides[segment] = strides[last_axis];
+                    output_count *= segment_size;
+                }
+            }
+            metadata.output_count = output_count;
+            metadata.reduction_count = reduction_count;
+        }
+
         template <typename T>
         struct SumState {
             T sum{};
@@ -143,51 +196,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             CV_Assert(dims.size() <= kMaxReduceRank);
 
             ReduceSumNdMetadata metadata;
-            const int rank = static_cast<int>(dims.size());
-            std::array<std::int64_t, kMaxReduceRank> strides{};
-            std::int64_t stride = 1;
-            for (int axis = rank - 1; axis >= 0; --axis) {
-                CV_Assert(dims[axis] > 0);
-                strides[axis] = stride;
-                stride *= dims[axis];
-            }
-
-            std::array<bool, kMaxReduceRank> reduced{};
-            if (axes.empty()) {
-                for (int axis = 0; axis < rank; ++axis) reduced[axis] = true;
-            } else {
-                for (std::int64_t axis : axes) {
-                    if (axis < 0) axis += rank;
-                    CV_Assert(axis >= 0 && axis < rank);
-                    reduced[axis] = true;
-                }
-            }
-
-            std::int64_t output_count = 1;
-            std::int64_t reduction_count = 1;
-            for (int axis = 0; axis < rank;) {
-                const bool is_reduced = reduced[axis];
-                std::int64_t segment_size = 1;
-                int last_axis = axis;
-                do {
-                    segment_size *= dims[axis];
-                    last_axis = axis++;
-                } while (axis < rank && reduced[axis] == is_reduced);
-
-                if (is_reduced) {
-                    const int segment = metadata.reduction_segment_count++;
-                    metadata.reduction_segment_sizes[segment] = segment_size;
-                    metadata.reduction_segment_strides[segment] = strides[last_axis];
-                    reduction_count *= segment_size;
-                } else {
-                    const int segment = metadata.output_segment_count++;
-                    metadata.output_segment_sizes[segment] = segment_size;
-                    metadata.output_segment_strides[segment] = strides[last_axis];
-                    output_count *= segment_size;
-                }
-            }
-            metadata.output_count = output_count;
-            metadata.reduction_count = reduction_count;
+            build_reduce_metadata(dims, axes, metadata);
+            const std::int64_t output_count = metadata.output_count;
+            const std::int64_t reduction_count = metadata.reduction_count;
 
             if (output_count == 0 || reduction_count == 0)
                 return;
@@ -289,51 +300,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             CV_Assert(dims.size() <= kMaxReduceRank);
 
             ReduceSumNdMetadata metadata;
-            const int rank = static_cast<int>(dims.size());
-            std::array<std::int64_t, kMaxReduceRank> strides{};
-            std::int64_t stride = 1;
-            for (int axis = rank - 1; axis >= 0; --axis) {
-                CV_Assert(dims[axis] > 0);
-                strides[axis] = stride;
-                stride *= dims[axis];
-            }
-
-            std::array<bool, kMaxReduceRank> reduced{};
-            if (axes.empty()) {
-                for (int axis = 0; axis < rank; ++axis) reduced[axis] = true;
-            } else {
-                for (std::int64_t axis : axes) {
-                    if (axis < 0) axis += rank;
-                    CV_Assert(axis >= 0 && axis < rank);
-                    reduced[axis] = true;
-                }
-            }
-
-            std::int64_t output_count = 1;
-            std::int64_t reduction_count = 1;
-            for (int axis = 0; axis < rank;) {
-                const bool is_reduced = reduced[axis];
-                std::int64_t segment_size = 1;
-                int last_axis = axis;
-                do {
-                    segment_size *= dims[axis];
-                    last_axis = axis++;
-                } while (axis < rank && reduced[axis] == is_reduced);
-
-                if (is_reduced) {
-                    const int segment = metadata.reduction_segment_count++;
-                    metadata.reduction_segment_sizes[segment] = segment_size;
-                    metadata.reduction_segment_strides[segment] = strides[last_axis];
-                    reduction_count *= segment_size;
-                } else {
-                    const int segment = metadata.output_segment_count++;
-                    metadata.output_segment_sizes[segment] = segment_size;
-                    metadata.output_segment_strides[segment] = strides[last_axis];
-                    output_count *= segment_size;
-                }
-            }
-            metadata.output_count = output_count;
-            metadata.reduction_count = reduction_count;
+            build_reduce_metadata(dims, axes, metadata);
+            const std::int64_t output_count = metadata.output_count;
+            const std::int64_t reduction_count = metadata.reduction_count;
 
             if (output_count == 0 || reduction_count == 0)
                 return;
@@ -358,31 +327,219 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         detail::reduce_minmax_nd<T, false>(stream, output, input, dims, axes);
     }
 
+    namespace detail {
+        // PROD/L1/L2/SUM_SQUARE/LOG_SUM/LOG_SUM_EXP share the block-per-output-element
+        // shape of the SUM/MEAN and MIN/MAX kernels above; only the per-element
+        // transform, the combine and the finalisation differ, so they go through one
+        // kernel templated on the op rather than six near-copies.
+        enum class GenericReduceOp { PROD, L1, L2, SUM_SQUARE, LOG_SUM, LOG_SUM_EXP };
+
+        template <typename TAccum>
+        struct ProdCombine {
+            __device__ __forceinline__ TAccum operator()(const TAccum& lhs, const TAccum& rhs) const { return lhs * rhs; }
+        };
+
+        template <typename TAccum>
+        struct MaxCombine {
+            __device__ __forceinline__ TAccum operator()(const TAccum& lhs, const TAccum& rhs) const { return lhs > rhs ? lhs : rhs; }
+        };
+
+        __device__ __forceinline__ std::int64_t reduce_output_base(const ReduceSumNdMetadata& metadata, std::int64_t output_index) {
+            std::int64_t remaining = output_index;
+            std::int64_t base = 0;
+            for (int segment = metadata.output_segment_count - 1; segment >= 0; --segment) {
+                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.output_segment_sizes[segment];
+                if (segment != 0) remaining /= metadata.output_segment_sizes[segment];
+                base += coordinate * metadata.output_segment_strides[segment];
+            }
+            return base;
+        }
+
+        __device__ __forceinline__ std::int64_t reduce_input_offset(const ReduceSumNdMetadata& metadata, std::int64_t input_base, std::int64_t reduction_index) {
+            std::int64_t remaining = reduction_index;
+            std::int64_t input_index = input_base;
+            for (int segment = metadata.reduction_segment_count - 1; segment >= 0; --segment) {
+                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.reduction_segment_sizes[segment];
+                if (segment != 0) remaining /= metadata.reduction_segment_sizes[segment];
+                input_index += coordinate * metadata.reduction_segment_strides[segment];
+            }
+            return input_index;
+        }
+
+        template <typename T, GenericReduceOp Op, int BlockSize>
+        __global__ void reduce_generic_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata) {
+            using TAccum = std::conditional_t<std::is_integral_v<T>, double, typename accumulation_type<T>::type>;
+            using BlockReduce = cub::BlockReduce<TAccum, BlockSize>;
+            __shared__ typename BlockReduce::TempStorage reduce_storage;
+            __shared__ std::int64_t input_base;
+            __shared__ TAccum shared_max;
+
+            for (std::int64_t output_index = blockIdx.x;
+                 output_index < metadata.output_count;
+                 output_index += gridDim.x) {
+                if (threadIdx.x == 0)
+                    input_base = reduce_output_base(metadata, output_index);
+                __syncthreads();
+
+                // exp(x) overflows well before the reduction is done, so LOG_SUM_EXP
+                // walks the reduction twice: once for max(x), then for sum(exp(x - max)).
+                if constexpr (Op == GenericReduceOp::LOG_SUM_EXP) {
+                    TAccum thread_max = -::cuda::std::numeric_limits<TAccum>::infinity();
+                    for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
+                         reduction_index += BlockSize) {
+                        const TAccum value = static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]);
+                        if (value > thread_max) thread_max = value;
+                    }
+                    const TAccum block_max = BlockReduce(reduce_storage).Reduce(thread_max, MaxCombine<TAccum>{});
+                    if (threadIdx.x == 0) shared_max = block_max;
+                    __syncthreads();  // publishes shared_max and frees reduce_storage for the sum below
+                }
+
+                TAccum thread_acc = (Op == GenericReduceOp::PROD) ? TAccum(1) : TAccum(0);
+                for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
+                     reduction_index += BlockSize) {
+                    const TAccum value = static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]);
+                    if constexpr (Op == GenericReduceOp::PROD)             thread_acc *= value;
+                    else if constexpr (Op == GenericReduceOp::L1)          thread_acc += fabs(value);
+                    else if constexpr (Op == GenericReduceOp::L2 ||
+                                       Op == GenericReduceOp::SUM_SQUARE) thread_acc += value * value;
+                    else if constexpr (Op == GenericReduceOp::LOG_SUM)     thread_acc += value;
+                    else                                                  thread_acc += exp(value - shared_max);
+                }
+
+                TAccum block_acc;
+                if constexpr (Op == GenericReduceOp::PROD)
+                    block_acc = BlockReduce(reduce_storage).Reduce(thread_acc, ProdCombine<TAccum>{});
+                else
+                    block_acc = BlockReduce(reduce_storage).Sum(thread_acc);
+
+                if (threadIdx.x == 0) {
+                    TAccum result = block_acc;
+                    if constexpr (Op == GenericReduceOp::L2)               result = sqrt(block_acc);
+                    else if constexpr (Op == GenericReduceOp::LOG_SUM)     result = log(block_acc);
+                    else if constexpr (Op == GenericReduceOp::LOG_SUM_EXP) result = log(block_acc) + shared_max;
+                    output[output_index] = CastReduceSumResult<T>(result);
+                }
+                __syncthreads();
+            }
+        }
+
+        template <class T, GenericReduceOp Op>
+        static void reduce_generic_nd(const Stream& stream, Span<T> output, View<T> input,
+                                      const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+            CV_Assert(dims.size() <= kMaxReduceRank);
+
+            ReduceSumNdMetadata metadata;
+            build_reduce_metadata(dims, axes, metadata);
+
+            if (metadata.output_count == 0 || metadata.reduction_count == 0)
+                return;
+
+            constexpr int block_size = 256;
+            constexpr int max_blocks = 65535;
+            const int grid_size = static_cast<int>(std::min<std::int64_t>(max_blocks, metadata.output_count));
+            reduce_generic_nd_kernel<T, Op, block_size><<<grid_size, block_size, 0, stream.get()>>>(
+                input.data().get(), output.data().get(), metadata);
+        }
+    }
+
+    template <class T>
+    void reduce_prod(const Stream& stream, Span<T> output, View<T> input,
+                     const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::PROD>(stream, output, input, dims, axes);
+    }
+
+    template <class T>
+    void reduce_l1(const Stream& stream, Span<T> output, View<T> input,
+                   const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::L1>(stream, output, input, dims, axes);
+    }
+
+    template <class T>
+    void reduce_l2(const Stream& stream, Span<T> output, View<T> input,
+                   const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::L2>(stream, output, input, dims, axes);
+    }
+
+    template <class T>
+    void reduce_sum_square(const Stream& stream, Span<T> output, View<T> input,
+                           const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::SUM_SQUARE>(stream, output, input, dims, axes);
+    }
+
+    template <class T>
+    void reduce_log_sum(const Stream& stream, Span<T> output, View<T> input,
+                        const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::LOG_SUM>(stream, output, input, dims, axes);
+    }
+
+    template <class T>
+    void reduce_log_sum_exp(const Stream& stream, Span<T> output, View<T> input,
+                            const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes) {
+        detail::reduce_generic_nd<T, detail::GenericReduceOp::LOG_SUM_EXP>(stream, output, input, dims, axes);
+    }
+
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)
     template void reduce_sum(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<__half>, View<__half>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
 #endif
     template void reduce_sum(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<float>, View<float>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_sum(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<int8_t>, View<int8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_sum(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<uint8_t>, View<uint8_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_sum(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<int32_t>, View<int32_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_sum(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_mean(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_max(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
     template void reduce_min(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_prod(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l1(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_l2(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_sum_square(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
+    template void reduce_log_sum_exp(const Stream&, Span<int64_t>, View<int64_t>, const std::vector<std::int64_t>&, const std::vector<std::int64_t>&);
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */

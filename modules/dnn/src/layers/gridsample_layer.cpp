@@ -16,6 +16,12 @@
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/utility.hpp>
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/grid_sample.hpp"
+#endif
 
 // ONNX operator: GridSample
 // Spec: https://onnx.ai/onnx/operators/onnx__GridSample.html
@@ -461,8 +467,55 @@ public:
     }
 
     bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    /* The kernel covers the 4-D (2-D spatial) case only, for fp32/fp16 feature maps
+     * with an fp32 grid. The 5-D path and the wider CPU dtypes stay on the CPU. */
+    bool cudaSupported() const
+    {
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.size() != 2 || this->outputs.empty())
+            return false;
+
+        const int xType = netimpl_->argType(this->inputs[0]);
+        if (xType != CV_32F && xType != CV_16F)
+            return false;
+        if (netimpl_->argType(this->inputs[1]) != CV_32F)
+            return false;
+
+        if (netimpl_->argData(this->inputs[0]).shape.dims != 4)
+            return false;
+        if (netimpl_->argData(this->inputs[1]).shape.dims != 4)
+            return false;
+
+        return true;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        std::vector<UMat> inputsU;
+        inputs_.getUMatVector(inputsU);
+
+        cuda4dnn::kernels::GridSampleParams params;
+        // the layer's M_*/P_* enumerators and the kernel's share their values
+        params.mode = mode;
+        params.padding = padding;
+        params.align_corners = align_corners;
+        params.cubic_alpha = cubic_alpha;
+
+        return make_cuda_node_with_type<cuda4dnn::GridSampleOp>(
+            preferableTarget, inputsU[0].type(), std::move(context->stream), params);
+    }
+#endif
 
     bool getMemoryShapes(const std::vector<MatShape>& inputs,
                          const int requiredOutputs,

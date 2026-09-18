@@ -20,7 +20,7 @@
 
 namespace cv { namespace dnn { namespace cuda4dnn {
 
-    enum class ReduceOpType { SUM, MEAN, MAX, MIN };
+    enum class ReduceOpType { SUM, MEAN, MAX, MIN, PROD, L1, L2, SUM_SQUARE, LOG_SUM, LOG_SUM_EXP };
 
     template <class T>
     class ReduceOp final : public CUDABackendNode {
@@ -49,6 +49,12 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 case ReduceOpType::SUM:  kernels::reduce_sum<T>(stream, output, input, dims, axes);  break;
                 case ReduceOpType::MAX:  kernels::reduce_max<T>(stream, output, input, dims, axes);  break;
                 case ReduceOpType::MIN:  kernels::reduce_min<T>(stream, output, input, dims, axes);  break;
+                case ReduceOpType::PROD: kernels::reduce_prod<T>(stream, output, input, dims, axes); break;
+                case ReduceOpType::L1:   kernels::reduce_l1<T>(stream, output, input, dims, axes);   break;
+                case ReduceOpType::L2:   kernels::reduce_l2<T>(stream, output, input, dims, axes);   break;
+                case ReduceOpType::SUM_SQUARE:  kernels::reduce_sum_square<T>(stream, output, input, dims, axes);  break;
+                case ReduceOpType::LOG_SUM:     kernels::reduce_log_sum<T>(stream, output, input, dims, axes);     break;
+                case ReduceOpType::LOG_SUM_EXP: kernels::reduce_log_sum_exp<T>(stream, output, input, dims, axes); break;
             }
         }
 

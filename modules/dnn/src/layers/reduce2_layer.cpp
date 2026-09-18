@@ -208,12 +208,6 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA) {
-            if (reduce_type != ReduceType::SUM && reduce_type != ReduceType::MEAN &&
-                reduce_type != ReduceType::MAX && reduce_type != ReduceType::MIN) {
-                CV_LOG_INFO(NULL, cv::format("DNN/Reduce2 supportBackend: '%s' FAIL reduce_type=%s",
-                                             name.c_str(), reduceTypeToString(reduce_type)));
-                return false;
-            }
             if (noop_with_empty_axes && axes.empty() && inputs.size() < 2) {
                 CV_LOG_INFO(NULL, cv::format("DNN/Reduce2 supportBackend: '%s' FAIL noop_with_empty_axes axes.empty()=%d inputs.size()=%zu",
                                              name.c_str(), (int)axes.empty(), inputs.size()));
@@ -264,7 +258,17 @@ public:
             case ReduceType::MEAN: cudaOp = cuda4dnn::ReduceOpType::MEAN; break;
             case ReduceType::MAX:  cudaOp = cuda4dnn::ReduceOpType::MAX;  break;
             case ReduceType::MIN:  cudaOp = cuda4dnn::ReduceOpType::MIN;  break;
-            default:               cudaOp = cuda4dnn::ReduceOpType::SUM; break;
+            case ReduceType::SUM:  cudaOp = cuda4dnn::ReduceOpType::SUM;  break;
+            case ReduceType::PROD: cudaOp = cuda4dnn::ReduceOpType::PROD; break;
+            case ReduceType::L1:   cudaOp = cuda4dnn::ReduceOpType::L1;   break;
+            case ReduceType::L2:   cudaOp = cuda4dnn::ReduceOpType::L2;   break;
+            case ReduceType::SUM_SQUARE:  cudaOp = cuda4dnn::ReduceOpType::SUM_SQUARE;  break;
+            case ReduceType::LOG_SUM:     cudaOp = cuda4dnn::ReduceOpType::LOG_SUM;     break;
+            case ReduceType::LOG_SUM_EXP: cudaOp = cuda4dnn::ReduceOpType::LOG_SUM_EXP; break;
+            default:
+                CV_Error(Error::StsNotImplemented,
+                         cv::format("DNN/Reduce2: no CUDA mapping for reduce_type=%s",
+                                    reduceTypeToString(reduce_type)));
         }
         return make_cuda_node_with_type<cuda4dnn::ReduceOp>(preferableTarget, inputsU[0].type(), std::move(context->stream), cudaOp, norm_axes);
     }

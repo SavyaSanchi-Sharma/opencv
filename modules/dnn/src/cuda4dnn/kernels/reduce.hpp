@@ -34,6 +34,36 @@ void reduce_min(const csl::Stream& stream,
     csl::Span<T> output, csl::View<T> input,
     const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
 
+template <class T>
+void reduce_prod(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
+template <class T>
+void reduce_l1(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
+template <class T>
+void reduce_l2(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
+template <class T>
+void reduce_sum_square(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
+template <class T>
+void reduce_log_sum(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
+template <class T>
+void reduce_log_sum_exp(const csl::Stream& stream,
+    csl::Span<T> output, csl::View<T> input,
+    const std::vector<std::int64_t>& dims, const std::vector<std::int64_t>& axes);
+
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 
 #endif /* OPENCV_DNN_SRC_CUDA4DNN_KERNELS_REDUCE_HPP */
