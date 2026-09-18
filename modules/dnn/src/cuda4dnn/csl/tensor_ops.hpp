@@ -26,8 +26,133 @@
 #include <array>
 #include <vector>
 #include <algorithm>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <fstream>
+#include <map>
+
+#include <opencv2/core/utils/configuration.private.hpp>
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
+
+    namespace detail {
+        /* cudnnFindConvolutionForwardAlgorithm runs and times every algorithm, which is the bulk of
+           a model's cold start. The winner depends only on the convolution's shape parameters plus
+           the device and cuDNN version, so cache it and pay the benchmark once per distinct config. */
+        // device index is not portable across machines, so key on the model and its compute capability
+        inline const std::string& cudaDeviceTag()
+        {
+            static std::map<int, std::string> tags;
+            int device = 0;
+            cudaGetDevice(&device);
+            auto it = tags.find(device);
+            if (it != tags.end())
+                return it->second;
+            std::string tag = "unknown";
+            cudaDeviceProp prop{};
+            if (cudaGetDeviceProperties(&prop, device) == cudaSuccess) {
+                tag = prop.name;
+                for (char& c : tag)
+                    if (c == ' ' || c == ';' || c == '\n') c = '_';
+                tag += "_sm" + std::to_string(prop.major) + std::to_string(prop.minor);
+            }
+            return tags.emplace(device, std::move(tag)).first->second;
+        }
+
+        inline std::string convAlgoKey(const std::vector<std::size_t>& input_shape,
+                                       const std::vector<std::size_t>& filter_shape,
+                                       const std::vector<std::size_t>& padding,
+                                       const std::vector<std::size_t>& stride,
+                                       const std::vector<std::size_t>& dilation,
+                                       std::size_t groups, std::size_t elem_size)
+        {
+            std::ostringstream ss;
+            auto put = [&ss](const std::vector<std::size_t>& v) {
+                for (std::size_t x : v) ss << x << ',';
+                ss << ';';
+            };
+            put(input_shape); put(filter_shape); put(padding); put(stride); put(dilation);
+            ss << groups << ';' << elem_size << ';' << cudaDeviceTag() << ';'
+               << CUDNN_MAJOR << '.' << CUDNN_MINOR << '.' << CUDNN_PATCHLEVEL;
+            return ss.str();
+        }
+
+        struct ConvAlgoEntry { int algo; std::size_t workspace_size; };
+
+        inline std::unordered_map<std::string, ConvAlgoEntry>& convAlgoCache()
+        {
+            static std::unordered_map<std::string, ConvAlgoEntry> cache;
+            return cache;
+        }
+
+        inline Mutex& convAlgoCacheMutex()
+        {
+            static Mutex m;
+            return m;
+        }
+
+        // bump when the key layout or the line format changes, so old files are ignored not misread
+        inline const char* convAlgoCacheHeader() { return "# opencv-dnn-cuda-conv-algo-cache v1"; }
+
+        // empty path disables persistence; entries are keyed on device and cuDNN version anyway
+        inline const std::string& convAlgoCacheFile()
+        {
+            static const std::string path =
+                utils::getConfigurationParameterString("OPENCV_DNN_CUDA_ALGO_CACHE", "");
+            return path;
+        }
+
+        // caller must hold convAlgoCacheMutex()
+        inline bool& convAlgoCacheHeaderSeen()
+        {
+            static bool seen = false;
+            return seen;
+        }
+
+        // caller must hold convAlgoCacheMutex()
+        inline void loadConvAlgoCacheOnce()
+        {
+            static bool done = false;
+            if (done)
+                return;
+            done = true;
+            const std::string& path = convAlgoCacheFile();
+            if (path.empty())
+                return;
+            std::ifstream f(path);
+            if (!f)
+                return;
+            std::string line;
+            if (!std::getline(f, line) || line != convAlgoCacheHeader())
+                return;  // absent or stale format: start over rather than misread it
+            convAlgoCacheHeaderSeen() = true;
+            while (std::getline(f, line)) {
+                std::istringstream ss(line);
+                std::string key;
+                int algo = 0;
+                unsigned long long workspace = 0;
+                if (ss >> key >> algo >> workspace)
+                    convAlgoCache()[key] = ConvAlgoEntry{ algo, (std::size_t)workspace };
+            }
+        }
+
+        // caller must hold convAlgoCacheMutex(); appending keeps this crash-safe with no exit hook
+        inline void appendConvAlgoCacheEntry(const std::string& key, const ConvAlgoEntry& entry)
+        {
+            const std::string& path = convAlgoCacheFile();
+            if (path.empty())
+                return;
+            std::ofstream f(path, convAlgoCacheHeaderSeen() ? std::ios::app : std::ios::trunc);
+            if (!f)
+                return;
+            if (!convAlgoCacheHeaderSeen()) {
+                f << convAlgoCacheHeader() << '\n';
+                convAlgoCacheHeaderSeen() = true;
+            }
+            f << key << ' ' << entry.algo << ' ' << entry.workspace_size << '\n';
+        }
+    }
 
     namespace tensor_ops {
 
@@ -243,7 +368,27 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
             getConvolutionForwardOutputDim(convDesc, filterDesc, inputTensorDesc, output_dims);
             outputTensorDesc = TensorDescriptor(output_dims);
 
-            algo = ConvolutionAlgorithm(cudnnHandle, convDesc, filterDesc, inputTensorDesc, outputTensorDesc);
+            const std::string algoKey = detail::convAlgoKey(params.input_shape, params.filter_shape,
+                                                            params.padding, params.stride,
+                                                            params.dilation, params.groups, sizeof(T));
+            bool algoCached = false;
+            {
+                AutoLock lock(detail::convAlgoCacheMutex());
+                detail::loadConvAlgoCacheOnce();
+                auto it = detail::convAlgoCache().find(algoKey);
+                if (it != detail::convAlgoCache().end()) {
+                    algo = ConvolutionAlgorithm(static_cast<cudnnConvolutionFwdAlgo_t>(it->second.algo),
+                                                it->second.workspace_size);
+                    algoCached = true;
+                }
+            }
+            if (!algoCached) {
+                algo = ConvolutionAlgorithm(cudnnHandle, convDesc, filterDesc, inputTensorDesc, outputTensorDesc);
+                const detail::ConvAlgoEntry entry{ static_cast<int>(algo.get()), algo.get_workspace_size() };
+                AutoLock lock(detail::convAlgoCacheMutex());
+                detail::convAlgoCache()[algoKey] = entry;
+                detail::appendConvAlgoCacheEntry(algoKey, entry);
+            }
 
             if (!params.bias_shape.empty()) {
                 CV_Assert(params.activation_type == ActivationType::RELU);

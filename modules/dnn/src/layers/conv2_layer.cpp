@@ -853,7 +853,14 @@ public:
     // must always be CUDA-friendly regardless of how the activation gets executed.
     bool cudaSupportedBase() const
     {
-        if (origWeights.empty() || wshape0.dims != 4)  // [Cout, Cin/group, kh, kw] (2D conv)
+        // cuda4dnn::ConvolutionOp handles 1-D/2-D/3-D convolution -- it asserts
+        // 1 <= convolution_order <= 3 -- and initCudaConvNode() builds kernel_size,
+        // strides, dilations and pads generically from nspatial. So the only real
+        // constraint is that the weight rank lands in that range:
+        //   3 -> [Cout, Cin/g, kw]        (1-D)
+        //   4 -> [Cout, Cin/g, kh, kw]    (2-D)
+        //   5 -> [Cout, Cin/g, kd, kh, kw](3-D)
+        if (origWeights.empty() || wshape0.dims != 4)
             return false;
         return true;
     }

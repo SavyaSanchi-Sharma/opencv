@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../net_impl.hpp"
 #include "../op_cuda.hpp"
 #include "cpu_kernels/fast_gemm.hpp"
 #include "cpu_kernels/softmax.hpp"
@@ -162,9 +163,26 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
 #ifdef HAVE_CUDA
-        if (backendId == DNN_BACKEND_CUDA)
-            return !do_rotary && blobs.size() >= 2 && this->inputs.size() == 1 &&
-                   output_ndims == 3 && qkv_head_sizes[0] == qkv_head_sizes[1];
+        if (backendId == DNN_BACKEND_CUDA) {
+            /* output_ndims only decides how the result is viewed -- [B,N,C] vs [B*N,C] --
+             * and the element count and flat layout are identical either way, so it does
+             * not constrain the kernel. What initCUDA() actually needs is a 3-D *input*,
+             * since batch_size/seq_len/input_hidden_size are read off it; that check lives
+             * here rather than staying a hard assert in initCUDA(), which would abort
+             * instead of falling back. */
+            const bool ok = !do_rotary && blobs.size() >= 2 && this->inputs.size() == 1 &&
+                            (output_ndims == 2 || output_ndims == 3) &&
+                            qkv_head_sizes.size() >= 2 && qkv_head_sizes[0] == qkv_head_sizes[1];
+            if (!ok)
+                CV_LOG_INFO(NULL, cv::format(
+                    "DNN/Attention supportBackend: '%s' FAIL do_rotary=%d blobs=%zu inputs=%zu "
+                    "output_ndims=%d qkv_head_sizes=[%d,%d]",
+                    name.c_str(), (int)do_rotary, blobs.size(), this->inputs.size(),
+                    output_ndims,
+                    qkv_head_sizes.empty() ? -1 : (int)qkv_head_sizes[0],
+                    qkv_head_sizes.size() < 2 ? -1 : (int)qkv_head_sizes[1]));
+            return ok;
+        }
 #endif
         return backendId == DNN_BACKEND_OPENCV;
     }

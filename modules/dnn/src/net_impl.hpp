@@ -483,7 +483,8 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<Mat>& temps, // [TODO] ditto
                               std::vector<Mat>& globalTemps,
                               bool useBufferPool,
-                              int opBackend
+                              int opBackend,
+                              bool buildOutputMats = true  // CUDA: the Mat is scaffolding, skip when nothing reads it
                               );
 
     // set input of the model before running it

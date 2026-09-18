@@ -322,6 +322,10 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
 #endif
         }
 
+        /** install a previously selected algorithm, skipping the benchmark */
+        ConvolutionAlgorithm(cudnnConvolutionFwdAlgo_t algo_, std::size_t workspace) noexcept
+            : algo{ algo_ }, workspace_size{ workspace } { }
+
         ConvolutionAlgorithm& operator=(const ConvolutionAlgorithm&) = default;
         ConvolutionAlgorithm& operator=(ConvolutionAlgorithm&& other) = default;
 

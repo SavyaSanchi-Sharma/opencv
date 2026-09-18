@@ -91,12 +91,23 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
         if (fusion.expr)
             return backendId == DNN_BACKEND_OPENCV;
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            const bool typeOk = (inpType == CV_32F || inpType < 0);
+            const bool ok = (const_B && !trans_a && (!have_bias || const_C) &&
+                             alpha == 1.0f && beta == 1.0f && typeOk) ||
+                            (!const_B && !trans_a &&
+                             alpha == 1.0f && (!have_bias || const_C) && typeOk);
+            if (!ok)
+                CV_LOG_INFO(NULL, cv::format(
+                    "DNN/Gemm supportBackend: '%s' FAIL const_B=%d trans_a=%d trans_b=%d "
+                    "have_bias=%d const_C=%d alpha=%g beta=%g inpType=%d",
+                    name.c_str(), (int)const_B, (int)trans_a, (int)trans_b,
+                    (int)have_bias, (int)const_C, alpha, beta, inpType));
+            return ok;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
-               (backendId == DNN_BACKEND_CUDA && const_B && !trans_a && (!have_bias || const_C) &&
-                alpha == 1.0f && beta == 1.0f && (inpType == CV_32F || inpType < 0)) ||
-               (backendId == DNN_BACKEND_CUDA && !const_B && !trans_a &&
-                alpha == 1.0f && (!have_bias || const_C) &&
-                (inpType == CV_32F || inpType < 0)) ||
                backendId == DNN_BACKEND_CANN ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !have_bias && !trans_a);

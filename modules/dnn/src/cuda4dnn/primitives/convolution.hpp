@@ -35,6 +35,7 @@
 #include "../kernels/eltwise_ops.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/core/utils/configuration.private.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +44,15 @@
 #include <algorithm>
 
 namespace cv { namespace dnn { namespace cuda4dnn {
+
+    // Off: fusing costs algorithm choice and loses more than the launch it saves (1.4 ms off, 2.0 ms on).
+    inline bool cudaFuseConvEpilogue()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FUSE_CONV", false);
+        return flag;
+    }
+
 
     struct ConvolutionConfiguration {
         /* the size of the following vectors must be equal to the kernel size */
@@ -247,8 +257,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             params.eltwise = false;
             params.activation_type = csl::Convolution<T>::ActivationType::IDENTITY;
 
-            /* cuDNN can fuse the operations with convolution in some cases; try if it's possible */
-            if (!biasTensor.empty() && 0 &&
+            /* gated off since #17363 (2020); OPENCV_DNN_CUDA_FUSE_CONV=1 to re-test */
+            if (!biasTensor.empty() && cudaFuseConvEpilogue() &&
                  biasTensor.size() == output_feature_maps &&                       /* cuDNN requirement */
                  activation == ConvolutionConfiguration::ActivationType::RELU &&   /* cuDNN requirement */
                  relu_negative_slope == 0.0 &&                                     /* cuDNN requirement */

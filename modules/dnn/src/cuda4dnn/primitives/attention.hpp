@@ -61,11 +61,18 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
 
             const std::size_t B = cfg.batch_size, S = cfg.seq_len, N = cfg.num_heads;
-            const std::size_t hidden = cfg.qkv_hidden_sizes[0] + cfg.qkv_hidden_sizes[1] +
-                                       cfg.qkv_hidden_sizes[2];
             const std::size_t headV = cfg.qkv_hidden_sizes[2] / N;
-            std::size_t elems = 2 * B * S * hidden + B * N * S * S + B * N * S * headV;
-            scratch_mem_in_bytes = elems * sizeof(T);
+
+            // one require() per span forward() acquires: the allocator rounds each to 256, so the
+            // total must be a sum of rounded sizes, not a rounded sum
+            csl::WorkspaceBuilder builder;
+            for (int i = 0; i < 3; i++) {
+                builder.require<T>(B * S * cfg.qkv_hidden_sizes[i]);                 // proj[i]
+                builder.require<T>(B * N * S * (cfg.qkv_hidden_sizes[i] / N));       // headMajor[i]
+            }
+            builder.require<T>(B * N * S * S);          // scores
+            builder.require<T>(B * N * S * headV);      // context
+            scratch_mem_in_bytes = builder.required_workspace_size();
         }
 
         void forward(
