@@ -20,6 +20,8 @@
 
 #include "../kernels/scale_shift.hpp"
 
+#include "fusion_expr.hpp"
+
 #include <opencv2/core.hpp>
 
 #include <utility>
@@ -31,8 +33,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     public:
         using wrapper_type = GetCUDABackendWrapperType<T>;
 
-        MatMulOp(csl::Stream stream_, csl::cublas::Handle handle, const Mat& constInp, const Mat& bias, bool _transA, bool _transB)
-            : stream(std::move(stream_)), cublasHandle(std::move(handle))
+        MatMulOp(csl::Stream stream_, csl::cublas::Handle handle, const Mat& constInp, const Mat& bias, bool _transA, bool _transB,
+                 FusionExprPlan fusion_ = FusionExprPlan())
+            : stream(std::move(stream_)), cublasHandle(std::move(handle)), fusion(std::move(fusion_))
         {
             if (!constInp.empty())
             {
@@ -140,6 +143,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 output.squeeze_to(3);
                 csl::tensor_ops::gemmStridedBatched<T>(cublasHandle, 0.0, output, 1.0, transA, input1, transB, input2);
             }
+
+            if (!fusion.empty())
+                fusion.run<T>(stream, output, static_cast<std::size_t>(n2));
         }
 
     private:
@@ -147,6 +153,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::cublas::Handle cublasHandle;
         csl::Tensor<T> constTensor, biasTensor;
         bool transA, transB;
+        FusionExprPlan fusion;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

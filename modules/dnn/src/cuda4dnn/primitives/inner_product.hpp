@@ -20,6 +20,8 @@
 
 #include "../kernels/scale_shift.hpp"
 
+#include "fusion_expr.hpp"
+
 #include <opencv2/core.hpp>
 
 #include <cstddef>
@@ -33,8 +35,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     public:
         using wrapper_type = GetCUDABackendWrapperType<T>;
 
-        InnerProductOp(csl::Stream stream_, csl::cublas::Handle handle, std::size_t axis, const Mat& weights, const Mat& bias)
-            : stream(std::move(stream_)), cublasHandle(std::move(handle)), axis{ axis }
+        InnerProductOp(csl::Stream stream_, csl::cublas::Handle handle, std::size_t axis, const Mat& weights, const Mat& bias,
+                       FusionExprPlan fusion_ = FusionExprPlan())
+            : stream(std::move(stream_)), cublasHandle(std::move(handle)), axis{ axis }, fusion(std::move(fusion_))
         {
             weightsTensor = csl::makeTensorHeader<T>(weights);
             CV_Assert(get_effective_rank(weightsTensor) <= 2);
@@ -80,6 +83,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
                 if (!biasTensor.empty())
                     kernels::biasN<T>(stream, output, output, 1, biasTensor);
+
+                if (!fusion.empty())
+                    fusion.run<T>(stream, output, output_size);
             }
         }
 
@@ -88,6 +94,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::cublas::Handle cublasHandle;
         csl::Tensor<T> weightsTensor, biasTensor;
         std::size_t axis;
+        FusionExprPlan fusion;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

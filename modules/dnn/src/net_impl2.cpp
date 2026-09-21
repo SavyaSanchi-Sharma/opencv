@@ -578,6 +578,10 @@ void Net::Impl::inferArgTypes()
             bool allKnown = true;
             for (size_t i = 0; i < ninputs; i++) {
                 Arg in = op->inputs[i];
+                if (in.empty()) {
+                    inpTypes[i] = -1;
+                    continue;
+                }
                 ArgData& adata = args.at(in.idx);
                 if (adata.type < 0 && adata.kind != DNN_ARG_TEMP) {
                     const UMat& t = argTensor(in);
@@ -596,8 +600,19 @@ void Net::Impl::inferArgTypes()
                 continue;
             }
 
-            if (!allKnown)
+            if (!allKnown) {
+                for (size_t i = 0; i < ninputs; i++) {
+                    Arg in = op->inputs[i];
+                    if (inpTypes[i] >= 0 || in.empty())
+                        continue;
+                    const ArgData& adata = args.at(in.idx);
+                    CV_LOG_INFO(NULL, cv::format(
+                        "DNN/InferArgTypes: SKIP '%s' (%s): input #%zu '%s' kind=%s idx=%d has no type",
+                        op->name.c_str(), op->type.c_str(), i,
+                        adata.name.c_str(), argKindToString(adata.kind).c_str(), in.idx));
+                }
                 continue;
+            }
 
             size_t noutputs = op->outputs.size();
             std::vector<MatType> outTypes, tempTypes;
@@ -740,9 +755,8 @@ enum CudaPlacementReason
     CUDA_PLACEMENT_FP16_WHOLE_GRAPH,
     CUDA_PLACEMENT_NO_EXEC,
     CUDA_PLACEMENT_NO_SUPPORT,
-    CUDA_PLACEMENT_BELOW_THRESHOLD,
-    CUDA_PLACEMENT_WHOLE_GRAPH_GATE,
-    CUDA_PLACEMENT_SHORT_GPU_RUN
+    CUDA_PLACEMENT_WINDOW_COST,
+    CUDA_PLACEMENT_SEGMENT_COST
 };
 
 static const char* cudaPlacementReasonName(int reason)
@@ -757,9 +771,8 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_FP16_WHOLE_GRAPH: return "fp16-whole-graph";
     case CUDA_PLACEMENT_NO_EXEC:          return "no-exec";
     case CUDA_PLACEMENT_NO_SUPPORT:       return "no-support";
-    case CUDA_PLACEMENT_BELOW_THRESHOLD:  return "below-flops-threshold";
-    case CUDA_PLACEMENT_WHOLE_GRAPH_GATE: return "whole-graph-gate";
-    case CUDA_PLACEMENT_SHORT_GPU_RUN:    return "short-gpu-run";
+    case CUDA_PLACEMENT_WINDOW_COST:      return "window-cost";
+    case CUDA_PLACEMENT_SEGMENT_COST:     return "segment-cost";
     }
     return "unknown";
 }
@@ -776,11 +789,6 @@ static bool cudaTrustResidency()
 {
     static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", false);
     return flag;
-}
-
-static bool useWholeGraphCudaGate()
-{
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_WHOLE_GRAPH", false);
 }
 
 static bool cudaTraceEnabled()
@@ -802,27 +810,214 @@ static std::string formatBytes(size_t n)
     return cv::format("%zu B", n);
 }
 
-static double cudaMinGpuFlopsShare()
+// Window length tracks sqrt(nops): locality scale grows with depth, but far slower than depth itself.
+static const size_t CUDA_AUTO_WINDOW_LO = 8;
+static const size_t CUDA_AUTO_WINDOW_HI = 24;
+
+// round(sqrt(n)) in integers, so the bucket edges do not depend on floating-point rounding
+static size_t isqrtRounded(size_t n)
 {
-    return (double)utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_FLOPS_PCT", 0) / 100.0;
+    size_t r = 0;
+    while ((r + 1) * (r + 1) <= n)
+        r++;
+    if (n - r * r > (r + 1) * (r + 1) - n)
+        r++;
+    return r;
 }
 
-// longest host run, with device work on both sides, that gets pulled onto the device
-static size_t cudaMaxCpuBubble()
+// Cost is in transfer-byte equivalents, never seconds; constants are compiled in so placement reproduces everywhere.
+static bool cudaCostModelEnabled()
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MAX_CPU_BUBBLE", 0);
+    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_COST_MODEL", false);
 }
 
-// device runs shorter than this, stranded between host runs, go back to the host
-static size_t cudaMinGpuRun()
+// FLOPs won back per transferred byte: host throughput (~200 GFLOP/s) over link bw (~25 GB/s).
+static int64 cudaCostFlopsPerByte()
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_RUN", 0);
+    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_FLOPS_PER_BYTE", 8);
+    return (int64)std::max<size_t>(v, 1);
 }
 
-// hard cap on device ops, counted from the start of the program; a bisection aid
-static size_t cudaMaxOps()
+// Memory-bound half of the roofline; covers the ~90 layer types with no getFLOPS() override.
+static int64 cudaCostTouchPerByte()
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MAX_OPS", 0);
+    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_TOUCH_PER_BYTE", 2);
+    return (int64)std::max<size_t>(v, 1);
+}
+
+// Cost of one host<->device transition before any payload: pipeline drain plus launch overhead.
+static int64 cudaCostBarrierBytes()
+{
+    return (int64)utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_BARRIER_BYTES", 512 * 1024);
+}
+
+// Index spaces: prog i in [0,nops) with null holes, compacted k in [0,n) where ops[k]==i, cut c in [0,n] before ops[c], args.
+struct PlacementCost
+{
+    std::vector<int64> cumBenefit;    // [n+1]   prefix sum of per-op benefit, placement-independent
+    std::vector<int64> cumDevBenefit; // [n+1]   same, device-capable ops only
+    std::vector<int64> liveBytes;     // [n+1]   bytes live across each cut
+    std::vector<int64> argBytes;      // [nargs]
+    std::vector<int>   producer;      // [nargs] compacted pos writing the arg, -1 if none
+    std::vector<int>   lastUse;       // [nargs] last compacted pos reading it, -1 if none
+
+    std::vector<int>   seen;          // stamp table for segmentBoundaryCost(), O(1) to invalidate
+    int                stamp = 0;
+};
+
+// Returns false when shapes are too incomplete to cost the graph; caller falls back to the window.
+static bool buildPlacementCost(Net::Impl* netimpl,
+                               const std::vector<Ptr<LayerInfo> >& prog,
+                               const std::vector<size_t>& ops,
+                               const std::vector<uchar>& placed,
+                               const std::vector<MatShape>& shapeCache,
+                               const std::vector<MatType>& typeCache,
+                               PlacementCost& pc)
+{
+    const size_t n = ops.size(), nargs = netimpl->args.size();
+    if (n < 2 || nargs < 2)
+        return false;
+
+    pc.cumBenefit.assign(n + 1, 0);
+    pc.cumDevBenefit.assign(n + 1, 0);
+    pc.liveBytes.assign(n + 1, 0);
+    pc.argBytes.assign(nargs, 0);
+    pc.producer.assign(nargs, -1);
+    pc.lastUse.assign(nargs, -1);
+    pc.seen.assign(nargs, 0);
+    pc.stamp = 0;
+
+    // consts carry their shape on ArgData; the rest comes from the cache. Symbolic dims aren't sizeable.
+    for (size_t a = 1; a < nargs; a++) {
+        const ArgData& ad = netimpl->args[a];
+        MatShape sh;
+        MatType t = -1;
+        if (ad.kind == DNN_ARG_CONST || ad.kind == DNN_ARG_EMPTY) {
+            sh = ad.shape;
+            t = ad.type;
+        }
+        else if (a < shapeCache.size() && a < typeCache.size()) {
+            sh = shapeCache[a];
+            t = typeCache[a];
+        }
+        if (sh.empty() || sh.hasSymbols() || t < 0)
+            continue;
+        pc.argBytes[a] = (int64)sh.total() * (int64)CV_ELEM_SIZE(t);
+    }
+
+    // walking forward leaves lastUse holding the latest reader
+    for (size_t k = 0; k < n; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+        for (const Arg& in : op->inputs)
+            if (in.idx > 0 && in.idx < (int)nargs)
+                pc.lastUse[in.idx] = (int)k;
+        for (const Arg& out : op->outputs)
+            if (out.idx > 0 && out.idx < (int)nargs && pc.producer[out.idx] < 0)
+                pc.producer[out.idx] = (int)k;
+    }
+
+    // Difference array: an arg spans every cut from producer to last reader; consts upload once per finalize().
+    for (size_t a = 1; a < nargs; a++) {
+        const int64 bytes = pc.argBytes[a];
+        if (bytes <= 0 || netimpl->args[a].kind == DNN_ARG_CONST)
+            continue;
+        const int p = pc.producer[a], q = pc.lastUse[a];
+        const int from = p >= 0 ? p + 1 : 0;              // no producer here: enters from outside
+        const int to = q >= 0 ? q + 1 : (int)n + 1;       // no consumer here: leaves the graph
+        if (from >= to)
+            continue;
+        pc.liveBytes[from] += bytes;
+        if (to <= (int)n)
+            pc.liveBytes[to] -= bytes;
+    }
+    for (size_t c = 1; c <= n; c++)
+        pc.liveBytes[c] += pc.liveBytes[c - 1];
+
+    const int64 flopsPerByte = cudaCostFlopsPerByte();
+    const int64 touchPerByte = cudaCostTouchPerByte();
+    std::vector<MatShape> inpShapes, outShapes;
+    std::vector<MatType> inpTypes, outTypes;
+    std::vector<int64> benefit(n, 0);
+    size_t sized = 0;
+
+    // roofline; `touched` needs no getFLOPS() and no successful shape gather
+    for (size_t k = 0; k < n; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+        int64 touched = 0;
+        for (const Arg& in : op->inputs)
+            if (in.idx > 0 && in.idx < (int)nargs)
+                touched += pc.argBytes[in.idx];
+        for (const Arg& out : op->outputs)
+            if (out.idx > 0 && out.idx < (int)nargs)
+                touched += pc.argBytes[out.idx];
+        if (touched > 0)
+            sized++;
+
+        int64 flops = 0;
+        if (netimpl->gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes)) {
+            flops = op->getFLOPS(inpShapes, outShapes);
+            if (flops < 0)
+                flops = 0;
+        }
+        benefit[k] = std::max(flops / flopsPerByte, touched / touchPerByte);
+    }
+
+    // mostly-unsized graph: nothing useful to say, let the caller fall back
+    if (sized * 2 < n)
+        return false;
+
+    for (size_t k = 0; k < n; k++) {
+        pc.cumBenefit[k + 1] = pc.cumBenefit[k] + benefit[k];
+        pc.cumDevBenefit[k + 1] = pc.cumDevBenefit[k] + (placed[ops[k]] ? benefit[k] : 0);
+    }
+    return true;
+}
+
+// Exact cut of device segment [a,b): args it receives plus args read back, deduped, consts excluded.
+static int64 segmentBoundaryCost(Net::Impl* netimpl,
+                                 const std::vector<Ptr<LayerInfo> >& prog,
+                                 const std::vector<size_t>& ops,
+                                 PlacementCost& pc,
+                                 size_t a, size_t b, size_t& ncross)
+{
+    const int nargs = (int)pc.argBytes.size();
+    int64 bytes = 0;
+    ncross = 0;
+    pc.stamp++;
+
+    for (size_t k = a; k < b; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+
+        for (const Arg& in : op->inputs) {
+            const int idx = in.idx;
+            if (idx <= 0 || idx >= nargs || pc.argBytes[idx] <= 0)
+                continue;
+            if (netimpl->args[idx].kind == DNN_ARG_CONST)
+                continue;
+            const int p = pc.producer[idx];
+            if (p >= (int)a && p < (int)b)
+                continue;                        // produced inside: already resident
+            if (pc.seen[idx] == pc.stamp)
+                continue;
+            pc.seen[idx] = pc.stamp;
+            bytes += pc.argBytes[idx];
+            ncross++;
+        }
+
+        for (const Arg& out : op->outputs) {
+            const int idx = out.idx;
+            if (idx <= 0 || idx >= nargs || pc.argBytes[idx] <= 0)
+                continue;
+            const int q = pc.lastUse[idx];
+            const bool leaves = q < 0 || q >= (int)b || netimpl->args[idx].kind == DNN_ARG_OUTPUT;
+            if (!leaves || pc.seen[idx] == pc.stamp)
+                continue;
+            pc.seen[idx] = pc.stamp;
+            bytes += pc.argBytes[idx];
+            ncross++;
+        }
+    }
+    return bytes;
 }
 
 static bool blockLayoutEnabled()
@@ -1063,8 +1258,6 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        std::vector<MatShape> inpShapes, outShapes;
-        std::vector<MatType> inpTypes, outTypes;
         for (i = 0; i < nops; i++) {
             const Ptr<LayerInfo>& op = prog[i];
             if (!op)
@@ -1119,57 +1312,10 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         for (i = 0; i < nops; i++)
             placed[i] = (prog[i] && cudaExecs[i]) ? 1 : 0;
 
-        size_t maxOps = cudaMaxOps();
-        if (maxOps > 0) {
-            size_t seen = 0;
-            for (i = 0; i < nops; i++) {
-                if (!prog[i])
-                    continue;
-                if (seen++ >= maxOps && placed[i]) {
-                    placed[i] = 0;
-                    g->execReason_[i] = CUDA_PLACEMENT_BACKEND_OFF;
-                }
-            }
-        }
-
         int demoteReason = -1;
         if (preferableTarget == DNN_TARGET_CUDA_FP16) {
             for (i = 0; i < nops; i++)
                 if (prog[i] && !cudaExecs[i]) { demoteReason = CUDA_PLACEMENT_FP16_WHOLE_GRAPH; break; }
-        }
-        if (demoteReason < 0 && useWholeGraphCudaGate()) {
-            for (i = 0; i < nops; i++)
-                if (prog[i] && !cudaExecs[i]) { demoteReason = CUDA_PLACEMENT_WHOLE_GRAPH_GATE; break; }
-        }
-        if (demoteReason < 0 && haveShapes) {
-            double minShare = cudaMinGpuFlopsShare();
-            if (minShare > 0.0) {
-                int64 totalFlops = 0, gpuFlops = 0;
-                size_t gpuOps = 0, totalOps = 0;
-                for (i = 0; i < nops; i++) {
-                    const Ptr<LayerInfo>& op = prog[i];
-                    if (!op)
-                        continue;
-                    totalOps++;
-                    if (cudaExecs[i])
-                        gpuOps++;
-                    if (!gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes))
-                        continue;
-                    int64 f = op->getFLOPS(inpShapes, outShapes);
-                    if (f <= 0)
-                        continue;
-                    totalFlops += f;
-                    if (cudaExecs[i])
-                        gpuFlops += f;
-                }
-                bool byFlops = totalFlops > 0;
-                double share = byFlops ? (double)gpuFlops / (double)totalFlops
-                                       : (totalOps ? (double)gpuOps / (double)totalOps : 0.0);
-                CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': GPU share %.2f (metric=%s, threshold=%.2f)",
-                            graph->name().c_str(), share, byFlops ? "flops" : "opcount", minShare));
-                if (share < minShare)
-                    demoteReason = CUDA_PLACEMENT_BELOW_THRESHOLD;
-            }
         }
         if (demoteReason >= 0) {
             for (i = 0; i < nops; i++) {
@@ -1180,51 +1326,77 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        // the compacted program -- indices of the ops that survived fusion -- is what the
-        // bubble/run smoothing below walks, so build it once
+        // the compacted program -- indices of the ops that survived fusion -- is the list both the
+        // window filter and the segment pass below walk, so build it once
         std::vector<size_t> ops;
         for (i = 0; i < nops; i++)
             if (prog[i])
                 ops.push_back(i);
 
-        size_t maxBubble = cudaMaxCpuBubble(), minRun = cudaMinGpuRun();
-        if (maxBubble > 0 || minRun > 1) {
+        PlacementCost pc;
+        bool costModel = demoteReason < 0 && haveShapes && cudaCostModelEnabled() &&
+                         buildPlacementCost(this, prog, ops, placed, shapeCache, typeCache, pc);
+
+        if (costModel) {
+            const size_t n = ops.size();
+            const int64 barrier = cudaCostBarrierBytes();
+            size_t demotedByWindow = 0, demotedBySegment = 0;
+
+            // Tier 1: costed window, O(1) per position; liveBytes bounds the cut, so rejecting here is safe.
+            size_t wlen = std::min(std::max(isqrtRounded(n), CUDA_AUTO_WINDOW_LO), CUDA_AUTO_WINDOW_HI);
+            wlen = std::min(wlen, n);
+            if (wlen >= 2) {
+                std::vector<uchar> accepted(n, 0);
+                for (size_t start = 0; start + wlen <= n; start++) {
+                    const size_t end = start + wlen;
+                    const int64 won = pc.cumDevBenefit[end] - pc.cumDevBenefit[start];
+                    if (won < pc.liveBytes[start] + pc.liveBytes[end] + 2 * barrier)
+                        continue;
+                    for (size_t k = start; k < end; k++)
+                        if (placed[ops[k]])
+                            accepted[k] = 1;
+                }
+                for (size_t k = 0; k < n; k++) {
+                    if (!placed[ops[k]] || accepted[k])
+                        continue;
+                    placed[ops[k]] = 0;
+                    g->execReason_[ops[k]] = CUDA_PLACEMENT_WINDOW_COST;
+                    demotedByWindow++;
+                }
+            }
+
+            // Tier 2: exact cut per segment; demotion merges neighbours so iterate, monotone hence settles.
             for (int pass = 0; pass < 8; pass++) {
                 bool changed = false;
-                for (size_t a = 0; a < ops.size(); ) {
-                    uchar cur = placed[ops[a]];
+                for (size_t a = 0; a < n; ) {
+                    const uchar cur = placed[ops[a]];
                     size_t b = a;
-                    while (b < ops.size() && placed[ops[b]] == cur)
+                    while (b < n && placed[ops[b]] == cur)
                         b++;
-                    size_t runLen = b - a;
-                    bool leftDev = a > 0 && placed[ops[a - 1]] != 0;
-                    bool rightDev = b < ops.size() && placed[ops[b]] != 0;
-
-                    if (cur == 0 && maxBubble > 0 && runLen <= maxBubble && leftDev && rightDev) {
-                        bool canPromote = true;
-                        for (size_t k = a; k < b; k++)
-                            if (!cudaExecs[ops[k]])
-                            { canPromote = false; break; }
-                        if (canPromote) {
+                    if (cur) {
+                        size_t ncross = 0;
+                        const int64 cost = segmentBoundaryCost(this, prog, ops, pc, a, b, ncross) +
+                                           (int64)ncross * barrier;
+                        // every op inside a device segment is placed, so the raw prefix is exact here
+                        if (pc.cumBenefit[b] - pc.cumBenefit[a] < cost) {
                             for (size_t k = a; k < b; k++) {
-                                placed[ops[k]] = 1;
-                                g->execReason_[ops[k]] = CUDA_PLACEMENT_OK;
+                                placed[ops[k]] = 0;
+                                g->execReason_[ops[k]] = CUDA_PLACEMENT_SEGMENT_COST;
                             }
+                            demotedBySegment += b - a;
                             changed = true;
                         }
-                    }
-                    else if (cur != 0 && minRun > 1 && runLen < minRun && !leftDev && !rightDev) {
-                        for (size_t k = a; k < b; k++) {
-                            placed[ops[k]] = 0;
-                            g->execReason_[ops[k]] = CUDA_PLACEMENT_SHORT_GPU_RUN;
-                        }
-                        changed = true;
                     }
                     a = b;
                 }
                 if (!changed)
                     break;
             }
+
+            CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': cost model, window %zu op(s), "
+                                         "barrier %s; %zu op(s) demoted by window, %zu by segment cost",
+                        graph->name().c_str(), wlen, formatBytes((size_t)barrier).c_str(),
+                        demotedByWindow, demotedBySegment));
         }
     }
 #else

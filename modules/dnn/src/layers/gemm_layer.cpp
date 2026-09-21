@@ -89,24 +89,27 @@ public:
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.expr)
-            return backendId == DNN_BACKEND_OPENCV;
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA) {
             const bool typeOk = (inpType == CV_32F || inpType < 0);
-            const bool ok = (const_B && !trans_a && (!have_bias || const_C) &&
-                             alpha == 1.0f && beta == 1.0f && typeOk) ||
-                            (!const_B && !trans_a &&
-                             alpha == 1.0f && (!have_bias || const_C) && typeOk);
-            if (!ok)
+            const bool shapeOk = (const_B && !trans_a && (!have_bias || const_C) &&
+                                  alpha == 1.0f && beta == 1.0f && typeOk) ||
+                                 (!const_B && !trans_a &&
+                                  alpha == 1.0f && (!have_bias || const_C) && typeOk);
+            // shapes are not settled here, so the per-channel length check is left to initCUDA
+            const bool fusionOk = !fusion.expr || FusionExprPlan::runnable(*fusion.expr, 0);
+            if (!shapeOk || !fusionOk)
                 CV_LOG_INFO(NULL, cv::format(
                     "DNN/Gemm supportBackend: '%s' FAIL const_B=%d trans_a=%d trans_b=%d "
-                    "have_bias=%d const_C=%d alpha=%g beta=%g inpType=%d",
+                    "have_bias=%d const_C=%d alpha=%g beta=%g inpType=%d fused=%d fusionOk=%d",
                     name.c_str(), (int)const_B, (int)trans_a, (int)trans_b,
-                    (int)have_bias, (int)const_C, alpha, beta, inpType));
-            return ok;
+                    (int)have_bias, (int)const_C, alpha, beta, inpType,
+                    static_cast<int>(!!fusion.expr), (int)fusionOk));
+            return shapeOk && fusionOk;
         }
 #endif
+        if (fusion.expr)
+            return backendId == DNN_BACKEND_OPENCV;
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_CANN ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
@@ -628,6 +631,17 @@ public:
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
 
+        std::vector<UMat> outs;
+        outputs.getUMatVector(outs);
+        CV_Assert(!outs.empty());
+        MatShape oshape = cv::dnn::shape(outs[0]);
+        const std::size_t nch = oshape.dims > 0 ? (std::size_t)oshape[oshape.dims - 1] : 0;
+
+        FusionExprPlan plan;
+        if (fusion.expr && !plan.build(*fusion.expr, nch, context->stream))
+            CV_Error(Error::StsNotImplemented,
+                     "DNN/Gemm/Cuda: the fused expression cannot run on the device");
+
         if (!const_B) {
             CV_CheckEQ((double)alpha, 1.0, "DNN/Gemm/Cuda: non-constant B requires alpha == 1");
             CV_Assert(inputs.size() >= 2);
@@ -636,10 +650,6 @@ public:
             Mat bias;
             if (have_bias) {
                 CV_CheckTrue(const_C, "DNN/Gemm/Cuda: non-constant B requires a constant C");
-                std::vector<UMat> outs;
-                outputs.getUMatVector(outs);
-                CV_Assert(!outs.empty());
-                MatShape oshape = cv::dnn::shape(outs[0]);
                 int effectiveRank = oshape.dims;
                 for (int i = 0; i < oshape.dims && oshape[i] == 1; i++)
                     effectiveRank--;
@@ -649,7 +659,7 @@ public:
             }
             return make_cuda_node<cuda4dnn::MatMulOp>(preferableTarget, std::move(context->stream),
                                                       std::move(context->cublas_handle),
-                                                      Mat(), bias, trans_a, trans_b);
+                                                      Mat(), bias, trans_a, trans_b, std::move(plan));
         }
 
         CV_CheckEQ((double)alpha, 1.0, "DNN/Gemm/Cuda: alpha must be 1");
@@ -661,7 +671,7 @@ public:
         if (!trans_b)
             cv::transpose(B, B);
         auto flatten_start_axis = normalize_axis(inputs[0].dims - 1, inputs[0].dims);
-        return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, B, C);
+        return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, B, C, std::move(plan));
     }
 #endif // HAVE_CUDA
 
