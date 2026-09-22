@@ -255,9 +255,9 @@ public:
         int axis = normalize_axis(axisRaw, cv::dnn::shape(inputs[0]).dims);
 #if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
         // GRAPH_JIT_ONLY does not load the cuDNN ops library, so use the hand-written kernel
-        return make_cuda_node<cuda4dnn::SoftmaxKernelOp>(preferableTarget, std::move(context->stream), axis, logSoftMax);
+        return make_cuda_node<cuda4dnn::SoftmaxKernelOp>(preferableTarget, std::move(context->stream), axis, logSoftMax, scale);
 #else
-        return make_cuda_node<cuda4dnn::SoftmaxOp>(preferableTarget, std::move(context->cudnn_handle), axis, logSoftMax);
+        return make_cuda_node<cuda4dnn::SoftmaxOp>(preferableTarget, std::move(context->cudnn_handle), std::move(context->stream), axis, logSoftMax, scale);
 #endif
     }
 #endif

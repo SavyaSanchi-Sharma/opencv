@@ -11,6 +11,7 @@
 #include "memory.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/core/utils/configuration.private.hpp>
 
 #include <cublas_v2.h>
 
@@ -28,6 +29,14 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
     public:
         using CUDAException::CUDAException;
     };
+
+    // shares the switch with the cuDNN convolution path, so one flag restores exact FP32 everywhere
+    inline bool cudaFmaMathOnly()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
+        return flag;
+    }
 
     namespace detail {
         static void check(cublasStatus_t status, const char* func, const char* file, int line) {
@@ -79,6 +88,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             CUDA4DNN_CHECK_CUBLAS(cublasCreate(&handle));
             try {
                 CUDA4DNN_CHECK_CUBLAS(cublasSetStream(handle, stream.get()));
+#if CUDART_VERSION >= 11000
+                // cuBLAS defaults to plain FP32 unlike cuDNN; ONNXRuntime enables TF32, so match it
+                CUDA4DNN_CHECK_CUBLAS(cublasSetMathMode(
+                    handle, cudaFmaMathOnly() ? CUBLAS_DEFAULT_MATH : CUBLAS_TF32_TENSOR_OP_MATH));
+#endif
             } catch (...) {
                 /* cublasDestroy won't throw if a valid handle is passed */
                 CUDA4DNN_CHECK_CUBLAS(cublasDestroy(handle));

@@ -11,6 +11,7 @@
 #include "../csl/stream.hpp"
 
 #include "../kernels/softmax.hpp"
+#include "../kernels/scale_shift.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -21,8 +22,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     template <class T>
     class SoftmaxKernelOp final : public CUDABackendNode {
     public:
-        SoftmaxKernelOp(csl::Stream stream_, int axis_, bool log_softmax_)
-            : stream(std::move(stream_)), axis(axis_), log_softmax(log_softmax_)
+        SoftmaxKernelOp(csl::Stream stream_, int axis_, bool log_softmax_, float scale_ = 1.f)
+            : stream(std::move(stream_)), axis(axis_), log_softmax(log_softmax_), scale(scale_)
         {
         }
 
@@ -49,6 +50,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             for (int i = 0; i < ax; i++)
                 outer_size *= inShape[i];
 
+            if (scale != 1.f) {
+                // softmax(s*x) does not reduce to a rescale, so fold the scale in before max/exp
+                kernels::scale1_with_bias1<T>(stream, output, input,
+                                              static_cast<T>(scale), static_cast<T>(0.f));
+                input = csl::viewOf<T>(outputs[0]);
+            }
+
             kernels::softmax<T>(stream, output, input, axis_size, outer_size, inner_size, log_softmax);
         }
 
@@ -56,6 +64,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::Stream stream;
         int axis;
         bool log_softmax;
+        float scale;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

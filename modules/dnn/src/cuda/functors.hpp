@@ -604,6 +604,25 @@ struct GeluFunctor {
 };
 
 template <class T>
+struct GeluApproximationFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() { }
+    };
+
+    CUDA4DNN_DEVICE GeluApproximationFunctor() { }
+    CUDA4DNN_DEVICE GeluApproximationFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T value) {
+        using csl::device::tanh;
+        // constants must match GeluApproximationConstants in elementwise_layers.cpp
+        const T sqrt_2_pi = static_cast<T>(0.7978845834732056f);
+        const T coef_sqrt_2_pi = static_cast<T>(0.044714998453855515f * 0.7978845834732056f);
+        return static_cast<T>(0.5f) * value *
+               (static_cast<T>(1.f) + tanh(value * (sqrt_2_pi + coef_sqrt_2_pi * value * value)));
+    }
+};
+
+template <class T>
 struct ThresholdedReluFunctor {
     struct Params {
         CUDA4DNN_HOST_DEVICE Params() : alpha(1) { }

@@ -787,7 +787,7 @@ static bool cudaScheduleEnabled()
 // trust the UMat dirty flags instead of forcing a download before every host read
 static bool cudaTrustResidency()
 {
-    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", false);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", true);
     return flag;
 }
 

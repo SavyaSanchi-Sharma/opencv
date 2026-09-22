@@ -1100,7 +1100,8 @@ struct GeluApproximationFunctor : public BaseDefaultFunctor<GeluApproximationFun
 
     bool supportBackend(int backendId, int)
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        return backendId == DNN_BACKEND_OPENCV ||
+               backendId == DNN_BACKEND_CUDA;
     }
 
     inline float calculate(float x) const
@@ -1108,6 +1109,13 @@ struct GeluApproximationFunctor : public BaseDefaultFunctor<GeluApproximationFun
         return 0.5f * x * (1.f + tanh(x * (GeluApproximationConstants::sqrt_2_pi +
                                            GeluApproximationConstants::coef_sqrt_2_pi * x * x)));
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(int target, csl::Stream stream)
+    {
+        return make_cuda_node<cuda4dnn::GeluApproximationOp>(target, stream);
+    }
+#endif
 
     void apply(const float* srcptr, float* dstptr, int stripeStart, int len, size_t planeSize, int cn0, int cn1) const
     {
