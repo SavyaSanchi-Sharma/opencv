@@ -59,12 +59,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 w_start = csl::device::max<std::int64_t>(w_start, 0);
                 h_start = csl::device::max<std::int64_t>(h_start, 0);
 
-                std::int64_t d_index_max = -1;
-                std::int64_t w_index_max = -1;
-                std::int64_t h_index_max = -1;
+                std::int64_t d_index_max = d_start;
+                std::int64_t w_index_max = w_start;
+                std::int64_t h_index_max = h_start;
                 std::int64_t offset = ((static_cast<std::int64_t>(n_index) * channels + c_index) * height) * width * depth;
                 const T* p_slice = input.data().get() + offset;
-                T maxval = p_slice[(h_start * width + w_start) * depth + d_start] - static_cast<T>(1);
+                T maxval = p_slice[(h_start * width + w_start) * depth + d_start];
                 for (std::int64_t d = d_start; d < d_end; d += dilation_d) {
                     for (std::int64_t w = w_start; w < w_end; w += dilation_w) {
                         for (std::int64_t h = h_start; h < h_end; h += dilation_h) {
@@ -73,7 +73,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                                 h_index_max = h;
                                 w_index_max = w;
                                 d_index_max = d;
-                                maxval = static_cast<float>(p_slice[pool_offset]);
+                                maxval = p_slice[pool_offset];
                             }
                         }
                     }
