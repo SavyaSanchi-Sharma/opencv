@@ -24,6 +24,11 @@ static inline void clampFloatChunkDispatch(const float* src, float* dst,
 #undef CV_CPU_DISPATCH_MODES_ALL
 
 #include "layers_common.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/activation.hpp"
+#endif
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/hal/interface.h>
 #include <limits>
@@ -111,10 +116,61 @@ public:
         return true;
     }
 
+    bool resolveBounds(float& lo, float& hi) const
+    {
+        lo = -FLT_MAX;
+        hi =  FLT_MAX;
+        if (hasMin) lo = minValue;
+        if (hasMax) hi = maxValue;
+
+        Net::Impl* netimpl_ = getNetImpl(this);
+        for (size_t i = 1; i < 3 && i < this->inputs.size(); i++)
+        {
+            Arg a = this->inputs[i];
+            if (a.empty())
+                continue;
+            if (i == 1 && hasMin) continue;
+            if (i == 2 && hasMax) continue;
+            if (!netimpl_ || !netimpl_->isConstArg(a))
+                return false;
+            Mat m = netimpl_->argTensor(a).getMat(ACCESS_READ);
+            if (m.total() != 1)
+                return false;
+            Mat tmp;
+            m.convertTo(tmp, CV_32F);
+            if (i == 1) lo = tmp.at<float>(0);
+            else        hi = tmp.at<float>(0);
+        }
+        return lo <= hi;
+    }
+
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        return backendId == DNN_BACKEND_OPENCV;
+        if (backendId == DNN_BACKEND_OPENCV)
+            return true;
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+        {
+            float lo, hi;
+            return resolveBounds(lo, hi);
+        }
+#endif
+        return false;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        CV_UNUSED(inputs_arr); CV_UNUSED(outputs_arr);
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        float lo, hi;
+        CV_Assert(resolveBounds(lo, hi));
+        return make_cuda_node<cuda4dnn::ClipOp>(preferableTarget,
+                                                std::move(context->stream), lo, hi);
+    }
+#endif
 
     // Clip rewrites values in place of the input layout.
     virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }

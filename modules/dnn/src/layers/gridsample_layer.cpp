@@ -483,15 +483,20 @@ public:
         if (!netimpl_ || this->inputs.size() != 2 || this->outputs.empty())
             return false;
 
+        // placement can run before types/shapes are resolved; reject only on what is known,
+        // otherwise the 4-D check below never passes and the op never reaches CUDA
         const int xType = netimpl_->argType(this->inputs[0]);
-        if (xType != CV_32F && xType != CV_16F)
+        if (xType >= 0 && xType != CV_32F && xType != CV_16F)
             return false;
-        if (netimpl_->argType(this->inputs[1]) != CV_32F)
+        const int gType = netimpl_->argType(this->inputs[1]);
+        if (gType >= 0 && gType != CV_32F)
             return false;
 
-        if (netimpl_->argData(this->inputs[0]).shape.dims != 4)
+        const int xDims = netimpl_->argData(this->inputs[0]).shape.dims;
+        if (xDims > 0 && xDims != 4)
             return false;
-        if (netimpl_->argData(this->inputs[1]).shape.dims != 4)
+        const int gDims = netimpl_->argData(this->inputs[1]).shape.dims;
+        if (gDims > 0 && gDims != 4)
             return false;
 
         return true;

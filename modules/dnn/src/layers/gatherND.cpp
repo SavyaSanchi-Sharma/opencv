@@ -1,4 +1,9 @@
 #include "../precomp.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/gather_nd.hpp"
+#endif
 #include <opencv2/dnn/shape_utils.hpp>
 
 namespace cv { namespace dnn {
@@ -11,6 +16,60 @@ public:
         setParamsFrom(params);
         batch_dims = params.get<int>("batch_dims", 0);
     }
+
+#ifdef HAVE_CUDA
+    static bool cudaTypeSupported(int t)
+    {
+        return t == CV_32F || t == CV_16F || t == CV_8S || t == CV_8U || t == CV_32S || t == CV_64S;
+    }
+
+    bool cudaSupported() const
+    {
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.size() != 2 || this->outputs.empty())
+            return false;
+        // types and shapes are often still unresolved when placement runs, so reject only on
+        // what is actually known; initCUDA re-checks and the engine demotes on throw
+        const int dataType = netimpl_->argType(this->inputs[0]);
+        if (dataType >= 0 && !cudaTypeSupported(dataType))
+            return false;
+        const int idxType = netimpl_->argType(this->inputs[1]);
+        if (idxType >= 0 && idxType != CV_32S && idxType != CV_64S)
+            return false;
+
+        const MatShape& dataShape = netimpl_->argData(this->inputs[0]).shape;
+        const MatShape& idxShape = netimpl_->argData(this->inputs[1]).shape;
+        if (dataShape.dims > 0 && idxShape.dims > 0) {
+            const int lastIdxDim = idxShape[idxShape.dims - 1];
+            if (lastIdxDim < 1 || batch_dims + lastIdxDim > dataShape.dims)
+                return false;
+            if (lastIdxDim > CSL_MAX_TENSOR_RANK)
+                return false;
+        }
+        return true;
+    }
+#endif
+
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
+    {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
+        return backendId == DNN_BACKEND_OPENCV;
+    }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        CV_UNUSED(outputs_arr);
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return make_cuda_node_with_type<cuda4dnn::GatherNDOp>(preferableTarget, inputs_arr.depth(0),
+                                                              std::move(context->stream), batch_dims);
+    }
+#endif
 
     void getTypes(const std::vector<MatType>& inputs,
               const int requiredOutputs,

@@ -5,6 +5,11 @@
 #include "../precomp.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/scatter_elements.hpp"
+#endif
 #include "layers_common.hpp"
 
 #include <algorithm> // for std::max & std::min
@@ -45,9 +50,46 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+            return cudaSupported();
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH && reduction == REDUCTION::NONE);
     }
+
+#ifdef HAVE_CUDA
+    bool cudaSupported() const
+    {
+        // the kernel overwrites; ADD/MUL/MAX/MIN need atomics per dtype and stay on the CPU
+        if (reduction != REDUCTION::NONE)
+            return false;
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_ || this->inputs.size() != 3 || this->outputs.empty())
+            return false;
+        const int dt = netimpl_->argType(this->inputs[0]);
+        if (dt >= 0 && !(dt == CV_32F || dt == CV_16F || dt == CV_8S || dt == CV_8U || dt == CV_32S || dt == CV_64S))
+            return false;
+        const int it = netimpl_->argType(this->inputs[1]);
+        if (it >= 0 && it != CV_32S && it != CV_64S)
+            return false;
+        const MatShape& ds = netimpl_->argData(this->inputs[0]).shape;
+        const MatShape& is = netimpl_->argData(this->inputs[1]).shape;
+        if (ds.dims > 0 && is.dims > 0 && (ds.dims != is.dims || ds.dims > CSL_MAX_TENSOR_RANK))
+            return false;
+        return true;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        CV_UNUSED(outputs_arr);
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return make_cuda_node_with_type<cuda4dnn::ScatterElementsOp>(preferableTarget, inputs_arr.depth(0),
+                                                                     std::move(context->stream), axis);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,

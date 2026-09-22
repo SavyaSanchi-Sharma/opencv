@@ -78,6 +78,29 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     };
 
     template <class T>
+    class ClipOp final : public CUDABackendNode {
+    public:
+        ClipOp(csl::Stream stream_, T min_, T max_)
+            : stream(std::move(stream_)), min{ min_ }, max{ max_ } { }
+
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(!inputs.empty() && !outputs.empty());
+            auto input = csl::viewOf<T>(inputs[0]);
+            auto output = csl::spanOf<T>(outputs[0]);
+            kernels::clipped_relu<T>(stream, output, input, min, max);
+        }
+
+    private:
+        csl::Stream stream;
+        const T min, max;
+    };
+
+    template <class T>
     class ChannelwiseReLUOp final : public BaseOp<ChannelwiseReLUOp, T> {
     public:
         ChannelwiseReLUOp(csl::Stream stream_, const Mat& slope)

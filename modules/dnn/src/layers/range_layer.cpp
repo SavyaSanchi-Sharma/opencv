@@ -5,6 +5,10 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/range.hpp"
+#endif
 
 namespace cv
 {
@@ -72,8 +76,32 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA)
+        {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || this->inputs.size() != 3 || this->outputs.empty())
+                return false;
+            // the output length is resolved host-side in getMemoryShapesForDynamicOutput, and
+            // only small integer inputs are guaranteed synced to the host by syncShapeSpecInputs
+            const int t = netimpl_->argType(this->inputs[0]);
+            return t == CV_32S || t == CV_64S;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE
+    {
+        CV_UNUSED(outputs_arr);
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return make_cuda_node_with_type<cuda4dnn::RangeOp>(preferableTarget, inputs_arr.depth(0),
+                                                           std::move(context->stream));
+    }
+#endif
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {
@@ -158,6 +186,31 @@ public:
         outputs.assign(requiredOutputs, inputs[0]);
         CV_Assert(requiredInternals == 0);
         internals.clear();
+    }
+
+    // lets the CUDA path place this op even when start/limit/delta are not const:
+    // the three operands are scalars, so the output length is computable up front
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        CV_Assert(inputs.size() == 3);
+
+        Mat startTensor = inputs[0].getMat(ACCESS_READ);
+        Mat limitTensor = inputs[1].getMat(ACCESS_READ);
+        Mat deltaTensor = inputs[2].getMat(ACCESS_READ);
+
+        double fstart, flimit, fdelta;
+        int64_t istart, ilimit, idelta;
+        bool isflt;
+
+        int nout = getRangeParams(startTensor, limitTensor, deltaTensor,
+                                  fstart, flimit, fdelta, istart, ilimit, idelta, isflt);
+        MatShape shape(1);
+        shape[0] = nout;
+        outputs.assign(1, shape);
     }
 
     void finalize(InputArrayOfArrays, OutputArrayOfArrays outputs_arr) CV_OVERRIDE
