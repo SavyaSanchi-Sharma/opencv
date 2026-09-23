@@ -18,7 +18,7 @@
 #include <array>
 #include <vector>
 
-#ifdef HAVE_CUDNNJIT
+#if defined(HAVE_CUDNNJIT) || (defined(HAVE_CUDNN) && CUDNN_MAJOR >= 9)
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cudnn {
 
@@ -99,6 +99,17 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         return stride;
     }
 
+    inline std::vector<int64_t> packedStrides(const std::vector<int64_t>& shape) {
+        const int64_t rank = static_cast<int64_t>(shape.size());
+        std::vector<int64_t> stride(rank);
+        int64_t running = 1;
+        for (int64_t k = rank - 1; k >= 0; k--) {
+            stride[k] = running;
+            running *= shape[k];
+        }
+        return stride;
+    }
+
     /** JIT-compiled forward convolution (NHWC data, KRSC filter) built on the cuDNN graph engine.
      *
      * The plan is compiled once at construction and cached; convolve() rebinds pointers and executes.
@@ -111,6 +122,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             std::vector<int64_t> output_shape;  /* N, C, spatial... */
             std::vector<int64_t> filter_shape;  /* OC, IC, kernel... */
             std::vector<int64_t> padding, stride, dilation; /* one entry per spatial dim */
+            bool channels_last = true;
+            cudnnBackendHeurMode_t heur_mode = CUDNN_HEUR_MODE_A;
         };
 
         ConvolutionGraph() = default;
@@ -134,9 +147,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             CV_Assert(params.dilation.size() == static_cast<std::size_t>(spatial_dims));
 
             /* channel-last strides, e.g. NHWC: {C*H*W, 1, W*C, C} */
-            const std::vector<int64_t> xStride = channelLastStrides(i);
-            const std::vector<int64_t> yStride = channelLastStrides(o);
-            const std::vector<int64_t> wStride = channelLastStrides(f);
+            const std::vector<int64_t> xStride = params.channels_last ? channelLastStrides(i) : packedStrides(i);
+            const std::vector<int64_t> yStride = params.channels_last ? channelLastStrides(o) : packedStrides(o);
+            const std::vector<int64_t> wStride = params.channels_last ? channelLastStrides(f) : packedStrides(f);
 
             xDesc = makeTensorDescriptor<T>('x', i, xStride);
             yDesc = makeTensorDescriptor<T>('y', o, yStride);
@@ -181,7 +194,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             BackendDescriptor heuristics(CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR);
             {
                 cudnnBackendDescriptor_t g = opGraph.get();
-                cudnnBackendHeurMode_t mode = CUDNN_HEUR_MODE_A;
+                cudnnBackendHeurMode_t mode = params.heur_mode;
                 heuristics.set(CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &g);
                 heuristics.set(CUDNN_ATTR_ENGINEHEUR_MODE,            CUDNN_TYPE_HEUR_MODE,          1, &mode);
                 heuristics.finalize();
@@ -435,6 +448,6 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
 
 }}}}} /* namespace cv::dnn::cuda4dnn::csl::cudnn */
 
-#endif /* HAVE_CUDNNJIT */
+#endif /* HAVE_CUDNNJIT || (HAVE_CUDNN && CUDNN_MAJOR >= 9) */
 
 #endif /* OPENCV_DNN_CUDA4DNN_CSL_CUDNN_GRAPH_HPP */

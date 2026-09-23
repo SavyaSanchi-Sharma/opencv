@@ -22,6 +22,9 @@
 #include "../csl/cudnn/graph.hpp"
 #include "../kernels/permute.hpp"
 #include "../kernels/fill_copy.hpp"
+#elif defined(HAVE_CUDNN) && CUDNN_MAJOR >= 9
+#define CUDA4DNN_CONV_GRAPH_NCHW 1
+#include "../csl/cudnn/graph.hpp"
 #endif
 
 #include "../kernels/scale_shift.hpp"
@@ -50,6 +53,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     {
         static const bool flag =
             utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FUSE_CONV", false);
+        return flag;
+    }
+
+    inline bool cudaConvGraph()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_CONV_GRAPH", true);
         return flag;
     }
 
@@ -294,7 +304,32 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 }
             }
 
-#if !defined(HAVE_CUDNNJIT) || defined(HAVE_CUDNN)
+#if defined(CUDA4DNN_CONV_GRAPH_NCHW)
+            if (fusion_location == InternalFusionLocation::NATIVE && cudaConvGraph() &&
+                !csl::cudnn::cudaFmaMathOnly())
+            {
+                auto toInt64 = [](const std::vector<std::size_t>& v) {
+                    return std::vector<int64_t>(v.begin(), v.end());
+                };
+                typename csl::cudnn::ConvolutionGraph<T>::params_type graph_params;
+                graph_params.input_shape  = toInt64(params.input_shape);
+                graph_params.output_shape = toInt64(output_shape);
+                graph_params.filter_shape = toInt64(fshape);
+                graph_params.padding  = toInt64(params.padding);
+                graph_params.stride   = toInt64(params.stride);
+                graph_params.dilation = toInt64(params.dilation);
+                graph_params.channels_last = false;
+                graph_params.heur_mode = CUDNN_HEUR_MODE_B;
+                try {
+                    graphConvoluter = csl::cudnn::ConvolutionGraph<T>(cudnnHandle, graph_params);
+                    useGraph = true;
+                } catch (const cv::Exception&) {
+                    useGraph = false;
+                }
+            }
+            if (!useGraph)
+                convoluter = csl::Convolution<T>(cudnnHandle, params);
+#elif !defined(HAVE_CUDNNJIT) || defined(HAVE_CUDNN)
             convoluter = csl::Convolution<T>(cudnnHandle, params);
 #endif
 
@@ -367,6 +402,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             }
 #if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
             builder.require(jitConvoluter.get_workspace_size());
+#elif defined(CUDA4DNN_CONV_GRAPH_NCHW)
+            builder.require(useGraph ? graphConvoluter.get_workspace_size() : convoluter.get_workspace_size());
 #else
             builder.require(convoluter.get_workspace_size());
 #endif
@@ -430,6 +467,11 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernels::permute<T>(stream, jitInputNHWC, input, jitNchwToNhwcOrder);   /* NCHW/NCDHW -> NHWC/NDHWC */
                 jitConvoluter.convolve(cudnnHandle, jitInputNHWC.get(), jitFilterKRSC.get(), jitOutputNHWC.get(), conv_scratchpad);
                 kernels::permute<T>(stream, output, jitOutputNHWC, jitNhwcToNchwOrder);  /* NHWC/NDHWC -> NCHW/NCDHW */
+#elif defined(CUDA4DNN_CONV_GRAPH_NCHW)
+                if (useGraph)
+                    graphConvoluter.convolve(cudnnHandle, input.get(), filtersTensor.get(), output.get(), conv_scratchpad);
+                else
+                    convoluter.convolve(output, input, filtersTensor, conv_scratchpad);
 #else
                 convoluter.convolve(output, input, filtersTensor, conv_scratchpad);
 #endif
@@ -683,6 +725,10 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::cudnn::ConvolutionGraph<T> jitConvoluter;
         csl::Tensor<T> jitInputNHWC, jitFilterKRSC, jitOutputNHWC;
         std::vector<std::size_t> jitNchwToNhwcOrder, jitNhwcToNchwOrder;
+#endif
+#if defined(CUDA4DNN_CONV_GRAPH_NCHW)
+        csl::cudnn::ConvolutionGraph<T> graphConvoluter;
+        bool useGraph = false;
 #endif
 
         std::size_t scratch_mem_in_bytes;
