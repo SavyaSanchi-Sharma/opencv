@@ -151,6 +151,13 @@ public:
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA)
         {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (netimpl_ && !this->inputs.empty())
+            {
+                const int t = netimpl_->argType(this->inputs[0]);
+                if (t >= 0 && CV_MAT_DEPTH(t) != CV_32F && CV_MAT_DEPTH(t) != CV_16F)
+                    return false;
+            }
             float lo, hi;
             return resolveBounds(lo, hi);
         }

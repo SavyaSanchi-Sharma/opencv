@@ -90,6 +90,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         {
             CV_UNUSED(workspace);
             CV_Assert(!inputs.empty() && !outputs.empty());
+            CV_Assert(inputs[0].depth() == CV_32F || inputs[0].depth() == CV_16F);
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);
             kernels::clipped_relu<T>(stream, output, input, min, max);

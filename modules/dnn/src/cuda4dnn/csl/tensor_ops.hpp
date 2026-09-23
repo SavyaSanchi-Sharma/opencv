@@ -74,11 +74,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
             };
             put(input_shape); put(filter_shape); put(padding); put(stride); put(dilation);
             ss << groups << ';' << elem_size << ';' << cudaDeviceTag() << ';'
-               << CUDNN_MAJOR << '.' << CUDNN_MINOR << '.' << CUDNN_PATCHLEVEL;
+               << CUDNN_MAJOR << '.' << CUDNN_MINOR << '.' << CUDNN_PATCHLEVEL << ';'
+               << (cudnn::cudaConvAlgoFind() ? "find" : "heuristic");
             return ss.str();
         }
 
-        struct ConvAlgoEntry { int algo; std::size_t workspace_size; };
+        struct ConvAlgoEntry { int algo; std::size_t workspace_size; int math_type; };
 
         inline std::unordered_map<std::string, ConvAlgoEntry>& convAlgoCache()
         {
@@ -93,7 +94,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
         }
 
         // bump when the key layout or the line format changes, so old files are ignored not misread
-        inline const char* convAlgoCacheHeader() { return "# opencv-dnn-cuda-conv-algo-cache v1"; }
+        inline const char* convAlgoCacheHeader() { return "# opencv-dnn-cuda-conv-algo-cache v2"; }
 
         // empty path disables persistence; entries are keyed on device and cuDNN version anyway
         inline const std::string& convAlgoCacheFile()
@@ -130,10 +131,10 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
             while (std::getline(f, line)) {
                 std::istringstream ss(line);
                 std::string key;
-                int algo = 0;
+                int algo = 0, math_type = 0;
                 unsigned long long workspace = 0;
-                if (ss >> key >> algo >> workspace)
-                    convAlgoCache()[key] = ConvAlgoEntry{ algo, (std::size_t)workspace };
+                if (ss >> key >> algo >> workspace >> math_type)
+                    convAlgoCache()[key] = ConvAlgoEntry{ algo, (std::size_t)workspace, math_type };
             }
         }
 
@@ -150,7 +151,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
                 f << convAlgoCacheHeader() << '\n';
                 convAlgoCacheHeaderSeen() = true;
             }
-            f << key << ' ' << entry.algo << ' ' << entry.workspace_size << '\n';
+            f << key << ' ' << entry.algo << ' ' << entry.workspace_size << ' ' << entry.math_type << '\n';
         }
     }
 
@@ -377,14 +378,16 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
                 detail::loadConvAlgoCacheOnce();
                 auto it = detail::convAlgoCache().find(algoKey);
                 if (it != detail::convAlgoCache().end()) {
-                    algo = ConvolutionAlgorithm(static_cast<cudnnConvolutionFwdAlgo_t>(it->second.algo),
-                                                it->second.workspace_size);
+                    algo = ConvolutionAlgorithm(convDesc, static_cast<cudnnConvolutionFwdAlgo_t>(it->second.algo),
+                                                it->second.workspace_size,
+                                                static_cast<cudnnMathType_t>(it->second.math_type));
                     algoCached = true;
                 }
             }
             if (!algoCached) {
                 algo = ConvolutionAlgorithm(cudnnHandle, convDesc, filterDesc, inputTensorDesc, outputTensorDesc);
-                const detail::ConvAlgoEntry entry{ static_cast<int>(algo.get()), algo.get_workspace_size() };
+                const detail::ConvAlgoEntry entry{ static_cast<int>(algo.get()), algo.get_workspace_size(),
+                                                   static_cast<int>(algo.get_math_type()) };
                 AutoLock lock(detail::convAlgoCacheMutex());
                 detail::convAlgoCache()[algoKey] = entry;
                 detail::appendConvAlgoCacheEntry(algoKey, entry);

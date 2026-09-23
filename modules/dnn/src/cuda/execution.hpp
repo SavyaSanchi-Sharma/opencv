@@ -13,8 +13,28 @@
 #include <cuda_runtime_api.h>
 
 #include <cstddef>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <utility>
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
+
+    namespace detail {
+        using OccupancyKey = std::tuple<const void*, std::size_t, int>;
+
+        inline std::mutex& occupancyCacheMutex()
+        {
+            static std::mutex m;
+            return m;
+        }
+
+        inline std::map<OccupancyKey, std::pair<int, int>>& occupancyCache()
+        {
+            static std::map<OccupancyKey, std::pair<int, int>> cache;
+            return cache;
+        }
+    }
 
     struct execution_policy {
         execution_policy(dim3 grid_size, dim3 block_size)
@@ -48,8 +68,24 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl {
     execution_policy make_policy(Kernel kernel, std::size_t max_threads, std::size_t sharedMem = 0, const Stream& stream = 0) {
         CV_Assert(max_threads > 0);
 
+        int device = 0;
+        CUDA4DNN_CHECK_CUDA(cudaGetDevice(&device));
+        const detail::OccupancyKey key(reinterpret_cast<const void*>(kernel), sharedMem, device);
+
         int grid_size = 0, block_size = 0;
-        CUDA4DNN_CHECK_CUDA(cudaOccupancyMaxPotentialBlockSize(&grid_size, &block_size, kernel, sharedMem));
+        {
+            std::lock_guard<std::mutex> lock(detail::occupancyCacheMutex());
+            auto it = detail::occupancyCache().find(key);
+            if (it != detail::occupancyCache().end()) {
+                grid_size = it->second.first;
+                block_size = it->second.second;
+            }
+        }
+        if (block_size == 0) {
+            CUDA4DNN_CHECK_CUDA(cudaOccupancyMaxPotentialBlockSize(&grid_size, &block_size, kernel, sharedMem));
+            std::lock_guard<std::mutex> lock(detail::occupancyCacheMutex());
+            detail::occupancyCache()[key] = std::make_pair(grid_size, block_size);
+        }
         if (grid_size * block_size > max_threads) {
             grid_size = (max_threads + block_size - 1) / block_size;
             if (block_size > max_threads)

@@ -29,13 +29,15 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
     namespace raw {
         template <class T>
-        __global__ void reduce_sum_abs(Span<T> output, View<T> input, size_type outer_stride, size_type mid_stride) {
-            for (auto idx : grid_stride_range(input.size())) {
-                const index_type outer_idx = idx / outer_stride;
-                const index_type inner_idx = idx % mid_stride;
-
-                const index_type sum_idx = outer_idx * mid_stride + inner_idx;
-                atomicAdd(&output[sum_idx], device::abs(input[idx]));
+        __global__ void reduce_sum_abs(Span<T> output, View<T> input, size_type mid_size, size_type inner_size) {
+            for (auto idx : grid_stride_range(output.size())) {
+                const index_type outer_idx = idx / inner_size;
+                const index_type inner_idx = idx % inner_size;
+                const index_type base = outer_idx * mid_size * inner_size + inner_idx;
+                float acc = 0;
+                for (index_type m = 0; m < mid_size; m++)
+                    acc += fabsf(static_cast<float>(input[base + m * inner_size]));
+                output[idx] = static_cast<T>(acc);
             }
         }
 
@@ -46,14 +48,18 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <class T>
-        __global__ void reduce_sum_squared(Span<T> output, View<T> input, size_type outer_stride, size_type mid_stride) {
-           for (auto idx : grid_stride_range(input.size())) {
-                const index_type outer_idx = idx / outer_stride;
-                const index_type inner_idx = idx % mid_stride;
-
-                const index_type sum_idx = outer_idx * mid_stride + inner_idx;
-                atomicAdd(&output[sum_idx], input[idx] * input[idx]);
-           }
+        __global__ void reduce_sum_squared(Span<T> output, View<T> input, size_type mid_size, size_type inner_size) {
+            for (auto idx : grid_stride_range(output.size())) {
+                const index_type outer_idx = idx / inner_size;
+                const index_type inner_idx = idx % inner_size;
+                const index_type base = outer_idx * mid_size * inner_size + inner_idx;
+                float acc = 0;
+                for (index_type m = 0; m < mid_size; m++) {
+                    const float x = static_cast<float>(input[base + m * inner_size]);
+                    acc += x * x;
+                }
+                output[idx] = static_cast<T>(acc);
+            }
         }
 
         template <class T>
@@ -90,20 +96,18 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
         auto sums = Span<T>(workspace.data(), outer_size * inner_size);
 
-        fill<T>(stream, sums, 0.0);
-
         if (norm == 1) {
             auto reduce_kernel = raw::reduce_sum_abs<T>;
-            auto policy = make_policy(reduce_kernel, input.size(), 0, stream);
-            launch_kernel(reduce_kernel, policy, sums, input, mid_size * inner_size, inner_size);
+            auto policy = make_policy(reduce_kernel, sums.size(), 0, stream);
+            launch_kernel(reduce_kernel, policy, sums, input, mid_size, inner_size);
 
             auto reciprocal_kernel = raw::reciprocal<T>;
             policy = make_policy(reciprocal_kernel, sums.size(), 0, stream);
             launch_kernel(reciprocal_kernel, policy, sums, epsilon);
         } else {
             auto reduce_kernel = raw::reduce_sum_squared<T>;
-            auto policy = make_policy(reduce_kernel, input.size(), 0, stream);
-            launch_kernel(reduce_kernel, policy, sums, input, mid_size * inner_size, inner_size);
+            auto policy = make_policy(reduce_kernel, sums.size(), 0, stream);
+            launch_kernel(reduce_kernel, policy, sums, input, mid_size, inner_size);
 
             auto rsqrt_kernel = raw::rsqrt<T>;
             policy = make_policy(rsqrt_kernel, sums.size(), 0, stream);

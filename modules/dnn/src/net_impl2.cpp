@@ -787,14 +787,34 @@ static bool cudaScheduleEnabled()
 // trust the UMat dirty flags instead of forcing a download before every host read
 static bool cudaTrustResidency()
 {
-    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", true);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", false);
     return flag;
 }
 
 static bool cudaTraceEnabled()
 {
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRACE", false);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRACE", false);
+    return flag;
 }
+
+#ifdef HAVE_CUDA
+static void waitDefaultStream(Net::Impl* netimpl)
+{
+    if (!netimpl->cudaInfo)
+        return;
+    cudaEvent_t done = nullptr;
+    CUDA4DNN_CHECK_CUDA(cudaEventCreateWithFlags(&done, cudaEventDisableTiming));
+    CUDA4DNN_CHECK_CUDA(cudaEventRecord(done, 0));
+    CUDA4DNN_CHECK_CUDA(cudaStreamWaitEvent(netimpl->cudaInfo->context.stream.get(), done, 0));
+    CUDA4DNN_CHECK_CUDA(cudaEventDestroy(done));
+}
+
+static void syncDnnStream(Net::Impl* netimpl)
+{
+    if (netimpl->cudaInfo)
+        netimpl->cudaInfo->context.stream.synchronize();
+}
+#endif
 
 // dumps every op's output tensor to stdout, so a CPU run and a CUDA run can be diffed
 static bool traceAllEnabled()
@@ -1605,6 +1625,7 @@ void Net::Impl::finalize()
             t.getMat(ACCESS_READ).copyTo(cudaT);
             t = cudaT;
         }
+        waitDefaultStream(this);
     }
 #endif
 
@@ -1691,7 +1712,15 @@ void Net::Impl::allocateLayerOutputs(
             if (aliasesInput) {
                 UMat migrated;
                 migrated.allocator = bufAlloc;
+#ifdef HAVE_CUDA
+                if (out_t.u->currAllocator == cv::cuda::getCudaAllocator())
+                    syncDnnStream(this);
+#endif
                 out_t.copyTo(migrated);
+#ifdef HAVE_CUDA
+                if (bufAlloc == cv::cuda::getCudaAllocator())
+                    waitDefaultStream(this);
+#endif
                 out_t = migrated;
             } else {
                 rehomeAllocator(out_t, bufAlloc);
@@ -2253,6 +2282,10 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
                                      graph->name().data(), adata.name.c_str(),
                                      argKindToString(adata.kind).c_str()));
     }
+#ifdef HAVE_CUDA
+    if (graphOnCuda)
+        waitDefaultStream(this);
+#endif
 }
 
 #ifdef HAVE_CUDA
@@ -2283,7 +2316,7 @@ static void syncShapeSpecInputs(Net::Impl* netimpl, const std::vector<Arg>& inpu
         return;
     MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
     for (size_t i = 1; i < inputs.size(); i++) {
-        if (inputs[i].empty())
+        if (inputs[i].empty() || netimpl->isConstArg(inputs[i]))
             continue;
         UMat& meta = netimpl->argTensor(inputs[i]);
         const int metaDepth = meta.depth();
@@ -2350,6 +2383,7 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
 
     MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
     const bool traceTransfers = cudaTraceEnabled();
+    bool uploaded = false;
     for (size_t i = 0; i < inputs.size(); i++) {
         if (inputs[i].empty())
             continue;
@@ -2385,6 +2419,7 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
             h2dBytes += cudaT.total() * cudaT.elemSize();
             t = cudaT;
             migrated = true;
+            uploaded = true;
             transferTaken = needConv ? "convert+upload" : "upload";
         }
 
@@ -2408,6 +2443,8 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
                         transferTaken, formatBytes(t.total() * t.elemSize()).c_str()));
         }
     }
+    if (uploaded)
+        waitDefaultStream(netimpl);
 
     std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
@@ -2645,6 +2682,9 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             for (i = 0; i < ninputs; i++)
                 inpUMats[i] = argTensor(inputs[i]);
             std::vector<MatShape> dynOutShapes;
+#ifdef HAVE_CUDA
+            syncDnnStream(this);
+#endif
             op->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
             CV_Assert(dynOutShapes.size() == noutputs);
             outMats.resize(noutputs);

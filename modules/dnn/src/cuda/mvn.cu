@@ -16,7 +16,9 @@
 
 #include <opencv2/core.hpp>
 
+#include <algorithm>
 #include <cstddef>
+#include <limits>
 
 using namespace cv::dnn::cuda4dnn::csl;
 using namespace cv::dnn::cuda4dnn::csl::device;
@@ -24,28 +26,65 @@ using namespace cv::dnn::cuda4dnn::csl::device;
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
 namespace raw {
+    constexpr int REDUCE_THREADS = 256;
+
     template <class T>
     __global__ void reduce_mean(Span<float> means, View<T> input, size_type inner_size) {
-        for (auto idx : grid_stride_range(input.size())) {
-            const index_type outer_idx = idx / inner_size;
-            atomicAdd(&means[outer_idx], static_cast<float>(input[idx]) / inner_size);
+        __shared__ float s_sum[REDUCE_THREADS];
+        const size_type rows = means.size();
+        for (size_type row = blockIdx.x; row < rows; row += gridDim.x) {
+            const index_type base = row * inner_size;
+            float sum = 0;
+            for (size_type j = threadIdx.x; j < inner_size; j += REDUCE_THREADS)
+                sum += static_cast<float>(input[base + j]);
+            s_sum[threadIdx.x] = sum;
+            __syncthreads();
+            for (int stride = REDUCE_THREADS / 2; stride > 0; stride /= 2) {
+                if (threadIdx.x < stride)
+                    s_sum[threadIdx.x] += s_sum[threadIdx.x + stride];
+                __syncthreads();
+            }
+            if (threadIdx.x == 0)
+                means[row] = s_sum[0] / inner_size;
+            __syncthreads();
         }
     }
 
     template <class T>
     __global__ void reduce_mean_sqr_sum(Span<float> means, Span<float> sum_sqrs, View<T> input, size_type inner_size) {
-        for (auto idx : grid_stride_range(input.size())) {
-            const index_type outer_idx = idx / inner_size;
-            auto x = static_cast<float>(input[idx]);
-            atomicAdd(&means[outer_idx], x / inner_size);
-            atomicAdd(&sum_sqrs[outer_idx], x * x);
+        __shared__ float s_sum[REDUCE_THREADS];
+        __shared__ float s_sqr[REDUCE_THREADS];
+        const size_type rows = means.size();
+        for (size_type row = blockIdx.x; row < rows; row += gridDim.x) {
+            const index_type base = row * inner_size;
+            float sum = 0, sqr = 0;
+            for (size_type j = threadIdx.x; j < inner_size; j += REDUCE_THREADS) {
+                const float x = static_cast<float>(input[base + j]);
+                sum += x;
+                sqr += x * x;
+            }
+            s_sum[threadIdx.x] = sum;
+            s_sqr[threadIdx.x] = sqr;
+            __syncthreads();
+            for (int stride = REDUCE_THREADS / 2; stride > 0; stride /= 2) {
+                if (threadIdx.x < stride) {
+                    s_sum[threadIdx.x] += s_sum[threadIdx.x + stride];
+                    s_sqr[threadIdx.x] += s_sqr[threadIdx.x + stride];
+                }
+                __syncthreads();
+            }
+            if (threadIdx.x == 0) {
+                means[row] = s_sum[0] / inner_size;
+                sum_sqrs[row] = s_sqr[0];
+            }
+            __syncthreads();
         }
     }
 
     __global__ void compute_normalization_scale(Span<float> scale, View<float> means, View<float> sums_sqr, size_type inner_size, float eps) {
         for (auto idx : grid_stride_range(scale.size())) {
             auto mean = means[idx];
-            auto var = sums_sqr[idx] / inner_size - mean * mean;
+            auto var = fmaxf(sums_sqr[idx] / inner_size - mean * mean, 0.f);
             using device::rsqrt;
             scale[idx] = rsqrt(eps + var);
         }
@@ -117,8 +156,11 @@ void reduce_mean(const Stream& stream, Span<float> means, View<T> input, std::si
 {
     CV_Assert(input.size() / inner_size == means.size());
 
+    if (means.size() == 0)
+        return;
     auto kernel = raw::reduce_mean<T>;
-    auto policy = make_policy(kernel, input.size(), 0, stream);
+    auto grid = static_cast<unsigned>(std::min<std::size_t>(means.size(), std::numeric_limits<int>::max()));
+    auto policy = execution_policy(grid, raw::REDUCE_THREADS, stream);
     launch_kernel(kernel, policy, means, input, inner_size);
 }
 
@@ -133,8 +175,11 @@ void reduce_mean_sqr_sum(const Stream& stream, Span<float> means, Span<float> su
     CV_Assert(input.size() / inner_size == means.size());
     CV_Assert(input.size() / inner_size == sum_sqrs.size());
 
+    if (means.size() == 0)
+        return;
     auto kernel = raw::reduce_mean_sqr_sum<T>;
-    auto policy = make_policy(kernel, input.size(), 0, stream);
+    auto grid = static_cast<unsigned>(std::min<std::size_t>(means.size(), std::numeric_limits<int>::max()));
+    auto policy = execution_policy(grid, raw::REDUCE_THREADS, stream);
     launch_kernel(kernel, policy, means, sum_sqrs, input, inner_size);
 }
 
