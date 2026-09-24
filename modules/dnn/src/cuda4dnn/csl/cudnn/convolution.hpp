@@ -20,7 +20,23 @@
 #include <type_traits>
 #include <iterator>
 
+#include <opencv2/core/utils/configuration.private.hpp>
+
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cudnn {
+
+    inline bool cudaFmaMathOnly()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
+        return flag;
+    }
+
+    inline bool cudaConvAlgoFind()
+    {
+        static const bool flag =
+            utils::getConfigurationParameterString("OPENCV_DNN_CUDA_CONV_ALGO_SEARCH", "heuristic") == "find";
+        return flag;
+    }
 
     /** describe convolution filters
      *
@@ -231,7 +247,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
                  * giving near-FP16 throughput at slightly reduced precision. ONNXRuntime enables
                  * this by default; we follow suit. (Was CUDNN_FMA_MATH to force exact FP32.)
                  */
-                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(descriptor, CUDNN_DEFAULT_MATH));
+                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(
+                    descriptor, cudaFmaMathOnly() ? CUDNN_FMA_MATH : CUDNN_DEFAULT_MATH));
 #endif
 
                 if (std::is_same<T, half>::value)
@@ -272,15 +289,26 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             int requestedAlgoCount = 0, returnedAlgoCount = 0;
             CUDA4DNN_CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithmMaxCount(handle.get(), &requestedAlgoCount));
             std::vector<cudnnConvolutionFwdAlgoPerf_t> results(requestedAlgoCount);
-            CUDA4DNN_CHECK_CUDNN(
-                cudnnGetConvolutionForwardAlgorithm_v7(
-                    handle.get(),
-                    inputDesc.get(), filterDesc.get(), convDesc.get(), outputDesc.get(),
-                    requestedAlgoCount,
-                    &returnedAlgoCount,
-                    &results[0]
-                )
-            );
+            if (cudaConvAlgoFind())
+                CUDA4DNN_CHECK_CUDNN(
+                    cudnnFindConvolutionForwardAlgorithm(
+                        handle.get(),
+                        inputDesc.get(), filterDesc.get(), convDesc.get(), outputDesc.get(),
+                        requestedAlgoCount,
+                        &returnedAlgoCount,
+                        &results[0]
+                    )
+                );
+            else
+                CUDA4DNN_CHECK_CUDNN(
+                    cudnnGetConvolutionForwardAlgorithm_v7(
+                        handle.get(),
+                        inputDesc.get(), filterDesc.get(), convDesc.get(), outputDesc.get(),
+                        requestedAlgoCount,
+                        &returnedAlgoCount,
+                        &results[0]
+                    )
+                );
 
             size_t free_memory, total_memory;
             CUDA4DNN_CHECK_CUDA(cudaMemGetInfo(&free_memory, &total_memory));
@@ -295,12 +323,16 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
                     found_conv_algorithm = true;
                     algo = results[i].algo;
                     workspace_size = results[i].memory;
+                    math_type = results[i].mathType;
                     break;
                 }
             }
 
             if (!found_conv_algorithm)
                 CV_Error (cv::Error::GpuApiCallError, "cuDNN did not return a suitable algorithm for convolution.");
+
+            if (!cudaFmaMathOnly())
+                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(convDesc.get(), math_type));
 #else
             CUDA4DNN_CHECK_CUDNN(
                 cudnnGetConvolutionForwardAlgorithm(
@@ -322,6 +354,15 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
 #endif
         }
 
+        /** install a previously selected algorithm, skipping the benchmark */
+        ConvolutionAlgorithm(const ConvolutionDescriptor<T>& convDesc, cudnnConvolutionFwdAlgo_t algo_,
+                             std::size_t workspace, cudnnMathType_t math)
+            : algo{ algo_ }, workspace_size{ workspace }, math_type{ math }
+        {
+            if (!cudaFmaMathOnly())
+                CUDA4DNN_CHECK_CUDNN(cudnnSetConvolutionMathType(convDesc.get(), math_type));
+        }
+
         ConvolutionAlgorithm& operator=(const ConvolutionAlgorithm&) = default;
         ConvolutionAlgorithm& operator=(ConvolutionAlgorithm&& other) = default;
 
@@ -330,9 +371,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         /** number of bytes of workspace memory required by the algorithm */
         std::size_t get_workspace_size() const noexcept { return workspace_size; }
 
+        cudnnMathType_t get_math_type() const noexcept { return math_type; }
+
     private:
         cudnnConvolutionFwdAlgo_t algo;
         std::size_t workspace_size;
+        cudnnMathType_t math_type = CUDNN_DEFAULT_MATH;
     };
 
     /** gives the shape of the output tensor of convolution

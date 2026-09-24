@@ -104,7 +104,7 @@ struct ModelFusionMatMulToGemm
             gp.set("beta",  mm->beta);
             gp.set("constB", true);
             gp.set("have_bias", have_bias);
-            gp.set("const_C", have_bias);
+            gp.set("constC", have_bias);  // "constC", not "const_C" — the layer reads that key
             // flatten_a=false: keep A's leading dims so downstream consumers
             // see the same shape they did when the producer was a MatMul.
             gp.set("flatten_a", false);
