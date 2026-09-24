@@ -1474,6 +1474,9 @@ double cv::threshold( InputArray _src, OutputArray _dst, double thresh, double m
 {
     CV_INSTRUMENT_REGION();
 
+    CV_NON_CPU_HAL_RUN_(_src.isUMat() && _dst.isUMat(),
+                        cv_non_cpu_hal_threshold(_src, _dst, thresh, maxval, type), thresh)
+
     CV_OCL_RUN_(_src.dims() <= 2 && _dst.isUMat(),
                 ocl_threshold(_src, _dst, cv::noArray(), thresh, maxval, type), thresh)
 

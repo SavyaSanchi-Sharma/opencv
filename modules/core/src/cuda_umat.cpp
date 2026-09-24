@@ -17,6 +17,11 @@ MatAllocator* getCudaAllocator()
     return NULL;
 }
 
+bool isCudaUMat(InputArray)
+{
+    return false;
+}
+
 #else
 
 class CudaUMatAllocator CV_FINAL : public MatAllocator
@@ -181,6 +186,19 @@ private:
 MatAllocator* getCudaAllocator()
 {
     CV_SINGLETON_LAZY_INIT(CudaUMatAllocator, new CudaUMatAllocator())
+}
+
+bool isCudaUMat(InputArray arr)
+{
+    if (!arr.isUMat())
+        return false;
+
+    UMat u = arr.getUMat();
+    if (!u.u || u.u->currAllocator != getCudaAllocator())
+        return false;
+
+    return u.dims == 2 && u.offset == 0 && u.isContinuous()
+        && u.u->refcount == 0 && !u.u->deviceCopyObsolete();
 }
 
 #endif

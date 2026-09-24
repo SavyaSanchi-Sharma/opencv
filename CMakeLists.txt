@@ -184,6 +184,8 @@ OCV_OPTION(WITH_NDSRVP "Use Andes RVP extension" (NOT CV_DISABLE_OPTIMIZATION)
   VISIBLE_IF RISCV)
 OCV_OPTION(WITH_HAL_RVV "Use HAL RVV optimizations" (NOT CV_DISABLE_OPTIMIZATION)
   VISIBLE_IF RISCV)
+OCV_OPTION(WITH_NVIDIA_HAL "Use hand-written CUDA kernels via the non-CPU HAL" OFF
+  VISIBLE_IF WITH_CUDA)
 OCV_OPTION(WITH_FASTCV "Use Qualcomm FastCV acceleration library for ARM platform" OFF
   VISIBLE_IF ((ARM OR AARCH64) AND (ANDROID OR (UNIX AND NOT APPLE AND NOT IOS AND NOT XROS))))
 OCV_OPTION(WITH_CPUFEATURES "Use cpufeatures Android library" ON
@@ -906,6 +908,20 @@ macro(ocv_hal_register HAL_LIBRARIES_VAR HAL_HEADERS_VAR HAL_INCLUDE_DIRS_VAR)
   ocv_include_directories(${${HAL_INCLUDE_DIRS_VAR}})
 endmacro()
 
+set(_non_cpu_hal_includes "")
+macro(ocv_non_cpu_hal_register HAL_LIBRARIES_VAR HAL_HEADERS_VAR HAL_INCLUDE_DIRS_VAR)
+  foreach (l ${${HAL_LIBRARIES_VAR}})
+    if(NOT TARGET ${l})
+      get_filename_component(l "${l}" ABSOLUTE)
+    endif()
+    list(APPEND OPENCV_HAL_LINKER_LIBS ${l})
+  endforeach()
+  foreach (h ${${HAL_HEADERS_VAR}})
+    set(_non_cpu_hal_includes "${_non_cpu_hal_includes}\n#include \"${h}\"")
+  endforeach()
+  ocv_include_directories(${${HAL_INCLUDE_DIRS_VAR}})
+endmacro()
+
 if(NOT DEFINED OpenCV_HAL)
   set(OpenCV_HAL "OpenCV_HAL")
 endif()
@@ -1020,6 +1036,30 @@ foreach(hal ${OpenCV_HAL})
 endforeach()
 configure_file("${OpenCV_SOURCE_DIR}/cmake/templates/custom_hal.hpp.in" "${OPENCV_CONFIG_FILE_INCLUDE_DIR}/custom_hal.hpp" @ONLY)
 unset(_hal_includes)
+
+# ----------------------------------------------------------------------------
+# OpenCV non-CPU HAL
+# ----------------------------------------------------------------------------
+if(WITH_NVIDIA_HAL)
+  ocv_debug_message(STATUS "Enable NVIDIA non-CPU HAL acceleration")
+  if(NOT ";${OpenCV_NON_CPU_HAL};" MATCHES ";nvidia;")
+    set(OpenCV_NON_CPU_HAL "nvidia;${OpenCV_NON_CPU_HAL}")
+  endif()
+endif()
+
+foreach(hal ${OpenCV_NON_CPU_HAL})
+  if(hal STREQUAL "nvidia")
+    if(HAVE_CUDA)
+      add_subdirectory(non_cpu_hal/nvidia)
+      ocv_non_cpu_hal_register(NVIDIA_HAL_LIBRARIES NVIDIA_HAL_HEADERS NVIDIA_HAL_INCLUDE_DIRS)
+      list(APPEND OpenCV_USED_HAL "NVIDIA HAL (ver ${NVIDIA_HAL_VERSION})")
+    else()
+      message(STATUS "NVIDIA HAL: CUDA is not available, disabling NVIDIA HAL...")
+    endif()
+  endif()
+endforeach()
+configure_file("${OpenCV_SOURCE_DIR}/cmake/templates/custom_non_cpu_hal.hpp.in" "${OPENCV_CONFIG_FILE_INCLUDE_DIR}/custom_non_cpu_hal.hpp" @ONLY)
+unset(_non_cpu_hal_includes)
 
 
 # ----------------------------------------------------------------------------
