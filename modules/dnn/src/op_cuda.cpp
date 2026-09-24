@@ -73,6 +73,7 @@ void registerCudaCommonExecs()
     CV_DNN_REGISTER_EXEC_CLASS(MaxPool,     DNN_BACKEND_CUDA, CUDALegacyExec);
     CV_DNN_REGISTER_EXEC_CLASS(Gemm,        DNN_BACKEND_CUDA, CUDALegacyExec);
     CV_DNN_REGISTER_EXEC_CLASS(Pooling,     DNN_BACKEND_CUDA, CUDALegacyExec);  // GlobalAveragePool/GlobalMaxPool
+    CV_DNN_REGISTER_EXEC_CLASS(AveragePool, DNN_BACKEND_CUDA, CUDALegacyExec);
 }
 
 
