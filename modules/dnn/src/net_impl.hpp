@@ -177,6 +177,7 @@ struct Net::Impl : public detail::NetImplBase
     };
     bool fusedSnapshotValid = false;
     std::vector<FusedGraphSnapshot> fusedSnapshot;
+    std::unordered_map<const LayerInfo*, int> cudaPlacementMemo;
     std::vector<Ptr<BackendWrapper> > argWrappers;
     std::vector<const void*> argWrapperData;
     enum ArgResidency { ARG_RESIDENCY_UNKNOWN = 0, ARG_RESIDENCY_HOST, ARG_RESIDENCY_DEVICE };
@@ -441,6 +442,7 @@ struct Net::Impl : public detail::NetImplBase
     bool isConstArg(Arg arg) const;
     UMat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
+    void inferArgTypes();
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
 
@@ -450,6 +452,7 @@ struct Net::Impl : public detail::NetImplBase
     void finalize();
     // Selects executors for a single graph (recursing into subgraphs).
     void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement);
+    void buildTransferSchedule(const Ptr<Graph>& graph);
     Ptr<Layer> makeCpuExec(const Ptr<LayerInfo>& op);
     void logGraphPlacement(const Ptr<Graph>& graph) const;
     bool gatherOpShapes(const Ptr<LayerInfo>& op,
@@ -482,7 +485,8 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<Mat>& temps, // [TODO] ditto
                               std::vector<Mat>& globalTemps,
                               bool useBufferPool,
-                              int opBackend
+                              int opBackend,
+                              bool buildOutputMats = true  // CUDA: the Mat is scaffolding, skip when nothing reads it
                               );
 
     // set input of the model before running it

@@ -292,6 +292,12 @@ CV__DNN_INLINE_NS_BEGIN
         std::vector<Arg> outputs;
         void* netimpl = nullptr;
 
+        //! Memoized getMemoryShapes()/getTypes() result, keyed on the input signature and weightEpoch.
+        bool inferCacheValid = false;
+        unsigned inferWeightEpoch = 0;
+        std::vector<MatShape> inferInpShapes, inferOutShapes, inferTempShapes;
+        std::vector<int> inferInpTypes, inferOutTypes, inferTempTypes;
+
         CV_PROP String name;
         CV_PROP String type;
 
@@ -326,6 +332,14 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool needsHostData(int inputIndex) const;
 
         virtual bool dynamicOutputShapes() const;
+
+        virtual bool canComputeDynamicOutputShapes() const;
+
+        virtual void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                      int requiredOutputs,
+                                                      std::vector<MatShape>& outputs) const;
+
+        virtual bool getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const;
 
         virtual bool isDataShuffling() const;
 
@@ -504,12 +518,6 @@ CV__DNN_INLINE_NS_BEGIN
         virtual void forwardCUDA(InputArrayOfArrays inputs,
                                  OutputArrayOfArrays outputs,
                                  void* workspace);
-
-        virtual bool probeCUDA(InputArrayOfArrays inputs,
-                               OutputArrayOfArrays outputs,
-                               void* workspace);
-
-        virtual void discardCUDANode();
 
         /**
          * @brief "Detaches" all the layers, attached to particular layer.

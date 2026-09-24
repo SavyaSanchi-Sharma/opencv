@@ -132,15 +132,6 @@ void Layer::forwardCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
     CV_Error(Error::StsNotImplemented, "CUDA forward of " + type + " layers is not defined.");
 }
 
-bool Layer::probeCUDA(InputArrayOfArrays, OutputArrayOfArrays, void*)
-{
-    return false;
-}
-
-void Layer::discardCUDANode()
-{
-}
-
 void LayerInfo::getScaleShift(Mat& scale, Mat& shift) const
 {
     scale = Mat();
@@ -360,6 +351,26 @@ bool LayerInfo::needsHostData(int) const
 
 bool LayerInfo::dynamicOutputShapes() const
 {
+    return false;
+}
+
+bool LayerInfo::canComputeDynamicOutputShapes() const
+{
+    return false;
+}
+
+void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                 int requiredOutputs,
+                                                 std::vector<MatShape>& outputs) const
+{
+    CV_UNUSED(inputs); CV_UNUSED(requiredOutputs); CV_UNUSED(outputs);
+    CV_Error(Error::StsNotImplemented,
+             format("layer '%s' (%s) does not implement getMemoryShapesForDynamicOutput()", name.c_str(), type.c_str()));
+}
+
+bool LayerInfo::getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const
+{
+    CV_UNUSED(outputs);
     return false;
 }
 

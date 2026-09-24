@@ -77,7 +77,8 @@ struct BufferAllocator
 {
     Net::Impl* netimpl;
     vector<int> usecounts;
-    vector<int> freebufs;
+    vector<int> freebufs[2];
+    vector<uchar> buf_home;
     vector<int> buf_usecounts;
     vector<int> bufidxs;
     int nbufs = 0;
@@ -103,16 +104,18 @@ struct BufferAllocator
      Use counter for the 'from_arg' buffer is incremented, correpondingly.
      */
 
-    int getFreeBuffer()
+    int getFreeBuffer(bool onDevice)
     {
-        if (freebufs.empty()) {
-            freebufs.push_back(nbufs);
+        vector<int>& pool = freebufs[onDevice ? 1 : 0];
+        if (pool.empty()) {
+            pool.push_back(nbufs);
             buf_usecounts.push_back(0);
+            buf_home.push_back((uchar)(onDevice ? 1 : 0));
             //printf("added buf %d\n", nbufs);
             nbufs++;
         }
-        int outidx = freebufs.back();
-        freebufs.pop_back();
+        int outidx = pool.back();
+        pool.pop_back();
         buf_usecounts[outidx] = 1;
         return outidx;
     }
@@ -122,7 +125,7 @@ struct BufferAllocator
         if (bufidx >= 0) {
             CV_Assert(buf_usecounts[bufidx] > 0);
             if (--buf_usecounts[bufidx] == 0)
-                freebufs.push_back(bufidx);
+                freebufs[buf_home[bufidx]].push_back(bufidx);
         }
     }
 
@@ -163,10 +166,13 @@ struct BufferAllocator
             }
         }
 
-        std::vector<int> saved_freebufs = freebufs;
-        freebufs.clear();
+        std::vector<int> saved_freebufs_host = freebufs[0];
+        std::vector<int> saved_freebufs_device = freebufs[1];
+        freebufs[0].clear();
+        freebufs[1].clear();
         assign(body);
-        freebufs = saved_freebufs;
+        freebufs[0] = saved_freebufs_host;
+        freebufs[1] = saved_freebufs_device;
 
         for (int idx : closureBumped) {
             int bidx = bufidxs[idx];
@@ -222,16 +228,19 @@ struct BufferAllocator
                     !netimpl->isConstArg(inarg) &&
                     bufidxs.at(inarg.idx) < 0)
                 {
-                    bufidxs.at(inarg.idx) = getFreeBuffer();
+                    bufidxs.at(inarg.idx) = getFreeBuffer(false);
                 }
             }
         }
         const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
-        for (const auto& layer: prog) {
+        for (size_t opidx = 0; opidx < prog.size(); opidx++) {
+            const Ptr<LayerInfo>& layer = prog[opidx];
             bool inplace = false;
             Arg reuseArg;
 
             if (!layer) continue;
+
+            bool outOnDevice = graph->opBackend((int)opidx) == DNN_BACKEND_CUDA;
 
             const std::vector<Arg>& inputs = layer->inputs;
             const std::vector<Arg>& outputs = layer->outputs;
@@ -288,7 +297,7 @@ struct BufferAllocator
                     for (auto out: outputs) {
                         if (netimpl->argKind(out) == DNN_ARG_TEMP &&
                             bufidxs.at(out.idx) < 0) {
-                            bufidxs.at(out.idx) = getFreeBuffer();
+                            bufidxs.at(out.idx) = getFreeBuffer(outOnDevice);
                         }
                     }
                 }
@@ -335,12 +344,16 @@ struct BufferAllocator
 
                 // Isolate subgraph buffers: prevent parent's freed buffers from
                 // being reused here, which causes overwrites on re-execution.
-                std::vector<int> saved_freebufs = freebufs;
-                freebufs.clear();
+                std::vector<int> saved_freebufs_host = freebufs[0];
+                std::vector<int> saved_freebufs_device = freebufs[1];
+                freebufs[0].clear();
+                freebufs[1].clear();
                 assign(thenBranch);
-                freebufs.clear();
+                freebufs[0].clear();
+                freebufs[1].clear();
                 assign(elseBranch);
-                freebufs = saved_freebufs;
+                freebufs[0] = saved_freebufs_host;
+                freebufs[1] = saved_freebufs_device;
 
                 for (size_t i = 0; i < noutputs; i++) {
                     Arg thenOutarg = thenOutargs[i];
@@ -377,7 +390,7 @@ struct BufferAllocator
                     if (!netimpl->isConstArg(trip_count) && bufidxs[trip_count.idx] >= 0)
                         shareBuffer(trip_count, inputs[0]);
                     else
-                        bufidxs.at(inputs[0].idx) = getFreeBuffer();
+                        bufidxs.at(inputs[0].idx) = getFreeBuffer(false);
                 }
 
                 for (int i = -1; i < n_state_vars; i++) {
@@ -390,7 +403,7 @@ struct BufferAllocator
                         if (!netimpl->isConstArg(v_inp) && v_inp.idx > 0 && bufidxs[v_inp.idx] >= 0)
                             shareBuffer(v_inp, inparg);
                         else
-                            bufidxs[inparg.idx] = getFreeBuffer();
+                            bufidxs[inparg.idx] = getFreeBuffer(false);
                     }
                     if (!netimpl->isConstArg(v_out)) {
                         if (!netimpl->isConstArg(outarg) && usecounts[outarg.idx] == 1)

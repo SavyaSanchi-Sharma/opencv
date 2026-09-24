@@ -418,8 +418,7 @@ public:
         exec_.clear();
         execBackend_.clear();
         execReason_.clear();
-        inH2D_.clear();
-        outD2H_.clear();
+        transfers_.clear();
     }
 
     Net::Impl* netimpl_;
@@ -430,8 +429,15 @@ public:
     std::vector<Ptr<Layer> > exec_;
     std::vector<int> execBackend_;
     std::vector<int> execReason_;
-    std::vector<std::vector<uchar> > inH2D_;
-    std::vector<std::vector<uchar> > outD2H_;
+
+    // one entry per arg that actually crosses the bus, in op order; args that merely flow past a
+    // host op never appear here. Rebuilt whenever placement or the input signature changes.
+    struct TransferPoint {
+        int opIdx;
+        int argIdx;
+        bool toHost;   // false: upload before this op runs
+    };
+    std::vector<TransferPoint> transfers_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -463,6 +469,11 @@ ArgKind Net::Impl::argKind(Arg arg) const
     return argData(arg).kind;
 }
 
+int Net::Impl::argType(Arg arg) const
+{
+    return argData(arg).type;
+}
+
 UMat& Net::Impl::argTensor(Arg arg) const
 {
     const ArgData& adata = argData(arg);
@@ -475,6 +486,7 @@ UMat& Net::Impl::argTensor(Arg arg) const
     return const_cast<UMat&>(__tensors__.at(arg.idx));
 }
 
+// Device buffers come from the CUDA allocator so tensors stay resident between ops.
 MatAllocator* Net::Impl::tensorAllocator() const
 {
 #ifdef HAVE_CUDA
@@ -485,7 +497,8 @@ MatAllocator* Net::Impl::tensorAllocator() const
     return Mat::getDefaultAllocator();
 }
 
-static void forceAllocator(UMat& t, MatAllocator* a)
+// A UMat cannot change allocator while it holds data, so drop the old buffer first.
+static void rehomeAllocator(UMat& t, MatAllocator* a)
 {
     if (t.u && t.u->currAllocator != a)
         t.release();
@@ -509,7 +522,7 @@ bool Net::Impl::haveArg(const std::string& name) const
 UMat Net::Impl::toArgTensor(const Mat& m) const
 {
     UMat t;
-    forceAllocator(t, Mat::getDefaultAllocator());
+    rehomeAllocator(t, Mat::getDefaultAllocator());
     t.fit(m.shape(), m.type());
     m.copyTo(t);
     return t;
@@ -547,6 +560,79 @@ Arg Net::Impl::newArg(const std::string& name, ArgKind kind, bool allowEmptyName
     bufidxs.push_back(-1);
 
     return Arg(idx);
+}
+
+void Net::Impl::inferArgTypes()
+{
+    if (!mainGraph)
+        return;
+
+    std::function<void(const Ptr<Graph>&)> visit = [&](const Ptr<Graph>& graph) {
+        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
+        for (const Ptr<LayerInfo>& op : prog) {
+            if (!op)
+                continue;
+
+            size_t ninputs = op->inputs.size();
+            std::vector<MatType> inpTypes(ninputs);
+            bool allKnown = true;
+            for (size_t i = 0; i < ninputs; i++) {
+                Arg in = op->inputs[i];
+                if (in.empty()) {
+                    inpTypes[i] = -1;
+                    continue;
+                }
+                ArgData& adata = args.at(in.idx);
+                if (adata.type < 0 && adata.kind != DNN_ARG_TEMP) {
+                    const UMat& t = argTensor(in);
+                    if (!t.empty())
+                        adata.type = t.type();
+                }
+                inpTypes[i] = adata.type;
+                if (inpTypes[i] < 0)
+                    allKnown = false;
+            }
+
+            const std::vector<Ptr<Graph> >* subs = op->subgraphs();
+            if (subs) {
+                for (const Ptr<Graph>& sub : *subs)
+                    visit(sub);
+                continue;
+            }
+
+            if (!allKnown) {
+                for (size_t i = 0; i < ninputs; i++) {
+                    Arg in = op->inputs[i];
+                    if (inpTypes[i] >= 0 || in.empty())
+                        continue;
+                    const ArgData& adata = args.at(in.idx);
+                    CV_LOG_INFO(NULL, cv::format(
+                        "DNN/InferArgTypes: SKIP '%s' (%s): input #%zu '%s' kind=%s idx=%d has no type",
+                        op->name.c_str(), op->type.c_str(), i,
+                        adata.name.c_str(), argKindToString(adata.kind).c_str(), in.idx));
+                }
+                continue;
+            }
+
+            size_t noutputs = op->outputs.size();
+            std::vector<MatType> outTypes, tempTypes;
+            try {
+                op->getTypes(inpTypes, (int)noutputs, 0, outTypes, tempTypes);
+            } catch (...) {
+                CV_LOG_INFO(NULL, cv::format("DNN/InferArgTypes: SKIP '%s' (%s): getTypes() threw",
+                                             op->name.c_str(), op->type.c_str()));
+                continue;
+            }
+            for (size_t i = 0; i < noutputs && i < outTypes.size(); i++) {
+                Arg out = op->outputs[i];
+                ArgData& adata = args.at(out.idx);
+                if (adata.type < 0)
+                    adata.type = outTypes[i];
+            }
+        }
+    };
+
+    visit(mainGraph);
 }
 
 int Net::Impl::findDim(const std::string& dimname, bool insert)
@@ -601,7 +687,7 @@ void Net::Impl::widenHalfConstants()
         UMat& t = __tensors__[i];
         if (!t.empty()) {
             UMat widened;
-            forceAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
+            rehomeAllocator(widened, Mat::getDefaultAllocator()); // same allocator toArgTensor() gives const args
             widened.fit(t.shape(), accuracy);
             t.convertTo(widened, accuracy);
             t = widened;
@@ -621,6 +707,16 @@ void Net::Impl::prepareForInference()
 #endif
 
     if (!prepared) {
+#if CV_SIMD_SCALABLE
+        // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
+        // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
+        // so a wider block gives no benefit and breaks them. Only fp32 graphs use the wider
+        // vlanes()-based defaultC0. Signed-int8 (CV_8S) args are the quantization signature
+        // (uint8 image inputs are CV_8U, so they don't trigger this).
+        for (const ArgData& a : args) {
+            if (a.type == CV_8S) { defaultC0 = 8; break; }
+        }
+#endif
         widenHalfConstants();
 #if CV_SIMD_SCALABLE
         // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
@@ -645,6 +741,7 @@ void Net::Impl::prepareForInference()
         fuseChains();
         fuseBasic();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
+        inferArgTypes();
         prepared = true;
     }
 }
@@ -659,11 +756,10 @@ enum CudaPlacementReason
     CUDA_PLACEMENT_UNSUPPORTED_TYPE,
     CUDA_PLACEMENT_FP16_WHOLE_GRAPH,
     CUDA_PLACEMENT_NO_EXEC,
-    CUDA_PLACEMENT_NO_ENGINE,
-    CUDA_PLACEMENT_BELOW_THRESHOLD,
-    CUDA_PLACEMENT_WHOLE_GRAPH_GATE,
-    CUDA_PLACEMENT_SHORT_GPU_RUN,
-    CUDA_PLACEMENT_WINDOW_TOO_SPARSE
+    CUDA_PLACEMENT_NO_SUPPORT,
+    CUDA_PLACEMENT_WINDOW_COST,
+    CUDA_PLACEMENT_SEGMENT_COST,
+    CUDA_PLACEMENT_HOST_SHAPE
 };
 
 static const char* cudaPlacementReasonName(int reason)
@@ -677,24 +773,52 @@ static const char* cudaPlacementReasonName(int reason)
     case CUDA_PLACEMENT_UNSUPPORTED_TYPE: return "unsupported-type";
     case CUDA_PLACEMENT_FP16_WHOLE_GRAPH: return "fp16-whole-graph";
     case CUDA_PLACEMENT_NO_EXEC:          return "no-exec";
-    case CUDA_PLACEMENT_NO_ENGINE:        return "no-engine";
-    case CUDA_PLACEMENT_BELOW_THRESHOLD:  return "below-flops-threshold";
-    case CUDA_PLACEMENT_WHOLE_GRAPH_GATE: return "whole-graph-gate";
-    case CUDA_PLACEMENT_SHORT_GPU_RUN:    return "short-gpu-run";
-    case CUDA_PLACEMENT_WINDOW_TOO_SPARSE: return "window-too-sparse";
+    case CUDA_PLACEMENT_NO_SUPPORT:       return "no-support";
+    case CUDA_PLACEMENT_WINDOW_COST:      return "window-cost";
+    case CUDA_PLACEMENT_SEGMENT_COST:     return "segment-cost";
+    case CUDA_PLACEMENT_HOST_SHAPE:       return "host-shape";
     }
     return "unknown";
 }
 
-static bool useWholeGraphCudaGate()
+// drive host-side downloads from the precomputed schedule instead of per-input residency checks
+static bool cudaScheduleEnabled()
 {
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_WHOLE_GRAPH", false);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_SCHEDULE", false);
+    return flag;
+}
+
+// trust the UMat dirty flags instead of forcing a download before every host read
+static bool cudaTrustResidency()
+{
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRUST_RESIDENCY", false);
+    return flag;
 }
 
 static bool cudaTraceEnabled()
 {
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRACE", false);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_TRACE", false);
+    return flag;
 }
+
+#ifdef HAVE_CUDA
+static void waitDefaultStream(Net::Impl* netimpl)
+{
+    if (!netimpl->cudaInfo)
+        return;
+    cudaEvent_t done = nullptr;
+    CUDA4DNN_CHECK_CUDA(cudaEventCreateWithFlags(&done, cudaEventDisableTiming));
+    CUDA4DNN_CHECK_CUDA(cudaEventRecord(done, 0));
+    CUDA4DNN_CHECK_CUDA(cudaStreamWaitEvent(netimpl->cudaInfo->context.stream.get(), done, 0));
+    CUDA4DNN_CHECK_CUDA(cudaEventDestroy(done));
+}
+
+static void syncDnnStream(Net::Impl* netimpl)
+{
+    if (netimpl->cudaInfo)
+        netimpl->cudaInfo->context.stream.synchronize();
+}
+#endif
 
 // dumps every op's output tensor to stdout, so a CPU run and a CUDA run can be diffed
 static bool traceAllEnabled()
@@ -710,38 +834,291 @@ static std::string formatBytes(size_t n)
     return cv::format("%zu B", n);
 }
 
-static bool useCudaPlacementProbe()
+// Window length tracks sqrt(nops): locality scale grows with depth, but far slower than depth itself.
+static const size_t CUDA_AUTO_WINDOW_LO = 8;
+static const size_t CUDA_AUTO_WINDOW_HI = 24;
+
+// round(sqrt(n)) in integers, so the bucket edges do not depend on floating-point rounding
+static size_t isqrtRounded(size_t n)
 {
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_PROBE", false);
+    size_t r = 0;
+    while ((r + 1) * (r + 1) <= n)
+        r++;
+    if (n - r * r > (r + 1) * (r + 1) - n)
+        r++;
+    return r;
 }
 
-static double cudaMinGpuFlopsShare()
+// Cost is in transfer-byte equivalents, never seconds; constants are compiled in so placement reproduces everywhere.
+static bool cudaOpDisabled(const std::string& type)
 {
-    return (double)utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_FLOPS_PCT", 0) / 100.0;
+    static const std::vector<std::string> disabled = [] {
+        std::vector<std::string> ops;
+        const std::string list = utils::getConfigurationParameterString("OPENCV_DNN_CUDA_DISABLE_OPS", "");
+        size_t start = 0;
+        while (start <= list.size()) {
+            size_t end = list.find(',', start);
+            if (end == std::string::npos)
+                end = list.size();
+            if (end > start)
+                ops.push_back(list.substr(start, end - start));
+            start = end + 1;
+        }
+        return ops;
+    }();
+    return std::find(disabled.begin(), disabled.end(), type) != disabled.end();
 }
 
-// longest host run, with device work on both sides, that gets pulled onto the device
-static size_t cudaMaxCpuBubble()
+static bool cudaHostShapesEnabled()
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MAX_CPU_BUBBLE", 0);
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_HOST_SHAPES", true);
+    return flag;
 }
 
-// device runs shorter than this, stranded between host runs, go back to the host
-static size_t cudaMinGpuRun()
+static bool isHostShapeOp(const Net::Impl* netimpl, const Ptr<LayerInfo>& op, const std::vector<uchar>& hostArg)
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_RUN", 0);
+    if (op->type == "Shape")
+        return true;
+    static const char* const kinds[] = { "Gather2", "Unsqueeze", "Squeeze", "Concat2", "Slice2",
+                                         "Cast2", "NaryEltwise", "Not", "Reshape2" };
+    if (std::find_if(std::begin(kinds), std::end(kinds),
+                     [&](const char* k) { return op->type == k; }) == std::end(kinds))
+        return false;
+    bool anyHostInput = false;
+    for (const Arg& in : op->inputs) {
+        if (in.empty())
+            continue;
+        if (hostArg[in.idx]) {
+            anyHostInput = true;
+            continue;
+        }
+        if (netimpl->args.at(in.idx).kind != DNN_ARG_CONST)
+            return false;
+    }
+    if (!anyHostInput)
+        return false;
+    for (const Arg& out : op->outputs) {
+        if (out.empty())
+            return false;
+        const int t = netimpl->args.at(out.idx).type;
+        const int d = CV_MAT_DEPTH(t);
+        if (t < 0 || (d != CV_32S && d != CV_64S && d != CV_Bool))
+            return false;
+    }
+    return true;
 }
 
-// ops per sliding window; a window with enough device-capable ops forms a device subgraph
-static size_t cudaPlacementWindow()
+#ifdef HAVE_CUDA
+static bool keepHostShapeInput(const std::string& type, size_t i, const UMat& t)
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_WINDOW", 0);
+    if (!cudaHostShapesEnabled() || !t.u || t.u->currAllocator == cv::cuda::getCudaAllocator())
+        return false;
+    const int d = t.depth();
+    if ((d != CV_32S && d != CV_64S) || t.total() > 1024)
+        return false;
+    if (type == "ConstantOfShape")
+        return true;
+    if (i == 0)
+        return false;
+    static const char* const kinds[] = { "Reshape2", "Expand2", "Tile2", "Slice2", "Pad2",
+                                         "Squeeze", "Unsqueeze", "Resize2", "OneHot" };
+    return std::find_if(std::begin(kinds), std::end(kinds),
+                        [&](const char* k) { return type == k; }) != std::end(kinds);
+}
+#endif
+
+static bool cudaCostModelEnabled()
+{
+    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_COST_MODEL", true);
 }
 
-// device-capable ops a window needs before it is worth forming into a device subgraph
-static size_t cudaMinGpuOpsPerWindow()
+// FLOPs won back per transferred byte: host throughput (~200 GFLOP/s) over link bw (~25 GB/s).
+static int64 cudaCostFlopsPerByte()
 {
-    return utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_MIN_GPU_OPS", 0);
+    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_FLOPS_PER_BYTE", 8);
+    return (int64)std::max<size_t>(v, 1);
+}
+
+// Memory-bound half of the roofline; covers the ~90 layer types with no getFLOPS() override.
+static int64 cudaCostTouchPerByte()
+{
+    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_TOUCH_PER_BYTE", 2);
+    return (int64)std::max<size_t>(v, 1);
+}
+
+// Cost of one host<->device transition before any payload: pipeline drain plus launch overhead.
+static int64 cudaCostBarrierBytes()
+{
+    return (int64)utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_BARRIER_BYTES", 512 * 1024);
+}
+
+// Index spaces: prog i in [0,nops) with null holes, compacted k in [0,n) where ops[k]==i, cut c in [0,n] before ops[c], args.
+struct PlacementCost
+{
+    std::vector<int64> cumBenefit;    // [n+1]   prefix sum of per-op benefit, placement-independent
+    std::vector<int64> cumDevBenefit; // [n+1]   same, device-capable ops only
+    std::vector<int64> liveBytes;     // [n+1]   bytes live across each cut
+    std::vector<int64> argBytes;      // [nargs]
+    std::vector<int>   producer;      // [nargs] compacted pos writing the arg, -1 if none
+    std::vector<int>   lastUse;       // [nargs] last compacted pos reading it, -1 if none
+
+    std::vector<int>   seen;          // stamp table for segmentBoundaryCost(), O(1) to invalidate
+    int                stamp = 0;
+};
+
+// Returns false when shapes are too incomplete to cost the graph; caller falls back to the window.
+static bool buildPlacementCost(Net::Impl* netimpl,
+                               const std::vector<Ptr<LayerInfo> >& prog,
+                               const std::vector<size_t>& ops,
+                               const std::vector<uchar>& placed,
+                               const std::vector<MatShape>& shapeCache,
+                               const std::vector<MatType>& typeCache,
+                               PlacementCost& pc)
+{
+    const size_t n = ops.size(), nargs = netimpl->args.size();
+    if (n < 2 || nargs < 2)
+        return false;
+
+    pc.cumBenefit.assign(n + 1, 0);
+    pc.cumDevBenefit.assign(n + 1, 0);
+    pc.liveBytes.assign(n + 1, 0);
+    pc.argBytes.assign(nargs, 0);
+    pc.producer.assign(nargs, -1);
+    pc.lastUse.assign(nargs, -1);
+    pc.seen.assign(nargs, 0);
+    pc.stamp = 0;
+
+    // consts carry their shape on ArgData; the rest comes from the cache. Symbolic dims aren't sizeable.
+    for (size_t a = 1; a < nargs; a++) {
+        const ArgData& ad = netimpl->args[a];
+        MatShape sh;
+        MatType t = -1;
+        if (ad.kind == DNN_ARG_CONST || ad.kind == DNN_ARG_EMPTY) {
+            sh = ad.shape;
+            t = ad.type;
+        }
+        else if (a < shapeCache.size() && a < typeCache.size()) {
+            sh = shapeCache[a];
+            t = typeCache[a];
+        }
+        if (sh.empty() || sh.hasSymbols() || t < 0)
+            continue;
+        pc.argBytes[a] = (int64)sh.total() * (int64)CV_ELEM_SIZE(t);
+    }
+
+    // walking forward leaves lastUse holding the latest reader
+    for (size_t k = 0; k < n; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+        for (const Arg& in : op->inputs)
+            if (in.idx > 0 && in.idx < (int)nargs)
+                pc.lastUse[in.idx] = (int)k;
+        for (const Arg& out : op->outputs)
+            if (out.idx > 0 && out.idx < (int)nargs && pc.producer[out.idx] < 0)
+                pc.producer[out.idx] = (int)k;
+    }
+
+    // Difference array: an arg spans every cut from producer to last reader; consts upload once per finalize().
+    for (size_t a = 1; a < nargs; a++) {
+        const int64 bytes = pc.argBytes[a];
+        if (bytes <= 0 || netimpl->args[a].kind == DNN_ARG_CONST)
+            continue;
+        const int p = pc.producer[a], q = pc.lastUse[a];
+        const int from = p >= 0 ? p + 1 : 0;              // no producer here: enters from outside
+        const int to = q >= 0 ? q + 1 : (int)n + 1;       // no consumer here: leaves the graph
+        if (from >= to)
+            continue;
+        pc.liveBytes[from] += bytes;
+        if (to <= (int)n)
+            pc.liveBytes[to] -= bytes;
+    }
+    for (size_t c = 1; c <= n; c++)
+        pc.liveBytes[c] += pc.liveBytes[c - 1];
+
+    const int64 flopsPerByte = cudaCostFlopsPerByte();
+    const int64 touchPerByte = cudaCostTouchPerByte();
+    std::vector<MatShape> inpShapes, outShapes;
+    std::vector<MatType> inpTypes, outTypes;
+    std::vector<int64> benefit(n, 0);
+    size_t sized = 0;
+
+    // roofline; `touched` needs no getFLOPS() and no successful shape gather
+    for (size_t k = 0; k < n; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+        int64 touched = 0;
+        for (const Arg& in : op->inputs)
+            if (in.idx > 0 && in.idx < (int)nargs)
+                touched += pc.argBytes[in.idx];
+        for (const Arg& out : op->outputs)
+            if (out.idx > 0 && out.idx < (int)nargs)
+                touched += pc.argBytes[out.idx];
+        if (touched > 0)
+            sized++;
+
+        int64 flops = 0;
+        if (netimpl->gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes)) {
+            flops = op->getFLOPS(inpShapes, outShapes);
+            if (flops < 0)
+                flops = 0;
+        }
+        benefit[k] = std::max(flops / flopsPerByte, touched / touchPerByte);
+    }
+
+    // mostly-unsized graph: nothing useful to say, let the caller fall back
+    if (sized * 2 < n)
+        return false;
+
+    for (size_t k = 0; k < n; k++) {
+        pc.cumBenefit[k + 1] = pc.cumBenefit[k] + benefit[k];
+        pc.cumDevBenefit[k + 1] = pc.cumDevBenefit[k] + (placed[ops[k]] ? benefit[k] : 0);
+    }
+    return true;
+}
+
+// Exact cut of device segment [a,b): args it receives plus args read back, deduped, consts excluded.
+static int64 segmentBoundaryCost(Net::Impl* netimpl,
+                                 const std::vector<Ptr<LayerInfo> >& prog,
+                                 const std::vector<size_t>& ops,
+                                 PlacementCost& pc,
+                                 size_t a, size_t b, size_t& ncross)
+{
+    const int nargs = (int)pc.argBytes.size();
+    int64 bytes = 0;
+    ncross = 0;
+    pc.stamp++;
+
+    for (size_t k = a; k < b; k++) {
+        const Ptr<LayerInfo>& op = prog[ops[k]];
+
+        for (const Arg& in : op->inputs) {
+            const int idx = in.idx;
+            if (idx <= 0 || idx >= nargs || pc.argBytes[idx] <= 0)
+                continue;
+            if (netimpl->args[idx].kind == DNN_ARG_CONST)
+                continue;
+            const int p = pc.producer[idx];
+            if (p >= (int)a && p < (int)b)
+                continue;                        // produced inside: already resident
+            if (pc.seen[idx] == pc.stamp)
+                continue;
+            pc.seen[idx] = pc.stamp;
+            bytes += pc.argBytes[idx];
+            ncross++;
+        }
+
+        for (const Arg& out : op->outputs) {
+            const int idx = out.idx;
+            if (idx <= 0 || idx >= nargs || pc.argBytes[idx] <= 0)
+                continue;
+            const int q = pc.lastUse[idx];
+            const bool leaves = q < 0 || q >= (int)b || netimpl->args[idx].kind == DNN_ARG_OUTPUT;
+            if (!leaves || pc.seen[idx] == pc.stamp)
+                continue;
+            pc.seen[idx] = pc.stamp;
+            bytes += pc.argBytes[idx];
+            ncross++;
+        }
+    }
+    return bytes;
 }
 
 static bool blockLayoutEnabled()
@@ -799,8 +1176,11 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
 {
     const GraphImpl* g = static_cast<const GraphImpl*>(graph.get());
     const std::vector<Ptr<LayerInfo> >& prog = g->prog_;
-    size_t nops = prog.size(), nreal = 0, ndevice = 0, deviceIslands = 0, hostIslands = 0;
+    // a "run" here is a contiguous same-backend span of ops, not a control-flow subgraph
+    size_t nops = prog.size(), nreal = 0, ndevice = 0, deviceRuns = 0, hostRuns = 0;
     int prevBackend = -1;
+    int runId = -1;
+    std::vector<int> runOf(nops, -1);
 
     for (size_t i = 0; i < nops; i++) {
         const Ptr<LayerInfo>& op = prog[i];
@@ -809,20 +1189,42 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
         nreal++;
         int backend = g->execBackend_[i];
         std::string note;
-        if (backend != DNN_BACKEND_CUDA && i < g->execReason_.size())
-            note = cv::format(" (%s)", cudaPlacementReasonName(g->execReason_[i]));
+        if (backend != DNN_BACKEND_CUDA && i < g->execReason_.size()) {
+            int reason = g->execReason_[i];
+            note = cv::format(" (%s)", cudaPlacementReasonName(reason));
+            if (reason == CUDA_PLACEMENT_NO_SUPPORT) {
+                auto typeName = [this](const Arg& a) -> std::string {
+                    if (a.empty() || a.idx >= (int)args.size())
+                        return "-";
+                    int t = args.at(a.idx).type;
+                    return t >= 0 ? cv::typeToString(t) : std::string("?");
+                };
+                std::string sig;
+                for (const Arg& a : op->inputs)
+                    sig += (sig.empty() ? "" : ",") + typeName(a);
+                sig += " -> ";
+                bool firstOut = true;
+                for (const Arg& a : op->outputs) {
+                    sig += (firstOut ? "" : ",") + typeName(a);
+                    firstOut = false;
+                }
+                note += " [" + sig + "]";
+            }
+        }
         CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op #%zu '%s' (%s) -> %s%s",
                     i, op->name.c_str(), op->type.c_str(),
                     backend == DNN_BACKEND_CUDA ? "CUDA" : "CPU", note.c_str()));
         if (backend == DNN_BACKEND_CUDA)
             ndevice++;
         if (backend != prevBackend) {
+            runId++;
             if (backend == DNN_BACKEND_CUDA)
-                deviceIslands++;
+                deviceRuns++;
             else
-                hostIslands++;
+                hostRuns++;
             prevBackend = backend;
         }
+        runOf[i] = runId;
     }
 
     std::vector<int> producedBy(args.size(), -1);
@@ -851,8 +1253,84 @@ void Net::Impl::logGraphPlacement(const Ptr<Graph>& graph) const
     }
 
     CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': %zu/%zu ops on CUDA, "
-                                 "%zu device island(s), %zu host island(s), %zu boundary tensor(s)",
-                graph->name().c_str(), ndevice, nreal, deviceIslands, hostIslands, nboundary));
+                                 "%zu device run(s), %zu host run(s), %zu boundary tensor(s)",
+                graph->name().c_str(), ndevice, nreal, deviceRuns, hostRuns, nboundary));
+
+    if (ndevice == 0 || ndevice == nreal || runId < 0)
+        return;
+
+    struct PlacementGap
+    {
+        std::string type;
+        size_t count;
+        size_t sandwiched;
+        std::vector<int> runs;
+        std::vector<int> reasons;
+        PlacementGap() : count(0), sandwiched(0) {}
+    };
+
+    std::vector<PlacementGap> gaps;
+    for (size_t i = 0; i < nops; i++) {
+        if (!prog[i] || g->execBackend_[i] == DNN_BACKEND_CUDA)
+            continue;
+        PlacementGap* gap = nullptr;
+        for (PlacementGap& cand : gaps) {
+            if (cand.type == prog[i]->type) {
+                gap = &cand;
+                break;
+            }
+        }
+        if (!gap) {
+            gaps.push_back(PlacementGap());
+            gap = &gaps.back();
+            gap->type = prog[i]->type;
+        }
+        gap->count++;
+        if (std::find(gap->runs.begin(), gap->runs.end(), runOf[i]) == gap->runs.end())
+            gap->runs.push_back(runOf[i]);
+        int reason = i < g->execReason_.size() ? g->execReason_[i] : (int)CUDA_PLACEMENT_BACKEND_OFF;
+        if (std::find(gap->reasons.begin(), gap->reasons.end(), reason) == gap->reasons.end())
+            gap->reasons.push_back(reason);
+    }
+    if (gaps.empty())
+        return;
+
+    for (PlacementGap& gap : gaps) {
+        for (int sg : gap.runs)
+            if (sg > 0 && sg < runId)
+                gap.sandwiched++;
+    }
+
+    std::vector<char> hostRunSeen(runId + 1, 0);
+    for (size_t i = 0; i < nops; i++)
+        if (prog[i] && g->execBackend_[i] != DNN_BACKEND_CUDA)
+            hostRunSeen[runOf[i]] = 1;
+    size_t totalSandwiched = 0;
+    for (int sg = 1; sg < runId; sg++)
+        if (hostRunSeen[sg])
+            totalSandwiched++;
+
+    std::sort(gaps.begin(), gaps.end(), [](const PlacementGap& a, const PlacementGap& b) {
+        if (a.sandwiched != b.sandwiched)
+            return a.sandwiched > b.sandwiched;
+        if (a.runs.size() != b.runs.size())
+            return a.runs.size() > b.runs.size();
+        return a.count > b.count;
+    });
+
+    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': CUDA coverage gaps by op type, ranked by "
+                                 "run impact (%zu sandwiched host run(s), ~%zu transfer(s) per forward)",
+                graph->name().c_str(), totalSandwiched, totalSandwiched * 2));
+    for (const PlacementGap& gap : gaps) {
+        std::string reasons;
+        for (size_t k = 0; k < gap.reasons.size(); k++) {
+            if (k)
+                reasons += ",";
+            reasons += cudaPlacementReasonName(gap.reasons[k]);
+        }
+        CV_LOG_INFO(NULL, cv::format("DNN/NewEngine:   %-24s x%-4zu runs=%-3zu sandwiched=%-3zu %s",
+                    gap.type.c_str(), gap.count, gap.runs.size(), gap.sandwiched, reasons.c_str()));
+    }
 }
 
 void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement)
@@ -871,7 +1349,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         std::vector<MatShape> shapeCache;
         std::vector<MatType> typeCache;
         bool haveShapes = false;
-        if (allowDevicePlacement) {
+        if (allowDevicePlacement && cudaPlacementMemo.empty()) {
             LayerShapes probeShapes;
             try {
                 haveShapes = tryInferShapes(std::vector<MatShape>(), std::vector<MatType>(),
@@ -881,8 +1359,6 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        std::vector<MatShape> inpShapes, outShapes;
-        std::vector<MatType> inpTypes, outTypes;
         for (i = 0; i < nops; i++) {
             const Ptr<LayerInfo>& op = prog[i];
             if (!op)
@@ -891,11 +1367,23 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
                 g->execReason_[i] = CUDA_PLACEMENT_IN_SUBGRAPH_BODY;
                 continue;
             }
+            if (cudaOpDisabled(op->type) || cudaOpDisabled(op->name)) {
+                g->execReason_[i] = CUDA_PLACEMENT_BACKEND_OFF;
+                continue;
+            }
+            if (!cudaPlacementMemo.empty()) {
+                auto it = cudaPlacementMemo.find(op.get());
+                if (it == cudaPlacementMemo.end() || it->second != CUDA_PLACEMENT_OK) {
+                    g->execReason_[i] = it == cudaPlacementMemo.end() ? (int)CUDA_PLACEMENT_BACKEND_OFF
+                                                                     : it->second;
+                    continue;
+                }
+            }
             if (op->subgraphs()) {
                 g->execReason_[i] = CUDA_PLACEMENT_HAS_SUBGRAPHS;
                 continue;
             }
-            if (op->dynamicOutputShapes()) {
+            if (op->dynamicOutputShapes() && !op->canComputeDynamicOutputShapes()) {
                 g->execReason_[i] = CUDA_PLACEMENT_DYNAMIC_SHAPES;
                 continue;
             }
@@ -922,34 +1410,13 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
             Ptr<Layer> e = LayerFactory::createExec(op->type, DNN_BACKEND_CUDA, op, &cudaInfo->context);
             if (!e) {
-                g->execReason_[i] = CUDA_PLACEMENT_NO_EXEC;
+                Ptr<Layer> asLayer = op.dynamicCast<Layer>();
+                bool claimsSupport = asLayer && asLayer->supportBackend(DNN_BACKEND_CUDA);
+                g->execReason_[i] = claimsSupport ? CUDA_PLACEMENT_NO_EXEC
+                                                  : CUDA_PLACEMENT_NO_SUPPORT;
                 continue;
             }
             e->preferableTarget = preferableTarget;
-
-            if (haveShapes && useCudaPlacementProbe() &&
-                gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes)) {
-                std::vector<UMat> probeIn(inpShapes.size()), probeOut(outShapes.size());
-                for (size_t k = 0; k < inpShapes.size(); k++)
-                    probeIn[k].fit(inpShapes[k], inpTypes[k]);
-                for (size_t k = 0; k < outShapes.size(); k++)
-                    probeOut[k].fit(outShapes[k], outTypes[k]);
-                try {
-                    if (!e->probeCUDA(probeIn, probeOut, &cudaInfo->workspace)) {
-                        CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has a CUDA exec but no usable "
-                                                     "engine for this configuration",
-                                                     op->name.c_str(), op->type.c_str()));
-                        g->execReason_[i] = CUDA_PLACEMENT_NO_ENGINE;
-                        continue;
-                    }
-                    e->discardCUDANode();
-                } catch (const cv::Exception& ex) {
-                    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: op '%s' (%s) has a CUDA exec but no usable "
-                                                 "engine (%s)", op->name.c_str(), op->type.c_str(), ex.what()));
-                    g->execReason_[i] = CUDA_PLACEMENT_NO_ENGINE;
-                    continue;
-                }
-            }
 
             cudaExecs[i] = e;
             g->execReason_[i] = CUDA_PLACEMENT_OK;
@@ -963,40 +1430,6 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             for (i = 0; i < nops; i++)
                 if (prog[i] && !cudaExecs[i]) { demoteReason = CUDA_PLACEMENT_FP16_WHOLE_GRAPH; break; }
         }
-        if (demoteReason < 0 && useWholeGraphCudaGate()) {
-            for (i = 0; i < nops; i++)
-                if (prog[i] && !cudaExecs[i]) { demoteReason = CUDA_PLACEMENT_WHOLE_GRAPH_GATE; break; }
-        }
-        if (demoteReason < 0 && haveShapes) {
-            double minShare = cudaMinGpuFlopsShare();
-            if (minShare > 0.0) {
-                int64 totalFlops = 0, gpuFlops = 0;
-                size_t gpuOps = 0, totalOps = 0;
-                for (i = 0; i < nops; i++) {
-                    const Ptr<LayerInfo>& op = prog[i];
-                    if (!op)
-                        continue;
-                    totalOps++;
-                    if (cudaExecs[i])
-                        gpuOps++;
-                    if (!gatherOpShapes(op, shapeCache, typeCache, inpShapes, outShapes, inpTypes, outTypes))
-                        continue;
-                    int64 f = op->getFLOPS(inpShapes, outShapes);
-                    if (f <= 0)
-                        continue;
-                    totalFlops += f;
-                    if (cudaExecs[i])
-                        gpuFlops += f;
-                }
-                bool byFlops = totalFlops > 0;
-                double share = byFlops ? (double)gpuFlops / (double)totalFlops
-                                       : (totalOps ? (double)gpuOps / (double)totalOps : 0.0);
-                CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': GPU share %.2f (metric=%s, threshold=%.2f)",
-                            graph->name().c_str(), share, byFlops ? "flops" : "opcount", minShare));
-                if (share < minShare)
-                    demoteReason = CUDA_PLACEMENT_BELOW_THRESHOLD;
-            }
-        }
         if (demoteReason >= 0) {
             for (i = 0; i < nops; i++) {
                 if (!prog[i] || !cudaExecs[i])
@@ -1006,82 +1439,97 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        size_t window = cudaPlacementWindow(), minGpuOps = cudaMinGpuOpsPerWindow();
-        if (demoteReason < 0 && window > 0 && minGpuOps == 0) {
-            CV_LOG_WARNING(NULL, "DNN/NewEngine: OPENCV_DNN_CUDA_WINDOW is set but "
-                                 "OPENCV_DNN_CUDA_MIN_GPU_OPS is 0; window placement is disabled.");
-        }
-        if (demoteReason < 0 && window > 0 && minGpuOps > 0) {
-            std::vector<size_t> ops;
-            for (i = 0; i < nops; i++)
-                if (prog[i])
-                    ops.push_back(i);
-
-            size_t wlen = std::min(window, ops.size());
-            std::vector<uchar> accepted(ops.size(), 0);
-            for (size_t start = 0; wlen > 0 && start + wlen <= ops.size(); start++) {
-                size_t ngpu = 0;
-                for (size_t k = start; k < start + wlen; k++)
-                    if (placed[ops[k]])
-                        ngpu++;
-                if (ngpu < minGpuOps)
-                    continue;
-                for (size_t k = start; k < start + wlen; k++)
-                    if (placed[ops[k]])
-                        accepted[k] = 1;
-            }
-
-            for (size_t k = 0; k < ops.size(); k++) {
-                if (!placed[ops[k]] || accepted[k])
-                    continue;
-                placed[ops[k]] = 0;
-                g->execReason_[ops[k]] = CUDA_PLACEMENT_WINDOW_TOO_SPARSE;
-            }
+        // the compacted program -- indices of the ops that survived fusion -- is the list both the
+        // window filter and the segment pass below walk, so build it once
+        std::vector<size_t> ops;
+        bool allPlaced = true;
+        for (i = 0; i < nops; i++) {
+            if (!prog[i])
+                continue;
+            ops.push_back(i);
+            allPlaced = allPlaced && placed[i];
         }
 
-        size_t maxBubble = cudaMaxCpuBubble(), minRun = cudaMinGpuRun();
-        if (maxBubble > 0 || minRun > 1) {
-            std::vector<size_t> ops;
-            for (i = 0; i < nops; i++)
-                if (prog[i])
-                    ops.push_back(i);
+        PlacementCost pc;
+        bool costModel = demoteReason < 0 && !allPlaced && cudaPlacementMemo.empty() && haveShapes &&
+                         cudaCostModelEnabled() &&
+                         buildPlacementCost(this, prog, ops, placed, shapeCache, typeCache, pc);
 
+        if (costModel) {
+            const size_t n = ops.size();
+            const int64 barrier = cudaCostBarrierBytes();
+            size_t demotedByWindow = 0, demotedBySegment = 0;
+
+            // Tier 1: costed window, O(1) per position; liveBytes bounds the cut, so rejecting here is safe.
+            size_t wlen = std::min(std::max(isqrtRounded(n), CUDA_AUTO_WINDOW_LO), CUDA_AUTO_WINDOW_HI);
+            wlen = std::min(wlen, n);
+            if (wlen >= 2) {
+                std::vector<uchar> accepted(n, 0);
+                for (size_t start = 0; start + wlen <= n; start++) {
+                    const size_t end = start + wlen;
+                    const int64 won = pc.cumDevBenefit[end] - pc.cumDevBenefit[start];
+                    const int64 startCost = (start > 0 && !placed[ops[start - 1]]) ? pc.liveBytes[start] + barrier : 0;
+                    const int64 endCost = (end < n && !placed[ops[end]]) ? pc.liveBytes[end] + barrier : 0;
+                    if (won < startCost + endCost)
+                        continue;
+                    for (size_t k = start; k < end; k++)
+                        if (placed[ops[k]])
+                            accepted[k] = 1;
+                }
+                for (size_t k = 0; k < n; k++) {
+                    if (!placed[ops[k]] || accepted[k])
+                        continue;
+                    placed[ops[k]] = 0;
+                    g->execReason_[ops[k]] = CUDA_PLACEMENT_WINDOW_COST;
+                    demotedByWindow++;
+                }
+            }
+
+            // Tier 2: exact cut per segment; demotion merges neighbours so iterate, monotone hence settles.
             for (int pass = 0; pass < 8; pass++) {
                 bool changed = false;
-                for (size_t a = 0; a < ops.size(); ) {
-                    uchar cur = placed[ops[a]];
+                for (size_t a = 0; a < n; ) {
+                    const uchar cur = placed[ops[a]];
                     size_t b = a;
-                    while (b < ops.size() && placed[ops[b]] == cur)
+                    while (b < n && placed[ops[b]] == cur)
                         b++;
-                    size_t runLen = b - a;
-                    bool leftDev = a > 0 && placed[ops[a - 1]] != 0;
-                    bool rightDev = b < ops.size() && placed[ops[b]] != 0;
-
-                    if (cur == 0 && maxBubble > 0 && runLen <= maxBubble && leftDev && rightDev) {
-                        bool canPromote = true;
-                        for (size_t k = a; k < b; k++)
-                            if (!cudaExecs[ops[k]] ||
-                                g->execReason_[ops[k]] == CUDA_PLACEMENT_WINDOW_TOO_SPARSE)
-                            { canPromote = false; break; }
-                        if (canPromote) {
+                    if (cur) {
+                        size_t ncross = 0;
+                        const int64 cost = segmentBoundaryCost(this, prog, ops, pc, a, b, ncross) +
+                                           (int64)ncross * barrier;
+                        // every op inside a device segment is placed, so the raw prefix is exact here
+                        if (pc.cumBenefit[b] - pc.cumBenefit[a] < cost) {
                             for (size_t k = a; k < b; k++) {
-                                placed[ops[k]] = 1;
-                                g->execReason_[ops[k]] = CUDA_PLACEMENT_OK;
+                                placed[ops[k]] = 0;
+                                g->execReason_[ops[k]] = CUDA_PLACEMENT_SEGMENT_COST;
                             }
+                            demotedBySegment += b - a;
                             changed = true;
                         }
-                    }
-                    else if (cur != 0 && minRun > 1 && runLen < minRun && !leftDev && !rightDev) {
-                        for (size_t k = a; k < b; k++) {
-                            placed[ops[k]] = 0;
-                            g->execReason_[ops[k]] = CUDA_PLACEMENT_SHORT_GPU_RUN;
-                        }
-                        changed = true;
                     }
                     a = b;
                 }
                 if (!changed)
                     break;
+            }
+
+            CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': cost model, window %zu op(s), "
+                                         "barrier %s; %zu op(s) demoted by window, %zu by segment cost",
+                        graph->name().c_str(), wlen, formatBytes((size_t)barrier).c_str(),
+                        demotedByWindow, demotedBySegment));
+        }
+
+        if (allowDevicePlacement && cudaHostShapesEnabled()) {
+            std::vector<uchar> hostArg(args.size(), 0);
+            for (size_t k = 0; k < ops.size(); k++) {
+                const Ptr<LayerInfo>& op = prog[ops[k]];
+                if (!isHostShapeOp(this, op, hostArg))
+                    continue;
+                placed[ops[k]] = 0;
+                g->execReason_[ops[k]] = CUDA_PLACEMENT_HOST_SHAPE;
+                for (const Arg& out : op->outputs)
+                    if (!out.empty())
+                        hostArg[out.idx] = 1;
             }
         }
     }
@@ -1116,6 +1564,65 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
         g->exec_[i] = exec;
         g->execBackend_[i] = backend;
     }
+
+    buildTransferSchedule(graph);
+}
+
+// Walks the placed program once and records every arg that actually crosses the bus. An arg is
+// downloaded before the first host op that reads it and uploaded before the first device op that
+// reads it; anything merely live across a boundary without being read there never appears.
+void Net::Impl::buildTransferSchedule(const Ptr<Graph>& graph)
+{
+    GraphImpl* g = static_cast<GraphImpl*>(graph.get());
+    const std::vector<Ptr<LayerInfo> >& prog = g->prog_;
+    const size_t nops = prog.size(), nargs = args.size();
+    g->transfers_.clear();
+
+    std::vector<int> producerBackend(nargs, -1);   // -1: not produced in this graph
+    std::vector<uchar> onDevice(nargs, 0);         // latest copy is device-resident
+    std::vector<uchar> onHost(nargs, 0);           // latest copy is host-resident
+
+    for (size_t i = 0; i < nops; i++) {
+        const Ptr<LayerInfo>& op = prog[i];
+        if (!op)
+            continue;
+        const bool devOp = g->execBackend_[i] == DNN_BACKEND_CUDA;
+
+        for (const Arg& a : op->inputs) {
+            if (a.idx <= 0 || a.idx >= (int)nargs)
+                continue;
+            if (args[a.idx].kind == DNN_ARG_CONST)
+                continue;                          // uploaded once in finalize(), never per forward
+            if (devOp) {
+                if (!onDevice[a.idx]) {
+                    g->transfers_.push_back(GraphImpl::TransferPoint{ (int)i, a.idx, false });
+                    onDevice[a.idx] = 1;
+                }
+            } else {
+                if (!onHost[a.idx]) {
+                    // a graph input starts on the host, so it only crosses if a device op wrote it
+                    if (producerBackend[a.idx] == DNN_BACKEND_CUDA)
+                        g->transfers_.push_back(GraphImpl::TransferPoint{ (int)i, a.idx, true });
+                    onHost[a.idx] = 1;
+                }
+            }
+        }
+
+        for (const Arg& a : op->outputs) {
+            if (a.idx <= 0 || a.idx >= (int)nargs)
+                continue;
+            producerBackend[a.idx] = devOp ? DNN_BACKEND_CUDA : DNN_BACKEND_OPENCV;
+            onDevice[a.idx] = devOp ? 1 : 0;
+            onHost[a.idx] = devOp ? 0 : 1;
+        }
+    }
+
+    size_t nh2d = 0, nd2h = 0;
+    for (const GraphImpl::TransferPoint& t : g->transfers_)
+        (t.toHost ? nd2h : nh2d)++;
+    CV_LOG_INFO(NULL, cv::format("DNN/NewEngine: graph '%s': transfer schedule %zu point(s), "
+                                 "%zu H2D, %zu D2H", graph->name().c_str(),
+                g->transfers_.size(), nh2d, nd2h));
 }
 
 void Net::Impl::saveFusedSnapshot()
@@ -1199,9 +1706,17 @@ void Net::Impl::finalize()
 
     for (const Ptr<Graph>& g : allgraphs)
         finalizeGraph(g, useCUDA, g == mainGraph);
+    cudaPlacementMemo.clear();
+    if (useCUDA) {
+        for (const Ptr<Graph>& g : allgraphs) {
+            const GraphImpl* gi = static_cast<const GraphImpl*>(g.get());
+            for (size_t k = 0; k < gi->prog_.size() && k < gi->execReason_.size(); k++)
+                if (gi->prog_[k])
+                    cudaPlacementMemo[gi->prog_[k].get()] = gi->execReason_[k];
+        }
+    }
     if (blockLayoutEnabled())
         useBlockLayout();
-    assignBuffers();
     totalLayers = updateGraphOfs(mainGraph, 0, true);
 #ifdef HAVE_CUDA
     argResidency.assign(args.size(), (uchar)ARG_RESIDENCY_UNKNOWN);
@@ -1220,6 +1735,7 @@ void Net::Impl::finalize()
                     constUsedByCuda[inp.idx] = true;
             }
         }
+        // Only consts a CUDA op actually reads are worth moving to the device.
         MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
         for (size_t i = 0; i < args.size(); i++) {
             if (args[i].kind != DNN_ARG_CONST || !constUsedByCuda[i])
@@ -1232,11 +1748,15 @@ void Net::Impl::finalize()
             t.getMat(ACCESS_READ).copyTo(cudaT);
             t = cudaT;
         }
+        waitDefaultStream(this);
     }
 #endif
 
     for (const Ptr<Graph>& g : allgraphs)
         finalizeGraph(g, useCUDA, g == mainGraph);
+    cudaPlacementMemo.clear();
+
+    assignBuffers();
 
     for (const Ptr<Graph>& g : allgraphs)
         logGraphPlacement(g);
@@ -1257,7 +1777,8 @@ void Net::Impl::allocateLayerOutputs(
                           std::vector<Mat>& temps,
                           std::vector<Mat>& globalTemps,
                           bool useBufferPool,
-                          int opBackend)
+                          int opBackend,
+                          bool buildOutputMats)
 {
     // In theory, when
     // 1) useBufferPool==true,
@@ -1273,8 +1794,25 @@ void Net::Impl::allocateLayerOutputs(
     outTypes.clear();
     tempShapes.clear();
     tempTypes.clear();
-    layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
-    layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
+    // inference is a pure function of the input signature, so re-run it only when that changes
+    if (layer->inferCacheValid && layer->inferWeightEpoch == layer->weightEpoch &&
+        layer->inferInpShapes == inpShapes && layer->inferInpTypes == inpTypes) {
+        outShapes = layer->inferOutShapes;
+        outTypes = layer->inferOutTypes;
+        tempShapes = layer->inferTempShapes;
+        tempTypes = layer->inferTempTypes;
+    } else {
+        layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
+        layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
+        layer->inferInpShapes = inpShapes;
+        layer->inferInpTypes = inpTypes;
+        layer->inferOutShapes = outShapes;
+        layer->inferOutTypes = outTypes;
+        layer->inferTempShapes = tempShapes;
+        layer->inferTempTypes = tempTypes;
+        layer->inferWeightEpoch = layer->weightEpoch;
+        layer->inferCacheValid = true;
+    }
     CV_Assert(tempShapes.size() == tempTypes.size());
     CV_Assert(outShapes.size() == outTypes.size());
     CV_Assert(outShapes.size() == noutputs);
@@ -1298,15 +1836,25 @@ void Net::Impl::allocateLayerOutputs(
             if (aliasesInput) {
                 UMat migrated;
                 migrated.allocator = bufAlloc;
+#ifdef HAVE_CUDA
+                if (out_t.u->currAllocator == cv::cuda::getCudaAllocator())
+                    syncDnnStream(this);
+#endif
                 out_t.copyTo(migrated);
+#ifdef HAVE_CUDA
+                if (bufAlloc == cv::cuda::getCudaAllocator())
+                    waitDefaultStream(this);
+#endif
                 out_t = migrated;
             } else {
-                forceAllocator(out_t, bufAlloc);
+                rehomeAllocator(out_t, bufAlloc);
             }
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA) {
+                // CUDA writes the device buffer; the host Mat is only a shape/type carrier.
                 out_t.fit(outShapes[i], outTypes[i]);
-                outputs[i] = Mat(outShapes[i], outTypes[i], (void*)nullptr);
+                if (buildOutputMats)
+                    outputs[i] = Mat(outShapes[i], outTypes[i], (void*)nullptr);
             } else
 #endif
             {
@@ -1824,8 +2372,13 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
                                          idx, adata.name.c_str(), typeToString(mtype).c_str(),
                                          typeToString(adata.type).c_str()));
         }
+#ifdef HAVE_CUDA
+        if (graphOnCuda && preferableTarget == DNN_TARGET_CUDA_FP16 && adata_type == CV_32F)
+            adata_type = CV_16F;
+#endif
         UMat& inp_t = argTensor(inp);
-        forceAllocator(inp_t, bufAlloc);
+        rehomeAllocator(inp_t, bufAlloc);
+        // The op loop detects signature changes per layer; no global flag needed.
         inp_t.fit(mshape, adata_type);
 
         if (adata.type == CV_16BF && mtype == CV_16U)
@@ -1845,7 +2398,7 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
     } else if (adata.kind == DNN_ARG_TEMP) {
         int bufidx = bufidxs.at(inp.idx);
         UMat& buf = buffers.at(bufidx);
-        forceAllocator(buf, bufAlloc);
+        rehomeAllocator(buf, bufAlloc);
         buf.fit(mshape, mtype); // minimize reallocations
         m.copyTo(buf);
     } else {
@@ -1853,9 +2406,14 @@ void Net::Impl::setGraphInput(Ptr<Graph>& graph, size_t idx, const Mat& m)
                                      graph->name().data(), adata.name.c_str(),
                                      argKindToString(adata.kind).c_str()));
     }
+#ifdef HAVE_CUDA
+    if (graphOnCuda)
+        waitDefaultStream(this);
+#endif
 }
 
 #ifdef HAVE_CUDA
+// The wrapper is cached per Arg and rebuilt whenever the tensor's device buffer moves.
 Ptr<BackendWrapper> Net::Impl::getCudaArgWrapper(Arg arg, UMat& t)
 {
     int idx = arg.idx;
@@ -1873,6 +2431,35 @@ Ptr<BackendWrapper> Net::Impl::getCudaArgWrapper(Arg arg, UMat& t)
         argWrapperData[idx] = handle;
     }
     return argWrappers[idx];
+}
+
+static void syncShapeSpecInputs(Net::Impl* netimpl, const std::vector<Arg>& inputs,
+                                size_t& d2hCount, size_t& d2hBytes)
+{
+    if (!netimpl->cudaInfo)
+        return;
+    MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
+    for (size_t i = 1; i < inputs.size(); i++) {
+        if (inputs[i].empty() || netimpl->isConstArg(inputs[i]))
+            continue;
+        UMat& meta = netimpl->argTensor(inputs[i]);
+        const int metaDepth = meta.depth();
+        if (metaDepth != CV_32S && metaDepth != CV_64S)
+            continue;
+        if (meta.total() > 1024)
+            continue;
+        if (!meta.u || meta.u->currAllocator != cudaAlloc)
+            continue;
+        if (!cudaTrustResidency())
+            meta.u->markHostCopyObsolete(true);
+        Ptr<CUDABackendWrapper> cw =
+            netimpl->getCudaArgWrapper(inputs[i], meta).dynamicCast<CUDABackendWrapper>();
+        if (cw) {
+            d2hCount++;
+            d2hBytes += meta.total() * meta.elemSize();
+            cw->copyToHost();
+        }
+    }
 }
 
 static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
@@ -1907,6 +2494,8 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
         if (inputs[i].empty())
             continue;
         const UMat& t = netimpl->argTensor(inputs[i]);
+        if (t.total() == 0)
+            continue;
         if (t.u == nullptr) {
             const ArgData& adata = netimpl->args.at(inputs[i].idx);
             CV_Error_(Error::StsError,
@@ -1918,10 +2507,13 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
 
     MatAllocator* cudaAlloc = cv::cuda::getCudaAllocator();
     const bool traceTransfers = cudaTraceEnabled();
+    bool uploaded = false;
     for (size_t i = 0; i < inputs.size(); i++) {
         if (inputs[i].empty())
             continue;
         UMat& t = netimpl->argTensor(inputs[i]);
+        if (keepHostShapeInput(exec->type, i, t))
+            continue;
         int devType = (netimpl->preferableTarget == DNN_TARGET_CUDA_FP16 && t.type() == CV_32F) ? CV_16F : t.type();
         bool needConv = t.type() != devType;
 
@@ -1953,6 +2545,7 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
             h2dBytes += cudaT.total() * cudaT.elemSize();
             t = cudaT;
             migrated = true;
+            uploaded = true;
             transferTaken = needConv ? "convert+upload" : "upload";
         }
 
@@ -1976,11 +2569,18 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
                         transferTaken, formatBytes(t.total() * t.elemSize()).c_str()));
         }
     }
+    if (uploaded)
+        waitDefaultStream(netimpl);
 
     std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
-        if (inputs[i].empty() || netimpl->argTensor(inputs[i]).empty())
+        if (inputs[i].empty())
             continue;
+        if (netimpl->argTensor(inputs[i]).total() == 0 ||
+            keepHostShapeInput(exec->type, i, netimpl->argTensor(inputs[i]))) {
+            inpG[i] = netimpl->argTensor(inputs[i]);
+            continue;
+        }
         Ptr<CUDABackendWrapper> cw = netimpl->getCudaArgWrapper(inputs[i], netimpl->argTensor(inputs[i]))
                                         .dynamicCast<CUDABackendWrapper>();
         const UMat& src = netimpl->argTensor(inputs[i]);
@@ -2106,21 +2706,59 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
 
         size_t h2dCount = 0, h2dBytes = 0, d2hCount = 0, d2hBytes = 0;
 
+        // finalize() is the only CUDA-path reader of inpMats/outMats; the UMat carries everything else
+        bool needMats = opBackend != DNN_BACKEND_CUDA || !layer->finalizedOnce ||
+                        layer->packedWeightEpoch != op->weightEpoch;
+
+        bool useSchedule = false;
+#ifdef HAVE_CUDA
+        useSchedule = cudaScheduleEnabled() && !gimpl->transfers_.empty() && cudaInfo;
+        if (useSchedule) {
+            // only the args this op actually reads cross here; anything flowing past stays resident
+            auto lo = std::lower_bound(gimpl->transfers_.begin(), gimpl->transfers_.end(), (int)opidx,
+                                       [](const GraphImpl::TransferPoint& t, int v) { return t.opIdx < v; });
+            for (; lo != gimpl->transfers_.end() && lo->opIdx == (int)opidx; ++lo) {
+                if (!lo->toHost)
+                    continue;
+                UMat& t = argTensor(Arg(lo->argIdx));
+                if (!t.u || t.u->currAllocator != cv::cuda::getCudaAllocator())
+                    continue;
+                Ptr<CUDABackendWrapper> cw =
+                    getCudaArgWrapper(Arg(lo->argIdx), t).dynamicCast<CUDABackendWrapper>();
+                if (!cw)
+                    continue;
+                if (t.u->hostCopyObsolete()) {
+                    d2hCount++;
+                    d2hBytes += t.total() * t.elemSize();
+                }
+                cw->copyToHost();
+            }
+        }
+#endif
+
         for (i = 0; i < ninputs; i++) {
             Arg inp = inputs[i];
             const UMat& u = argTensor(inp);
             inpTypes[i] = u.type();
             inpShapes[i] = u.shape();
 #ifdef HAVE_CUDA
-            if (opBackend == DNN_BACKEND_CUDA || !layer->needsHostData((int)i)) {
-                inpMats[i].release();
-                inpMats[i].fit(u.shape(), u.type());
+            if (opBackend == DNN_BACKEND_CUDA) {
+                if (needMats)
+                    inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
+                else
+                    inpMats[i] = Mat();  // drop the previous op's entry rather than hold it
+            } else if (!layer->needsHostData((int)i)) {
+                // shape/type carrier only, like the output side: never allocate what nothing reads
+                inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
+            } else if (useSchedule) {
+                // the schedule already brought this down; nothing to check per input
+                inpMats[i] = u.getMat(ACCESS_READ);
             } else {
                 const bool deviceIsNewer = inp.idx < (int)argResidency.size() &&
                                            argResidency[inp.idx] == ARG_RESIDENCY_DEVICE;
-                // residency bookkeeping is not a reliable gate; a device-resident tensor a host op
-                // is about to read must always be pulled back
-                if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
+                // forced unless OPENCV_DNN_CUDA_TRUST_RESIDENCY=1; setDeviceDirty() already marks
+                // CUDA op outputs host-obsolete, so the flag should suffice on its own
+                if (!cudaTrustResidency() && u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
                     u.u->markHostCopyObsolete(true);
                 // a cached wrapper can still be bound to a freed allocation, so revalidate it here
                 if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator() && cudaInfo) {
@@ -2134,7 +2772,15 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                         cw->copyToHost();
                     }
                 }
-                inpMats[i] = u.getMat(ACCESS_READ);
+                if (u.u && u.u->currAllocator == cv::cuda::getCudaAllocator()) {
+                    Mat hostCopy;
+                    u.copyTo(hostCopy);
+                    hostCopy.size.layout = u.size.layout;
+                    hostCopy.size.C = u.size.C;
+                    inpMats[i] = hostCopy;
+                } else {
+                    inpMats[i] = u.getMat(ACCESS_READ);
+                }
                 if (deviceIsNewer && inp.idx < (int)argResidency.size())
                     argResidency[inp.idx] = (uchar)ARG_RESIDENCY_UNKNOWN;
             }
@@ -2151,10 +2797,68 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 traceArg(strm_, "Input", i, inp, false);
             }
         }
+        // a changed input signature also makes finalize() run, so the carriers are needed after all
+        if (!needMats && (layer->lastInpShapes != inpShapes || layer->lastInpTypes != inpTypes)) {
+            needMats = true;
+            for (i = 0; i < ninputs; i++)
+                inpMats[i] = Mat(inpShapes[i], inpTypes[i], (void*)nullptr);
+        }
+
         bool dynamicOutShapes = op->dynamicOutputShapes();
+#ifdef HAVE_CUDA
+        if (opBackend == DNN_BACKEND_CUDA)
+            syncShapeSpecInputs(this, inputs, d2hCount, d2hBytes);
+#endif
         if (!dynamicOutShapes) {
             allocateLayerOutputs(op, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
-                                 tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend);
+                                 tempTypes, tempShapes, tempMats, scratchBufs, true, opBackend, needMats);
+        } else if (opBackend == DNN_BACKEND_CUDA) {
+            std::vector<UMat> inpUMats(ninputs);
+            for (i = 0; i < ninputs; i++)
+                inpUMats[i] = argTensor(inputs[i]);
+            std::vector<MatShape> dynOutShapes;
+#ifdef HAVE_CUDA
+            bool shapeInputOnDevice = false;
+            for (i = 0; i < ninputs && !shapeInputOnDevice; i++) {
+                const UMat& u = inpUMats[i];
+                shapeInputOnDevice = !inputs[i].empty() && !isConstArg(inputs[i]) && u.u &&
+                                     u.u->currAllocator == cv::cuda::getCudaAllocator() && u.total() <= 1024;
+            }
+            if (shapeInputOnDevice || !cudaHostShapesEnabled())
+                syncDnnStream(this);
+#endif
+            op->getMemoryShapesForDynamicOutput(inpUMats, (int)noutputs, dynOutShapes);
+            CV_Assert(dynOutShapes.size() == noutputs);
+            outMats.resize(noutputs);
+            for (i = 0; i < noutputs; i++) {
+                Arg out = outputs[i];
+                UMat& out_t = argTensor(out);
+                int outType = args.at(out.idx).type;
+                if (outType < 0)
+                    outType = inpUMats[0].type();
+                MatAllocator* bufAlloc = tensorAllocator();
+                bool aliasesInput = false;
+                if (out_t.u && out_t.u->currAllocator != bufAlloc && !out_t.empty()) {
+                    for (const Arg& in : inputs) {
+                        if (!in.empty() && &argTensor(in) == &out_t) { aliasesInput = true; break; }
+                    }
+                }
+                if (aliasesInput) {
+                    UMat migrated;
+                    migrated.allocator = bufAlloc;
+                    out_t.copyTo(migrated);
+#ifdef HAVE_CUDA
+                    if (bufAlloc == cv::cuda::getCudaAllocator())
+                        waitDefaultStream(this);
+#endif
+                    out_t = migrated;
+                } else {
+                    rehomeAllocator(out_t, bufAlloc);
+                }
+                out_t.fit(dynOutShapes[i], outType);
+                outMats[i] = Mat(dynOutShapes[i], outType, (void*)nullptr);
+            }
+            tempMats = scratchBufs;
         } else {
             outMats.resize(noutputs);
             for (i = 0; i < noutputs; i++) {
@@ -2187,6 +2891,16 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 bool cudaFailed = false;
                 try {
                     forwardOpCUDA(this, gimpl, opidx, inputs, outputs, h2dCount, h2dBytes);
+                    std::vector<MatShape> finalShapes;
+                    if (dynamicOutShapes && op->getDynamicOutputShapesAfterForward(finalShapes)) {
+                        CV_Assert(finalShapes.size() == noutputs);
+                        for (size_t k = 0; k < noutputs; k++) {
+                            UMat& t = argTensor(outputs[k]);
+                            t.fit(finalShapes[k], t.type());
+                            if (outputs[k].idx < (int)argWrapperData.size())
+                                argWrapperData[outputs[k].idx] = nullptr;
+                        }
+                    }
                 } catch (const cv::Exception& e) {
                     // these CUDA errors are sticky: the context is dead, so a CPU retry only defers the crash
                     cudaError_t cudaStatus = cudaPeekAtLastError();
@@ -2396,18 +3110,23 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         for (i = 0; i < noutputs; i++) {
             Arg out = outputs[i];
             ArgData& adata = args[out.idx];
-            const Mat& m = outMats[i];
-            //checkRange(m, false);
-            adata.type = m.type();
-            adata.shape = m.shape();
 #ifdef HAVE_CUDA
             // record the last writer before the early-out, so GPU-written args are covered too
             if (out.idx < (int)argResidency.size())
                 argResidency[out.idx] = (opBackend == DNN_BACKEND_CUDA) ? (uchar)ARG_RESIDENCY_DEVICE
                                                                         : (uchar)ARG_RESIDENCY_HOST;
-            if (opBackend == DNN_BACKEND_CUDA)
+            if (opBackend == DNN_BACKEND_CUDA) {
+                // the UMat is the device buffer and was just fit() to this shape/type; the Mat is scaffolding
+                const UMat& ut = argTensor(out);
+                adata.type = ut.type();
+                adata.shape = ut.shape();
                 continue;
+            }
 #endif
+            const Mat& m = outMats[i];
+            //checkRange(m, false);
+            adata.type = m.type();
+            adata.shape = m.shape();
             if (adata.kind == DNN_ARG_TEMP) {
                 int bufidx = bufidxs.at(out.idx);
                 UMat& buf = buffers.at(bufidx);
@@ -2421,7 +3140,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                                 (!m.u || m.u->data == outOrigData[i].first),
                                 (!m.u || m.u->size == outOrigData[i].second));
                 } else {
-                    forceAllocator(buf, Mat::getDefaultAllocator());
+                    rehomeAllocator(buf, Mat::getDefaultAllocator());
                     buf.fit(m.shape(), m.type());
                     m.copyTo(buf);
                 }
@@ -2429,7 +3148,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 UMat& cur = __tensors__.at(out.idx);
                 if (cur.u != m.u || cur.shape() != m.shape() || cur.type() != m.type()) {
                     UMat freshT;
-                    forceAllocator(freshT, Mat::getDefaultAllocator());
+                    rehomeAllocator(freshT, Mat::getDefaultAllocator());
                     freshT.fit(m.shape(), m.type());
                     m.copyTo(freshT);
                     cur = freshT;
@@ -2498,6 +3217,9 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                                    !isFloatDepth(outm.depth());
             if (outm.size.layout == DATA_LAYOUT_BLOCK) {
                 transformLayout(outm.getMat(ACCESS_READ), outputsVec[i], originalLayout, originalLayout, outm.size.C);
+            } else if (outm.depth() == CV_16F || outm.depth() == CV_16BF) {
+                outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_32F, outm.channels()));
+                outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_32F);
             } else if (widenToDeclared) {
                 outputsVec[i].fit(outm.shape(), CV_MAKETYPE(CV_MAT_DEPTH(declaredType), outm.channels()));
                 outm.getMat(ACCESS_READ).convertTo(outputsVec[i], CV_MAT_DEPTH(declaredType));
