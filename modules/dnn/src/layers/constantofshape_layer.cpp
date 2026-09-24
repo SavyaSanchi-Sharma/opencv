@@ -66,7 +66,7 @@ public:
     {
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA)
-            return blobs.size() == 1 && blobs[0].total() == 1 && !dynamicOutputShapes();
+            return blobs.size() == 1 && blobs[0].total() == 1;
 #endif
         return backendId == DNN_BACKEND_OPENCV;
     }
@@ -96,6 +96,18 @@ public:
         CV_Assert(netimpl_);
         CV_Assert(this->inputs.size() == 1);
         return !netimpl_->isConstArg(this->inputs[0]);
+    }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        CV_Assert(inputs.size() == 1);
+        Mat shapeTensor;
+        inputs[0].copyTo(shapeTensor);
+        outputs.assign(1, tensorToShape(shapeTensor));
     }
 
     bool getMemoryShapes(const std::vector<MatShape>&,

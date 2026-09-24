@@ -6,8 +6,14 @@
 #include <opencv2/dnn/shape_utils.hpp>
 #include "../precomp.hpp"
 #include "../ie_ngraph.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "layers_common.hpp"
 #include "cpu_kernels/fast_gemm.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/einsum.hpp"
+#endif
 
 namespace cv
 {
@@ -462,9 +468,114 @@ public:
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || this->inputs.size() != 2)
+                return false;
+            for (const Arg& a : this->inputs)
+                if (CV_MAT_DEPTH(netimpl_->argType(a)) != CV_32F)
+                    return false;
+            cuda4dnn::EinsumMatMulPlan plan;
+            const int rankA = netimpl_->argData(this->inputs[0]).shape.dims;
+            const int rankB = netimpl_->argData(this->inputs[1]).shape.dims;
+            return buildMatMulPlan(plan, rankA, rankB);
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    bool buildMatMulPlan(cuda4dnn::EinsumMatMulPlan& plan, int rankA, int rankB) const
+    {
+        if (!explicitEquation || lhs_eq_tokens.size() != 2)
+            return false;
+        std::string ta = lhs_eq_tokens[0], tb = lhs_eq_tokens[1], to = rhs_eq;
+        const bool ellA = ta.rfind("...", 0) == 0, ellB = tb.rfind("...", 0) == 0, ellO = to.rfind("...", 0) == 0;
+        if (ellA != ellB || ellA != ellO)
+            return false;
+        if (ellA) {
+            ta = ta.substr(3);
+            tb = tb.substr(3);
+            to = to.substr(3);
+            if (rankA > 0 && rankB > 0) {
+                const int ea = rankA - (int)ta.size(), eb = rankB - (int)tb.size();
+                if (ea < 0 || ea != eb)
+                    return false;
+                std::string prefix;
+                const std::string used = ta + tb + to;
+                for (char c = 'A'; (int)prefix.size() < ea && c <= 'Z'; c++)
+                    if (used.find(c) == std::string::npos)
+                        prefix += c;
+                if ((int)prefix.size() != ea)
+                    return false;
+                ta = prefix + ta;
+                tb = prefix + tb;
+                to = prefix + to;
+            }
+        }
+        auto validToken = [](const std::string& t) {
+            for (size_t i = 0; i < t.size(); i++) {
+                if (!std::isalpha((unsigned char)t[i]) || t.find(t[i], i + 1) != std::string::npos)
+                    return false;
+            }
+            return !t.empty();
+        };
+        if (!validToken(ta) || !validToken(tb) || !validToken(to))
+            return false;
+
+        std::string batch, m, k, n;
+        for (char c : ta) {
+            const bool inB = tb.find(c) != std::string::npos, inOut = to.find(c) != std::string::npos;
+            if (inB && inOut)
+                batch += c;
+            else if (inOut)
+                m += c;
+            else if (inB)
+                k += c;
+            else
+                return false;
+        }
+        for (char c : tb) {
+            const bool inA = ta.find(c) != std::string::npos, inOut = to.find(c) != std::string::npos;
+            if (inA)
+                continue;
+            if (!inOut)
+                return false;
+            n += c;
+        }
+        for (char c : to)
+            if (ta.find(c) == std::string::npos && tb.find(c) == std::string::npos)
+                return false;
+
+        const std::string labelsA = batch + m + k, labelsB = batch + k + n, labelsC = batch + m + n;
+        plan.permA.clear();
+        plan.permB.clear();
+        plan.permOut.clear();
+        for (char c : labelsA)
+            plan.permA.push_back(ta.find(c));
+        for (char c : labelsB)
+            plan.permB.push_back(tb.find(c));
+        for (char c : to)
+            plan.permOut.push_back(labelsC.find(c));
+        plan.numBatch = (int)batch.size();
+        plan.numM = (int)m.size();
+        plan.numK = (int)k.size();
+        plan.numN = (int)n.size();
+        return labelsA.size() <= CSL_MAX_TENSOR_RANK && labelsB.size() <= CSL_MAX_TENSOR_RANK &&
+               labelsC.size() <= CSL_MAX_TENSOR_RANK;
+    }
+
+    Ptr<BackendNode> initCUDA(void* context_, InputArrayOfArrays inputs_arr, InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        cuda4dnn::EinsumMatMulPlan plan;
+        CV_Assert(buildMatMulPlan(plan, inputs_arr.dims(0), inputs_arr.dims(1)));
+        return make_cuda_node<cuda4dnn::EinsumMatMulOp>(preferableTarget, std::move(context->stream),
+                                                        std::move(context->cublas_handle), std::move(plan));
+    }
+#endif
 
     virtual void getTypes(const std::vector<MatType>& inputs,
                           const int requiredOutputs,

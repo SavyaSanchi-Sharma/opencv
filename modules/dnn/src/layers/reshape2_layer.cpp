@@ -215,7 +215,8 @@ public:
         {
             CV_Assert(this->inputs.size() == 2);
             Net::Impl* netimpl_ = getNetImpl(this);
-            Mat shapeTensor = netimpl_->argTensor(this->inputs[1]).getMat(ACCESS_READ);
+            Mat shapeTensor;
+            netimpl_->argTensor(this->inputs[1]).copyTo(shapeTensor);
             shapeSpec = tensorToShape(shapeTensor);
         } else {
             CV_Assert(shapeSpec.dims >= 0);

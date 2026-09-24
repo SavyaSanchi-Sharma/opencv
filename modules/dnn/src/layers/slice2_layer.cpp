@@ -63,15 +63,15 @@ public:
     {
         #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA){
-            if (dynamicOutputShapes())
-              return false;               // starts/ends/steps must be resolvable once, at init
             if (inputs.size() <= 4)
                 return true;                // no steps input -> implicit step=1 everywhere
             Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_->isConstArg(inputs[4]))
+                return true;
             Mat stepsTensor = netimpl_->argTensor(inputs[4]).getMat(ACCESS_READ);
             std::vector<int> steps_;
             tensorToIntVec(stepsTensor, steps_);
-            for (int s : steps_) if (s <= 0) return false;   // negative strides not yet supported by the CUDA kernel
+            for (int s : steps_) if (s == 0) return false;
             return true;
         }
         #endif
@@ -84,6 +84,26 @@ public:
         std::vector<UMat> ins;
         inputs_.getUMatVector(ins);
         MatShape inpShape = cv::dnn::shape(ins[0]);
+
+        if (dynamicOutputShapes()) {
+            cuda4dnn::SliceOffsetResolver resolver =
+                [this](const std::vector<UMat>& args, std::vector<std::size_t>& offsets_i, std::vector<std::size_t>& steps_i) {
+                    int allStarts[MatShape::MAX_DIMS], allEnds[MatShape::MAX_DIMS], allSteps[MatShape::MAX_DIMS];
+                    getRuntimeOutShape(args, allStarts, allEnds, allSteps);
+                    const int ndims = cv::dnn::shape(args[0]).dims;
+                    offsets_i.resize(ndims);
+                    steps_i.resize(ndims);
+                    for (int i = 0; i < ndims; i++) {
+                        CV_CheckNE(allSteps[i], 0, "Slice2 step must not be zero");
+                        offsets_i[i] = (std::size_t)allStarts[i];
+                        steps_i[i] = (std::size_t)allSteps[i];
+                    }
+                };
+            if (ins[0].type() == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::SliceOp>(std::move(context->stream), resolver);
+            return make_cuda_node_with_type<cuda4dnn::SliceOp>(preferableTarget, ins[0].type(), std::move(context->stream),
+                                                               resolver);
+        }
 
         std::vector<int> tempStarts, tempEnds, tempAxes, tempSteps;
         const std::vector<int> *starts_ = &starts, *ends_ = &ends, *axes_ = &axes, *steps_ = &tempSteps;
@@ -259,6 +279,44 @@ public:
         outputs.assign(1, outShape);
         internals.clear();
         return true;
+    }
+
+    MatShape getRuntimeOutShape(const std::vector<UMat>& args, int* allStarts = nullptr, int* allEnds = nullptr,
+                                int* allSteps = nullptr) const
+    {
+        checkNumInputs(args.size());
+        std::vector<int> tempStarts, tempEnds, tempAxes, tempSteps;
+        const std::vector<int> *starts_ = &starts, *ends_ = &ends, *axes_ = &axes;
+        if (args.size() > 1) {
+            Mat startsTensor, endsTensor;
+            args[1].copyTo(startsTensor);
+            tensorToIntVec(startsTensor, tempStarts);
+            starts_ = &tempStarts;
+            args[2].copyTo(endsTensor);
+            tensorToIntVec(endsTensor, tempEnds);
+            ends_ = &tempEnds;
+            if (args.size() > 3) {
+                Mat axesTensor;
+                args[3].copyTo(axesTensor);
+                tensorToIntVec(axesTensor, tempAxes);
+                axes_ = &tempAxes;
+            }
+            if (args.size() > 4) {
+                Mat stepsTensor;
+                args[4].copyTo(stepsTensor);
+                tensorToIntVec(stepsTensor, tempSteps);
+            }
+        }
+        return getOutShape(cv::dnn::shape(args[0]), *starts_, *ends_, *axes_, tempSteps, allStarts, allEnds, allSteps);
+    }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& args, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        outputs.assign(1, getRuntimeOutShape(args));
     }
 
     void getTypes(const std::vector<MatType>& inputs,

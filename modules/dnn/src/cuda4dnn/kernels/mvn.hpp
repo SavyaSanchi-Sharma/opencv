@@ -36,6 +36,10 @@ template <class T>
 void normalize_mean_variance_layernorm(const csl::Stream &stream, csl::Span<T> output, csl::View<T> input, csl::View<T> scale, csl::View<T> bias, csl::View<float> means, csl::View<float> inv_stddev, std::size_t inner_size);
 
 template <class T>
+void layernorm_fused(const csl::Stream& stream, csl::Span<T> output, csl::View<T> input, csl::View<T> scale, csl::View<T> bias,
+                     std::size_t inner_size, float eps);
+
+template <class T>
 void normalize_mean_variance_groupwise(const csl::Stream &stream, csl::Span<T> output, csl::View<T> input, csl::View<T> scale, csl::View<T> bias, csl::View<float> means, csl::View<float> inv_stddev, std::size_t inner_size, std::size_t C, std::size_t num_groups, std::size_t group_size);
 
 

@@ -17,13 +17,17 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
     enum class InterpolationType {
         NEAREST_NEIGHBOUR,
-        BILINEAR
+        BILINEAR,
+        CUBIC
     };
 
     struct ResizeConfiguration {
         InterpolationType type;
         bool align_corners;
         bool half_pixel_centers;
+        kernels::ResizeCoordMode coord_mode{};
+        float cubic_a{};
+        bool exclude_outside{};
     };
 
     template <class T>
@@ -37,6 +41,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             type = config.type;
             align_corners = config.align_corners;
             half_pixel_centers = config.half_pixel_centers;
+            coord_mode = config.coord_mode;
+            cubic_a = config.cubic_a;
+            exclude_outside = config.exclude_outside;
         }
 
         void forward(
@@ -66,8 +73,12 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (type == InterpolationType::NEAREST_NEIGHBOUR)
                 kernels::resize_nn<T>(stream, output, input, scale_height, scale_width, align_corners, half_pixel_centers);
-            else if (type == InterpolationType::BILINEAR)
+            else if (type == InterpolationType::BILINEAR) {
+                CV_Assert(coord_mode != kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL || (out_height > 1 && out_width > 1));
                 kernels::resize_bilinear<T>(stream, output, input, scale_height, scale_width, half_pixel_centers);
+            }
+            else if (type == InterpolationType::CUBIC)
+                kernels::resize_cubic<T>(stream, output, input, scale_height, scale_width, coord_mode, cubic_a, exclude_outside);
         }
 
         void forward(
@@ -94,14 +105,21 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (type == InterpolationType::NEAREST_NEIGHBOUR)
                 kernels::resize_nn<T>(stream, output, input, scale_height, scale_width, align_corners, half_pixel_centers);
-            else if (type == InterpolationType::BILINEAR)
+            else if (type == InterpolationType::BILINEAR) {
+                CV_Assert(coord_mode != kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL || (out_height > 1 && out_width > 1));
                 kernels::resize_bilinear<T>(stream, output, input, scale_height, scale_width, half_pixel_centers);
+            }
+            else if (type == InterpolationType::CUBIC)
+                kernels::resize_cubic<T>(stream, output, input, scale_height, scale_width, coord_mode, cubic_a, exclude_outside);
         }
 
     private:
         csl::Stream stream;
         InterpolationType type;
         bool align_corners, half_pixel_centers;
+        kernels::ResizeCoordMode coord_mode;
+        float cubic_a;
+        bool exclude_outside;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

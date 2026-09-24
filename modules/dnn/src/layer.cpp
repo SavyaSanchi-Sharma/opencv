@@ -368,6 +368,12 @@ void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
              format("layer '%s' (%s) does not implement getMemoryShapesForDynamicOutput()", name.c_str(), type.c_str()));
 }
 
+bool LayerInfo::getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const
+{
+    CV_UNUSED(outputs);
+    return false;
+}
+
 bool LayerInfo::isDataShuffling() const
 {
     return false;

@@ -87,21 +87,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernels::fill<T>(stream, output, 0.f);
                 return;
             } else {
-                auto ws_allocator = csl::WorkspaceAllocator(workspace);
-
-                auto mean = ws_allocator.get_span<float>(loops);
-                kernels::fill<float>(stream, mean, 0.f);
-
-                auto inv_stddev = ws_allocator.get_span<float>(loops);
-                kernels::fill<float>(stream, inv_stddev, 0.f);
-
-                kernels::reduce_mean_sqr_sum<T>(stream, mean, inv_stddev, input, norm_size);
-                kernels::compute_normalization_scale(stream, inv_stddev, mean, inv_stddev, norm_size, epsilon);
-                if (!bias.empty()) {
-                    kernels::normalize_mean_variance_layernorm<T>(stream, output, input, scale, bias, mean, inv_stddev, norm_size);
-                } else {
-                    kernels::normalize_mean_variance_layernorm<T>(stream, output, input, scale, mean, inv_stddev, norm_size);
-                }
+                CV_UNUSED(workspace);
+                CV_UNUSED(loops);
+                kernels::layernorm_fused<T>(stream, output, input, scale, bias, norm_size, epsilon);
             }
         }
 
@@ -134,21 +122,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernels::fill<T>(stream, output, 0.f);
                 return;
             } else {
-                auto ws_allocator = csl::WorkspaceAllocator(workspace);
-
-                auto mean = ws_allocator.get_span<float>(loops);
-                kernels::fill<float>(stream, mean, 0.f);
-
-                auto inv_stddev = ws_allocator.get_span<float>(loops);
-                kernels::fill<float>(stream, inv_stddev, 0.f);
-
-                kernels::reduce_mean_sqr_sum<T>(stream, mean, inv_stddev, input, norm_size);
-                kernels::compute_normalization_scale(stream, inv_stddev, mean, inv_stddev, norm_size, epsilon);
-                if (!bias.empty()) {
-                    kernels::normalize_mean_variance_layernorm<T>(stream, output, input, scale, bias, mean, inv_stddev, norm_size);
-                } else {
-                    kernels::normalize_mean_variance_layernorm<T>(stream, output, input, scale, mean, inv_stddev, norm_size);
-                }
+                CV_UNUSED(workspace);
+                CV_UNUSED(loops);
+                kernels::layernorm_fused<T>(stream, output, input, scale, bias, norm_size, epsilon);
             }
         }
 

@@ -6,10 +6,17 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <cstdint>
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/nms.hpp"
+#endif
 
 namespace cv {
 namespace dnn {
@@ -31,10 +38,58 @@ public:
     }
 
     bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            return netimpl_ && preferableTarget != DNN_TARGET_CUDA_FP16 && this->inputs.size() >= 2 &&
+                   CV_MAT_DEPTH(netimpl_->argType(this->inputs[0])) == CV_32F &&
+                   CV_MAT_DEPTH(netimpl_->argType(this->inputs[1])) == CV_32F;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& args, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        CV_Assert(args.size() >= 2);
+        const MatShape boxes = args[0].shape(), scores = args[1].shape();
+        CV_Assert(boxes.dims == 3 && boxes[2] == 4 && scores.dims == 3);
+        int maxOut = defaultMaxOut;
+        if (args.size() >= 3 && !args[2].empty()) {
+            Mat m, m64;
+            args[2].copyTo(m);
+            CV_Assert(m.total() == 1);
+            m.convertTo(m64, CV_64F);
+            maxOut = static_cast<int>(m64.ptr<double>()[0]);
+        }
+        const int numBoxes = boxes[1];
+        const int cap = maxOut > 0 ? std::min(maxOut, numBoxes) : numBoxes;
+        outputs.assign(1, MatShape({boxes[0] * scores[1] * cap, 3}));
+    }
+
+    bool getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        if (!cudaSelected || *cudaSelected < 0)
+            return false;
+        outputs.assign(1, MatShape({*cudaSelected, 3}));
+        return true;
+    }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_, InputArrayOfArrays, InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return Ptr<BackendNode>(new cuda4dnn::NonMaxSuppressionOp(std::move(context->stream), centerPointBox != 0,
+                                                                  defaultMaxOut, defaultIouThr, defaultScoreThr,
+                                                                  cudaSelected));
+    }
+#endif
 
     bool getMemoryShapes(const std::vector<MatShape>& inputs, const int, std::vector<MatShape>& outputs, std::vector<MatShape>&) const CV_OVERRIDE {
         CV_Assert(inputs.size() >= 2);
@@ -222,6 +277,7 @@ private:
     int   defaultMaxOut = 0;
     float defaultIouThr = 0.f;
     float defaultScoreThr = 0.f;
+    std::shared_ptr<int> cudaSelected = std::make_shared<int>(-1);
 };
 
 Ptr<NonMaxSuppressionLayer> NonMaxSuppressionLayer::create(const LayerParams& params) {

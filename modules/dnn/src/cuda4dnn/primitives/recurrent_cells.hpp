@@ -79,7 +79,7 @@ public:
                  const std::vector<UMat>& outputs,
                  csl::Workspace& workspace) override
     {
-        CV_Assert(inputs.size() == 1 && !outputs.empty());
+        CV_Assert(!inputs.empty() && !outputs.empty());
 
         auto input = csl::viewOf<T>(inputs[0]);
         auto y_output = csl::spanOf<T>(outputs[0]);

@@ -9,6 +9,7 @@
 #include "../csl/stream.hpp"
 #include "../csl/span.hpp"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
@@ -28,6 +29,15 @@ template <class T>
 void topk(const csl::Stream& stream,
     csl::Span<T> values, csl::Span<std::int64_t> indices, csl::View<T> input,
     int outer, int dim_axis, int inner, int k, bool largest);
+
+template <class T>
+std::size_t topk_sort_workspace(const csl::Stream& stream, int outer, int dim_axis, bool largest);
+
+template <class T>
+void topk_sort(const csl::Stream& stream,
+    csl::Span<T> values, csl::Span<std::int64_t> indices, csl::View<T> input,
+    int outer, int dim_axis, int k, bool largest,
+    void* workspace, std::size_t workspace_bytes);
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 

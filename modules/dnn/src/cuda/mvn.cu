@@ -300,4 +300,71 @@ template void normalize_mean_variance_layernorm(const Stream&, Span<__half> /*ou
 #endif
 template void normalize_mean_variance_layernorm(const Stream&, Span<float> /*output*/, View<float> /*input*/, View<float> /*scale*/, View<float> /*bias*/, View<float> /*means*/, View<float> /*inv_stddev*/, std::size_t);
 
+namespace raw {
+    template <class T>
+    __global__ void layernorm_fused(Span<T> output, View<T> input, View<T> scale, View<T> bias, bool has_bias,
+                                    size_type inner_size, float eps)
+    {
+        __shared__ float s_sum[REDUCE_THREADS];
+        __shared__ float s_sqr[REDUCE_THREADS];
+        __shared__ float s_mean, s_inv;
+        const size_type rows = output.size() / inner_size;
+        for (size_type row = blockIdx.x; row < rows; row += gridDim.x) {
+            const index_type base = row * inner_size;
+            float sum = 0, sqr = 0;
+            for (size_type j = threadIdx.x; j < inner_size; j += REDUCE_THREADS) {
+                const float x = static_cast<float>(input[base + j]);
+                sum += x;
+                sqr += x * x;
+            }
+            s_sum[threadIdx.x] = sum;
+            s_sqr[threadIdx.x] = sqr;
+            __syncthreads();
+            for (int stride = REDUCE_THREADS / 2; stride > 0; stride /= 2) {
+                if (threadIdx.x < stride) {
+                    s_sum[threadIdx.x] += s_sum[threadIdx.x + stride];
+                    s_sqr[threadIdx.x] += s_sqr[threadIdx.x + stride];
+                }
+                __syncthreads();
+            }
+            if (threadIdx.x == 0) {
+                const float mean = s_sum[0] / inner_size;
+                const float var = fmaxf(s_sqr[0] / inner_size - mean * mean, 0.f);
+                using device::rsqrt;
+                s_mean = mean;
+                s_inv = rsqrt(eps + var);
+            }
+            __syncthreads();
+            const float mean = s_mean, inv = s_inv;
+            for (size_type j = threadIdx.x; j < inner_size; j += REDUCE_THREADS) {
+                const float s = static_cast<float>(scale[j]) * inv;
+                float y = (static_cast<float>(input[base + j]) - mean) * s;
+                if (has_bias)
+                    y += static_cast<float>(bias[j]);
+                output[base + j] = static_cast<T>(y);
+            }
+            __syncthreads();
+        }
+    }
+}
+
+template <class T>
+void layernorm_fused(const Stream& stream, Span<T> output, View<T> input, View<T> scale, View<T> bias,
+                     std::size_t inner_size, float eps)
+{
+    CV_Assert(inner_size > 0 && input.size() == output.size() && output.size() % inner_size == 0);
+    const std::size_t rows = output.size() / inner_size;
+    if (rows == 0)
+        return;
+    auto kernel = raw::layernorm_fused<T>;
+    auto grid = static_cast<unsigned>(std::min<std::size_t>(rows, std::numeric_limits<int>::max()));
+    auto policy = execution_policy(grid, raw::REDUCE_THREADS, stream);
+    launch_kernel(kernel, policy, output, input, scale, bias, bias.size() != 0, inner_size, eps);
+}
+
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)
+template void layernorm_fused(const Stream&, Span<__half>, View<__half>, View<__half>, View<__half>, std::size_t, float);
+#endif
+template void layernorm_fused(const Stream&, Span<float>, View<float>, View<float>, View<float>, std::size_t, float);
+
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */

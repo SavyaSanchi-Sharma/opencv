@@ -8,6 +8,11 @@
 #include "layers_common.hpp"
 #include "cpu_kernels/fast_gemm.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/recurrent_cells.hpp"
+#endif
 
 namespace cv
 {
@@ -95,6 +100,7 @@ class LSTM2LayerImpl CV_FINAL : public LSTM2Layer
     ActivationFunction f_activation;
     ActivationFunction g_activation;
     ActivationFunction h_activation;
+    bool defaultActivations;
 
     bool useAVX, useAVX2, useSVE, useNEON;
     bool constWeights;              // W/R/B are graph constants -> transform them once
@@ -130,11 +136,15 @@ class LSTM2LayerImpl CV_FINAL : public LSTM2Layer
                 f_activation = sigmoid;
                 g_activation = tanh;
                 h_activation = tanh;
+                defaultActivations = true;
             } else {
                 CV_Assert(activations.size() == 3);
                 f_activation = get_activation_function(activations.getStringValue(0));
                 g_activation = get_activation_function(activations.getStringValue(1));
                 h_activation = get_activation_function(activations.getStringValue(2));
+                defaultActivations = toLowerCase(activations.getStringValue(0)) == "sigmoid" &&
+                                     toLowerCase(activations.getStringValue(1)) == "tanh" &&
+                                     toLowerCase(activations.getStringValue(2)) == "tanh";
             }
 
             constWeights = params.get<bool>("const_weights", false);
@@ -147,6 +157,108 @@ class LSTM2LayerImpl CV_FINAL : public LSTM2Layer
 
             outTailShape.clear();
         }
+
+        bool supportBackend(int backendId) CV_OVERRIDE
+        {
+#ifdef HAVE_CUDA
+            if (backendId == DNN_BACKEND_CUDA) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_ || this->inputs.size() < 3 || !defaultActivations || usePeephole || useCellClip ||
+                    forgetBias != 0.f || layout != SEQ_BATCH_HID || reverse || !useTimestampDim)
+                    return false;
+                auto present = [&](size_t i) { return i < this->inputs.size() && !this->inputs[i].empty(); };
+                if (present(4) || present(7))
+                    return false;
+                for (size_t i = 1; i < this->inputs.size(); i++)
+                    if (present(i) && !netimpl_->isConstArg(this->inputs[i]))
+                        return false;
+                if (CV_MAT_DEPTH(netimpl_->argType(this->inputs[0])) != CV_32F)
+                    return false;
+                std::vector<int> usecounts;
+                netimpl_->useCounts(usecounts);
+                for (size_t k = 1; k < this->outputs.size(); k++) {
+                    const Arg& o = this->outputs[k];
+                    if (o.empty())
+                        continue;
+                    if ((o.idx < (int)usecounts.size() && usecounts[o.idx] > 0) ||
+                        netimpl_->args.at(o.idx).kind == DNN_ARG_OUTPUT)
+                        return false;
+                }
+                return true;
+            }
+#endif
+            return backendId == DNN_BACKEND_OPENCV;
+        }
+
+#ifdef HAVE_CUDA
+        static Mat reorderGatesIOFCtoIFCO(const Mat& src, int groups, int hid)
+        {
+            Mat s;
+            src.convertTo(s, CV_32F);
+            CV_Assert(s.isContinuous() && s.total() % ((size_t)groups * 4 * hid) == 0);
+            const size_t block = s.total() / ((size_t)groups * 4);
+            static const int perm[4] = { 0, 2, 3, 1 };
+            Mat d(1, (int)s.total(), CV_32F);
+            const float* sp = s.ptr<float>();
+            float* dp = d.ptr<float>();
+            for (int g = 0; g < groups; g++)
+                for (int k = 0; k < 4; k++)
+                    std::copy(sp + ((size_t)g * 4 + perm[k]) * block, sp + ((size_t)g * 4 + perm[k] + 1) * block,
+                              dp + ((size_t)g * 4 + k) * block);
+            return d;
+        }
+
+        Ptr<BackendNode> initCUDA(void* context_, InputArrayOfArrays inputs_arr, InputArrayOfArrays) CV_OVERRIDE
+        {
+            auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+            Net::Impl* netimpl_ = getNetImpl(this);
+            CV_Assert(netimpl_);
+            const int numDirs = 1 + static_cast<int>(bidirectional);
+            MatShape xs = inputs_arr.shape(0);
+            CV_Assert(xs.dims == 3);
+            const int seqLen = xs[0], batch = xs[1], inpSize = xs[2];
+            CV_Assert(!bidirectional || batch == 1);
+
+            auto constInput = [&](size_t i) {
+                Mat m;
+                netimpl_->argTensor(this->inputs[i]).copyTo(m);
+                return m;
+            };
+            auto present = [&](size_t i) { return i < this->inputs.size() && !this->inputs[i].empty(); };
+
+            Mat W = reorderGatesIOFCtoIFCO(constInput(1), numDirs, numHidden);
+            Mat R = reorderGatesIOFCtoIFCO(constInput(2), numDirs, numHidden);
+            Mat B = reorderGatesIOFCtoIFCO(present(3) ? constInput(3)
+                                                      : Mat::zeros(1, numDirs * 8 * numHidden, CV_32F),
+                                           numDirs * 2, numHidden);
+
+            const size_t wPerDir = W.total() / numDirs, rPerDir = R.total() / numDirs;
+            Mat filters(1, (int)(W.total() + R.total() + B.total()), CV_32F);
+            float* f = filters.ptr<float>();
+            for (int d = 0; d < numDirs; d++) {
+                f = std::copy(W.ptr<float>() + d * wPerDir, W.ptr<float>() + (d + 1) * wPerDir, f);
+                f = std::copy(R.ptr<float>() + d * rPerDir, R.ptr<float>() + (d + 1) * rPerDir, f);
+            }
+            std::copy(B.ptr<float>(), B.ptr<float>() + B.total(), f);
+
+            int stateShape[] = { numDirs, batch, numHidden };
+            Mat h0, c0;
+            if (present(5))
+                constInput(5).convertTo(h0, CV_32F);
+            else
+                h0 = Mat::zeros(3, stateShape, CV_32F);
+            if (present(6))
+                constInput(6).convertTo(c0, CV_32F);
+            else
+                c0 = Mat::zeros(3, stateShape, CV_32F);
+            h0 = h0.reshape(1, 3, stateShape);
+            c0 = c0.reshape(1, 3, stateShape);
+
+            cuda4dnn::RNNConfiguration config{ seqLen, 1, numHidden, inpSize, batch, bidirectional };
+            return make_cuda_node<cuda4dnn::LSTMOp>(preferableTarget, std::move(context->stream),
+                                                    std::move(context->cudnn_handle), filters, h0, c0, config);
+        }
+#endif
 
         bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,

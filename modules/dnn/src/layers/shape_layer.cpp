@@ -125,6 +125,8 @@ public:
     {
     }
 
+    bool needsHostData(int) const CV_OVERRIDE { return false; }
+
     void forward(InputArrayOfArrays inputs_arr,
                  OutputArrayOfArrays outputs_arr,
                  OutputArrayOfArrays) CV_OVERRIDE

@@ -177,6 +177,7 @@ struct Net::Impl : public detail::NetImplBase
     };
     bool fusedSnapshotValid = false;
     std::vector<FusedGraphSnapshot> fusedSnapshot;
+    std::unordered_map<const LayerInfo*, int> cudaPlacementMemo;
     std::vector<Ptr<BackendWrapper> > argWrappers;
     std::vector<const void*> argWrapperData;
     enum ArgResidency { ARG_RESIDENCY_UNKNOWN = 0, ARG_RESIDENCY_HOST, ARG_RESIDENCY_DEVICE };

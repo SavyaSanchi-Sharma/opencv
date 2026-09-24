@@ -155,7 +155,8 @@ public:
             if (netimpl_ && !this->inputs.empty())
             {
                 const int t = netimpl_->argType(this->inputs[0]);
-                if (t >= 0 && CV_MAT_DEPTH(t) != CV_32F && CV_MAT_DEPTH(t) != CV_16F)
+                const int d = CV_MAT_DEPTH(t);
+                if (t >= 0 && d != CV_32F && d != CV_16F && d != CV_32S && d != CV_64S)
                     return false;
             }
             float lo, hi;
@@ -170,12 +171,30 @@ public:
                               InputArrayOfArrays inputs_arr,
                               InputArrayOfArrays outputs_arr) CV_OVERRIDE
     {
-        CV_UNUSED(inputs_arr); CV_UNUSED(outputs_arr);
+        CV_UNUSED(outputs_arr);
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
         float lo, hi;
         CV_Assert(resolveBounds(lo, hi));
+        const int depth = inputs_arr.depth(0);
+        if (depth == CV_32S)
+            return Ptr<BackendNode>(new cuda4dnn::ClipOp<int32_t>(std::move(context->stream),
+                                                                  clampBound<int32_t>(lo), clampBound<int32_t>(hi)));
+        if (depth == CV_64S)
+            return Ptr<BackendNode>(new cuda4dnn::ClipOp<int64_t>(std::move(context->stream),
+                                                                  clampBound<int64_t>(lo), clampBound<int64_t>(hi)));
         return make_cuda_node<cuda4dnn::ClipOp>(preferableTarget,
                                                 std::move(context->stream), lo, hi);
+    }
+
+    template <class T>
+    static T clampBound(float v)
+    {
+        const double r = std::round((double)v);
+        if (r <= (double)std::numeric_limits<T>::min())
+            return std::numeric_limits<T>::min();
+        if (r >= (double)std::numeric_limits<T>::max())
+            return std::numeric_limits<T>::max();
+        return (T)r;
     }
 #endif
 

@@ -17,6 +17,7 @@
 #include <opencv2/core.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <vector>
 #include <algorithm>
 #include <utility>
@@ -28,6 +29,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         REFLECTION101
     };
 
+    using PaddingRangeResolver = std::function<void(const std::vector<UMat>&, std::vector<cv::Range>&)>;
+
     template <class T>
     class PaddingOp final : public CUDABackendNode {
     public:
@@ -36,6 +39,11 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         /* `ranges` is indexed by axis and contains the range in the output where the input is copied to */
         PaddingOp(csl::Stream stream_, PaddingType type_, T value_, const std::vector<cv::Range>& ranges)
             : stream(std::move(stream_)),  type{ type_ }, value{ value_ }, dstRanges(std::move(ranges))
+        {
+        }
+
+        PaddingOp(csl::Stream stream_, PaddingType type_, T value_, PaddingRangeResolver resolver_)
+            : stream(std::move(stream_)),  type{ type_ }, value{ value_ }, resolver(std::move(resolver_))
         {
         }
 
@@ -113,6 +121,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             CV_UNUSED(workspace);
             CV_Assert(!inputs.empty() && outputs.size() == 1);
 
+            if (resolver)
+                resolver(inputs, dstRanges);
+
             auto input = csl::viewOf<T>(inputs[0]);
 
             auto output = csl::spanOf<T>(outputs[0]);
@@ -176,6 +187,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         T value;
 
         std::vector<cv::Range> dstRanges;
+        PaddingRangeResolver resolver;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

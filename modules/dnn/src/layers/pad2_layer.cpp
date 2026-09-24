@@ -551,10 +551,15 @@ public:
     {
 #ifdef HAVE_CUDA
         if (backendId == DNN_BACKEND_CUDA) {
-            if (dynamicOutputShapes())
-                return false;
             if (mode != BORDER_CONSTANT && mode != BORDER_REFLECT101)
                 return false;
+            if (this->inputs.size() >= 3 && !this->inputs[2].empty()) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_ || !netimpl_->isConstArg(this->inputs[2]))
+                    return false;
+            }
+            if (dynamicOutputShapes())
+                return true;
             std::vector<int> semanticPads;
             return getConstSemanticPads(semanticPads);
         }
@@ -568,6 +573,36 @@ public:
                               InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+
+        float padValue = value0;
+        if (this->inputs.size() >= 3 && !this->inputs[2].empty()) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            CV_Assert(netimpl_ && netimpl_->isConstArg(this->inputs[2]));
+            Mat v, v32;
+            netimpl_->argTensor(this->inputs[2]).copyTo(v);
+            if (!v.empty()) {
+                CV_Assert(v.total() == 1);
+                v.convertTo(v32, CV_32F);
+                padValue = v32.ptr<float>()[0];
+            }
+        }
+
+        cuda4dnn::PaddingType ptypeDyn = (mode == BORDER_CONSTANT) ? cuda4dnn::PaddingType::CONSTANT
+                                                                    : cuda4dnn::PaddingType::REFLECTION101;
+        if (dynamicOutputShapes()) {
+            cuda4dnn::PaddingRangeResolver resolver = [this](const std::vector<UMat>& args, std::vector<cv::Range>& ranges) {
+                std::vector<int> padsbuf;
+                getRuntimePads(args, padsbuf);
+                MatShape shape = cv::dnn::shape(args[0]);
+                ranges.resize(shape.dims);
+                for (int i = 0; i < shape.dims; i++)
+                    ranges[i] = cv::Range(padsbuf[i], padsbuf[i] + shape[i]);
+            };
+            if (inputs_arr.depth(0) == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::PaddingOp>(std::move(context->stream), ptypeDyn, padValue, resolver);
+            return make_cuda_node_with_type<cuda4dnn::PaddingOp>(preferableTarget, inputs_arr.depth(0),
+                                                                 std::move(context->stream), ptypeDyn, padValue, resolver);
+        }
 
         std::vector<int> semanticPads;
         bool ok = getConstSemanticPads(semanticPads);
@@ -588,9 +623,9 @@ public:
                                                                  : cuda4dnn::PaddingType::REFLECTION101;
 
         if (inputs_arr.depth(0) == CV_Bool)
-            return make_cuda_node_bool<cuda4dnn::PaddingOp>(std::move(context->stream), ptype, value0, dstRanges);
+            return make_cuda_node_bool<cuda4dnn::PaddingOp>(std::move(context->stream), ptype, padValue, dstRanges);
         return make_cuda_node_with_type<cuda4dnn::PaddingOp>(preferableTarget, inputs_arr.depth(0),
-                                                             std::move(context->stream), ptype, value0, dstRanges);
+                                                             std::move(context->stream), ptype, padValue, dstRanges);
     }
 #endif
 
@@ -755,6 +790,31 @@ public:
             CV_Assert(outshape[i] >= 0);
         }
         return outshape;
+    }
+
+    void getRuntimePads(const std::vector<UMat>& args, std::vector<int>& padsbuf) const
+    {
+        CV_Assert(args.size() >= 2);
+        MatShape inpShape = cv::dnn::shape(args[0]);
+        Mat padsTensor, axesTensor;
+        args[1].copyTo(padsTensor);
+        if (args.size() >= 4)
+            args[3].copyTo(axesTensor);
+        std::vector<int> semanticPads;
+        getPads(inpShape.dims, padsTensor, axesTensor, semanticPads);
+        bool mapped = mapPadsToInputLayout(inpShape, semanticPads, padsbuf, getOriginalLayout(this));
+        CV_Assert(mapped);
+    }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& args, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        std::vector<int> padsbuf;
+        getRuntimePads(args, padsbuf);
+        outputs.assign(1, getOutShape(cv::dnn::shape(args[0]), padsbuf));
     }
 
     bool getMemoryShapes(const std::vector<MatShape>& inputs,

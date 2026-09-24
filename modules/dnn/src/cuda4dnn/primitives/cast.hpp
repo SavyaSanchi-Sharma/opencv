@@ -61,6 +61,28 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::Stream stream;
     };
 
+    template <class TOut, class TIn>
+    class CastOp final : public CUDABackendNode {
+    public:
+        CastOp(csl::Stream stream_) : stream(std::move(stream_)) { }
+
+        void forward(
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
+            csl::Workspace& workspace) override
+        {
+            CV_UNUSED(workspace);
+            CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+
+            auto input = csl::viewOf<TIn>(inputs[0]);
+            auto output = csl::spanOf<TOut>(outputs[0]);
+            kernels::cast<TOut, TIn>(stream, output, input);
+        }
+
+    private:
+        csl::Stream stream;
+    };
+
 }}} /* namespace cv::dnn::cuda4dnn */
 
 #endif /* OPENCV_DNN_SRC_CUDA4DNN_PRIMITIVES_CAST_HPP */

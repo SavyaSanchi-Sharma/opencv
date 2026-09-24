@@ -6,10 +6,15 @@
 
 #include "../precomp.hpp"
 #include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/utils/logger.hpp>
 #include <atomic>
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/one_hot.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -30,8 +35,52 @@ public:
 
     bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || this->inputs.size() != 3)
+                return false;
+            const int valuesDepth = CV_MAT_DEPTH(netimpl_->argType(this->inputs[2]));
+            if (!netimpl_->isConstArg(this->inputs[2]) && valuesDepth != CV_32S && valuesDepth != CV_64S)
+                return false;
+            const int idxDepth = CV_MAT_DEPTH(netimpl_->argType(this->inputs[0]));
+            const int outType = netimpl_->argType(this->outputs[0]);
+            const int outDepth = outType >= 0 ? CV_MAT_DEPTH(outType) : CV_32F;
+            return (idxDepth == CV_32S || idxDepth == CV_64S) &&
+                   (outDepth == CV_32F || outDepth == CV_16F || outDepth == CV_32S || outDepth == CV_64S);
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_, InputArrayOfArrays inputs_arr, InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        Net::Impl* netimpl_ = getNetImpl(this);
+        CV_Assert(netimpl_);
+        const bool runtimeValues = !netimpl_->isConstArg(this->inputs[2]);
+        Mat values;
+        if (!runtimeValues)
+            netimpl_->argTensor(this->inputs[2]).copyTo(values);
+        double offVal = 0, onVal = 1;
+        if (!values.empty()) {
+            CV_Assert(values.total() == 2);
+            Mat values64;
+            values.convertTo(values64, CV_64F);
+            offVal = values64.ptr<double>()[0];
+            onVal = values64.ptr<double>()[1];
+        }
+        const int outDepth = runtimeValues ? inputs_arr.depth(2) : (values.empty() ? CV_32F : values.depth());
+        if (inputs_arr.depth(0) == CV_64S)
+            return make_cuda_node_with_indices<cuda4dnn::OneHotOp, int64_t>(preferableTarget, outDepth,
+                                                                            std::move(context->stream), axis, offVal, onVal,
+                                                                            runtimeValues);
+        return make_cuda_node_with_indices<cuda4dnn::OneHotOp, int32_t>(preferableTarget, outDepth,
+                                                                        std::move(context->stream), axis, offVal, onVal,
+                                                                        runtimeValues);
+    }
+#endif
 
 private:
     bool getConstPositiveDepth(int& depthOut) const
@@ -80,6 +129,24 @@ public:
     {
         Net::Impl* netimpl_ = getNetImpl(this);
         return !(netimpl_ && netimpl_->isConstArg(this->inputs[1]));
+    }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& args, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        CV_Assert(args.size() == 3);
+        Mat depthTensor;
+        args[1].copyTo(depthTensor);
+        int64_t depth64 = 0;
+        tensorToScalar(depthTensor, CV_64S, &depth64);
+        CV_Assert(depth64 > 0);
+        MatShape outShape = shape(args[0]);
+        int insAxis = normalize_axis(axis, (int)outShape.size() + 1);
+        outShape.insert(outShape.begin() + insAxis, (int)depth64);
+        outputs.assign(1, outShape);
     }
 
     bool getMemoryShapes(const std::vector<MatShape>& inputs,

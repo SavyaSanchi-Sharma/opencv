@@ -4,8 +4,15 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "../op_inf_engine.hpp"
 #include "../ie_ngraph.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/logical.hpp"
+using namespace cv::dnn::cuda4dnn;
+#endif
 
 
 namespace cv { namespace dnn {
@@ -20,9 +27,26 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            return netimpl_ && this->inputs.size() == 1 &&
+                   CV_MAT_DEPTH(netimpl_->argType(this->inputs[0])) == CV_Bool;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        return make_cuda_node_bool<cuda4dnn::NotOp>(std::move(context->stream));
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,

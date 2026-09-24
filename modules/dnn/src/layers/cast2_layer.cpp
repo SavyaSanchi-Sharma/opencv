@@ -113,11 +113,11 @@ public:
                 return false;
             if (toCvDepth_ == inType)
                 return true;
-            if (toCvDepth_ == CV_32F)
-                return inType == CV_64S;
-            if (toCvDepth_ == CV_64S)
-                return inType == CV_32F;
-            return false;
+            const int inDepth = CV_MAT_DEPTH(inType);
+            auto castable = [](int d) { return d == CV_Bool || d == CV_32S || d == CV_64S || d == CV_32F; };
+            if (inType < 0 || !castable(inDepth) || !castable(toCvDepth_))
+                return false;
+            return preferableTarget != DNN_TARGET_CUDA_FP16 || (inDepth != CV_32F && toCvDepth_ != CV_32F);
         }
 #endif
         return backendId == DNN_BACKEND_OPENCV ||
@@ -132,10 +132,31 @@ public:
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
         int inDepth = inputs_arr.depth(0);
         if (toCvDepth_ == inDepth)
-            return make_cuda_node_with_type<cuda4dnn::ReshapeOp>(preferableTarget, inDepth, std::move(context->stream));
-        if (inDepth == CV_64S)
-            return Ptr<BackendNode>(new cuda4dnn::CastInt64ToFp32Op(std::move(context->stream)));
-        return Ptr<BackendNode>(new cuda4dnn::CastFp32ToInt64Op(std::move(context->stream)));
+            return make_cuda_node_with_type<cuda4dnn::ReshapeOp>(preferableTarget, inDepth == CV_Bool ? CV_8U : inDepth,
+                                                                std::move(context->stream));
+        switch (inDepth)
+        {
+        case CV_Bool: return makeCastFrom<bool>(toCvDepth_, std::move(context->stream));
+        case CV_32S: return makeCastFrom<int32_t>(toCvDepth_, std::move(context->stream));
+        case CV_64S: return makeCastFrom<int64_t>(toCvDepth_, std::move(context->stream));
+        case CV_32F: return makeCastFrom<float>(toCvDepth_, std::move(context->stream));
+        }
+        CV_Error(Error::BadDepth, "Cast: unsupported input type on CUDA");
+        return Ptr<BackendNode>();
+    }
+
+    template <class TIn>
+    static Ptr<BackendNode> makeCastFrom(int outDepth, cuda4dnn::csl::Stream stream)
+    {
+        switch (outDepth)
+        {
+        case CV_Bool: return Ptr<BackendNode>(new cuda4dnn::CastOp<bool, TIn>(std::move(stream)));
+        case CV_32S: return Ptr<BackendNode>(new cuda4dnn::CastOp<int32_t, TIn>(std::move(stream)));
+        case CV_64S: return Ptr<BackendNode>(new cuda4dnn::CastOp<int64_t, TIn>(std::move(stream)));
+        case CV_32F: return Ptr<BackendNode>(new cuda4dnn::CastOp<float, TIn>(std::move(stream)));
+        }
+        CV_Error(Error::BadDepth, "Cast: unsupported output type on CUDA");
+        return Ptr<BackendNode>();
     }
 #endif
 

@@ -61,8 +61,13 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.expr)
+        if (fusion.expr) {
+#ifdef HAVE_CUDA
+            if (backendId == DNN_BACKEND_CUDA)
+                return FusionExprPlan::runnable(*fusion.expr, 0);
+#endif
             return backendId == DNN_BACKEND_OPENCV;
+        }
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !trans_a && !trans_b) ||
@@ -685,7 +690,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
     Ptr<BackendNode> initCUDA(void* context_,
                               InputArrayOfArrays,
-                              InputArrayOfArrays) CV_OVERRIDE {
+                              InputArrayOfArrays outputs_arr) CV_OVERRIDE {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         auto input_B = Mat(), bias = Mat();
         if (!blobs.empty()) {
@@ -697,7 +702,15 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
         CV_CheckFalse(helper.empty(), "DNN/MatMul/CUDA: MatMulHelper is not initialized");
 
-        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+        FusionExprPlan plan;
+        if (fusion.expr) {
+            MatShape oshape = outputs_arr.shape(0);
+            const std::size_t nch = oshape.dims > 0 ? (std::size_t)oshape[oshape.dims - 1] : 0;
+            if (!plan.build(*fusion.expr, nch, context->stream))
+                CV_Error(Error::StsNotImplemented, "DNN/MatMul/Cuda: the fused expression cannot run on the device");
+        }
+
+        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch, std::move(plan));
     }
 #endif // HAVE_CUDA
 

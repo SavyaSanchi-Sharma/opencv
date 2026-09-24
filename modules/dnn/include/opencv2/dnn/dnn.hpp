@@ -339,6 +339,8 @@ CV__DNN_INLINE_NS_BEGIN
                                                       int requiredOutputs,
                                                       std::vector<MatShape>& outputs) const;
 
+        virtual bool getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const;
+
         virtual bool isDataShuffling() const;
 
         virtual void getScaleShift(Mat& scale, Mat& shift) const;

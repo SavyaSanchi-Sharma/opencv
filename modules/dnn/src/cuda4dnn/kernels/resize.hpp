@@ -16,6 +16,16 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     template <class T>
     void resize_bilinear(const csl::Stream& stream, csl::TensorSpan<T> output, csl::TensorView<T> input, float scale_y, float scale_x, bool half_pixel_centers);
 
+    enum class ResizeCoordMode {
+        ASYMMETRIC,
+        HALF_PIXEL,
+        PYTORCH_HALF_PIXEL
+    };
+
+    template <class T>
+    void resize_cubic(const csl::Stream& stream, csl::TensorSpan<T> output, csl::TensorView<T> input, float scale_y, float scale_x,
+                      ResizeCoordMode coord_mode, float cubic_a, bool exclude_outside);
+
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 
 #endif /* OPENCV_DNN_SRC_CUDA4DNN_KERNELS_RESIZE_HPP */

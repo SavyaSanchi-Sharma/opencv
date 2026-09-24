@@ -1102,11 +1102,30 @@ public:
     void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
                                           std::vector<MatShape>& outputs) const CV_OVERRIDE
     {
-        std::vector<MatShape> inpShapes(inputs.size());
-        for (size_t i = 0; i < inputs.size(); i++)
-            inpShapes[i] = inputs[i].shape();
-        std::vector<MatShape> internals;
-        getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
+        const size_t ninputs = inputs.size();
+        const MatShape inpShape = inputs[0].shape();
+        if (inpShape.dims != 4 || ninputs == 1 || (ninputs == 2 && inputs[1].dims == 4)) {
+            std::vector<MatShape> inpShapes(ninputs);
+            for (size_t i = 0; i < ninputs; i++)
+                inpShapes[i] = inputs[i].shape();
+            std::vector<MatShape> internals;
+            getMemoryShapes(inpShapes, requiredOutputs, outputs, internals);
+            return;
+        }
+        std::vector<int> sizes;
+        std::vector<float> scales;
+        if (ninputs >= 4 && !inputs[3].empty()) {
+            Mat sizesTensor;
+            inputs[3].copyTo(sizesTensor);
+            tensorToIntVec(sizesTensor, sizes);
+        }
+        const size_t si = ninputs == 2 ? 1 : 2;
+        if (!inputs[si].empty()) {
+            Mat scalesTensor;
+            inputs[si].copyTo(scalesTensor);
+            tensorToFloatVec(scalesTensor, scales);
+        }
+        outputs.assign(1, getOutShape(inpShape, sizes, scales));
     }
 
     // Only resizeNearest has a genuine CV_32S path; other modes reject it below.
@@ -1117,9 +1136,12 @@ public:
                   std::vector<MatType>& internals) const CV_OVERRIDE
     {
         CV_Assert(inputs.size());
-        for (auto input : inputs)
+        for (auto input : inputs) {
+            if (input < 0)
+                continue;
             CV_CheckType(input, input == CV_32F || input == CV_64F || input == CV_8S || input == CV_8U ||
                                 input == CV_64S || input == CV_32S, "");
+        }
 
         outputs.assign(requiredOutputs, inputs[0]);
         internals.assign(requiredInternals, inputs[0]);
@@ -1128,7 +1150,7 @@ public:
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
         if (backendId == DNN_BACKEND_CUDA)
-            return interpolation == "nearest" || interpolation == "bilinear" || interpolation == "opencv_linear";
+            return cudaResizeSupported();
 
         if (backendId == DNN_BACKEND_CANN)
             return interpolation == "nearest" || interpolation == "bilinear" || interpolation == "opencv_linear";
@@ -1141,6 +1163,78 @@ public:
         }
 #endif
         return backendId == DNN_BACKEND_OPENCV;
+    }
+
+    bool cudaResizeSupported()
+    {
+        if (antialias || dynamicROI || !axesAttr.empty() || keepAspectPolicy != "stretch")
+            return false;
+        const bool halfPixelMode = coordTransModeE == CoordTransMode::HALF_PIXEL ||
+                                   coordTransModeE == CoordTransMode::PYTORCH_HALF_PIXEL;
+        if (interpolation == "nearest") {
+            if (alignCorners)
+                return false;
+            const bool asymmetricFloor = coordTransModeE == CoordTransMode::ASYMMETRIC && !halfPixelCenters &&
+                                         nearestModeE == NearestMode::FLOOR;
+            const bool tfHalfPixelFloor = coordTransModeE == CoordTransMode::TF_HALF_PIXEL_FOR_NN && halfPixelCenters &&
+                                          nearestModeE == NearestMode::FLOOR;
+            const bool halfPixelRound = halfPixelMode && halfPixelCenters &&
+                                        (nearestModeE == NearestMode::ROUND_PREFER_FLOOR ||
+                                         nearestModeE == NearestMode::ROUND_PREFER_CEIL);
+            if (asymmetricFloor || tfHalfPixelFloor)
+                return cudaScalesExact(false);
+            return halfPixelRound && cudaScalesExact(true);
+        } else if (interpolation == "bilinear" || interpolation == "cubic") {
+            if (coordTransModeE == CoordTransMode::ASYMMETRIC) {
+                if (halfPixelCenters)
+                    return false;
+            } else if (!halfPixelMode || !halfPixelCenters || alignCorners) {
+                return false;
+            }
+        } else if (interpolation != "opencv_linear") {
+            return false;
+        }
+        return cudaScalesExact(false);
+    }
+
+    bool cudaScalesExact(bool requireWholeRatio)
+    {
+        auto wholeUpscale = [](float v) { return v >= 1.f && v == std::floor(v); };
+        const size_t ninputs = this->inputs.size();
+        if (ninputs == 1) {
+            if (this->blobs.size() >= 3 && this->blobs[2].total() > 0)
+                return !requireWholeRatio;
+            if (this->blobs.size() >= 2 && this->blobs[1].total() > 0) {
+                std::vector<float> scales;
+                tensorToFloatVec(this->blobs[1], scales);
+                for (float v : scales)
+                    if (!wholeUpscale(v))
+                        return false;
+                return true;
+            }
+            if (zoomFactorHeight <= 0 || zoomFactorWidth <= 0)
+                return !requireWholeRatio && (zoomFactorHeight <= 0) == (zoomFactorWidth <= 0);
+            return wholeUpscale(zoomFactorHeight) && wholeUpscale(zoomFactorWidth);
+        }
+        Net::Impl* netimpl_ = getNetImpl(this);
+        if (!netimpl_)
+            return false;
+        if (ninputs >= 4 && !this->inputs[3].empty())
+            return !requireWholeRatio;
+        const size_t si = ninputs == 2 ? 1 : 2;
+        if (si >= ninputs || this->inputs[si].empty() || !netimpl_->isConstArg(this->inputs[si]))
+            return false;
+        Mat s = netimpl_->argTensor(this->inputs[si]).getMat(ACCESS_READ);
+        if (ninputs == 2 && s.dims == 4)
+            return !requireWholeRatio;
+        std::vector<float> scales;
+        tensorToFloatVec(s, scales);
+        if (scales.empty())
+            return false;
+        for (float v : scales)
+            if (!wholeUpscale(v))
+                return false;
+        return true;
     }
 
     void updateOutSizeAndScale(const MatShape& inpShape, const MatShape& outShape)
@@ -1546,8 +1640,22 @@ public:
             config.align_corners = false;
             config.half_pixel_centers = true;
         }
+        else if (interpolation == "cubic")
+        {
+            config.type = InterpolationType::CUBIC;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+            config.coord_mode = coordTransModeE == CoordTransMode::HALF_PIXEL ? kernels::ResizeCoordMode::HALF_PIXEL :
+                                coordTransModeE == CoordTransMode::PYTORCH_HALF_PIXEL ? kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL :
+                                                                                        kernels::ResizeCoordMode::ASYMMETRIC;
+            config.cubic_a = cubicCoeffA;
+            config.exclude_outside = excludeOutside;
+        }
         else
             CV_Error(Error::StsNotImplemented, "Requested interpolation mode is not available in resize layer.");
+        config.coord_mode = coordTransModeE == CoordTransMode::HALF_PIXEL ? kernels::ResizeCoordMode::HALF_PIXEL :
+                            coordTransModeE == CoordTransMode::PYTORCH_HALF_PIXEL ? kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL :
+                                                                                    kernels::ResizeCoordMode::ASYMMETRIC;
         return make_cuda_node<cuda4dnn::ResizeOp>(preferableTarget, std::move(context->stream), config);
     }
 
@@ -1576,8 +1684,22 @@ public:
             config.align_corners = false;
             config.half_pixel_centers = true;
         }
+        else if (interpolation == "cubic")
+        {
+            config.type = InterpolationType::CUBIC;
+            config.align_corners = alignCorners;
+            config.half_pixel_centers = halfPixelCenters;
+            config.coord_mode = coordTransModeE == CoordTransMode::HALF_PIXEL ? kernels::ResizeCoordMode::HALF_PIXEL :
+                                coordTransModeE == CoordTransMode::PYTORCH_HALF_PIXEL ? kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL :
+                                                                                        kernels::ResizeCoordMode::ASYMMETRIC;
+            config.cubic_a = cubicCoeffA;
+            config.exclude_outside = excludeOutside;
+        }
         else
             CV_Error(Error::StsNotImplemented, "Requested interpolation mode is not available in resize layer.");
+        config.coord_mode = coordTransModeE == CoordTransMode::HALF_PIXEL ? kernels::ResizeCoordMode::HALF_PIXEL :
+                            coordTransModeE == CoordTransMode::PYTORCH_HALF_PIXEL ? kernels::ResizeCoordMode::PYTORCH_HALF_PIXEL :
+                                                                                    kernels::ResizeCoordMode::ASYMMETRIC;
         return make_cuda_node<cuda4dnn::ResizeOp>(preferableTarget, std::move(context->stream), config);
     }
 #endif

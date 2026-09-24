@@ -46,9 +46,6 @@ public:
      * fall back. So every constraint the kernel has is checked here. */
     bool cudaSupported() const
     {
-        if (dynamicOutputShapes())
-            return false;
-
         Net::Impl* netimpl_ = getNetImpl(this);
         if (!netimpl_ || this->inputs.empty() || this->outputs.empty())
             return false;
@@ -86,6 +83,18 @@ public:
         size_t ninputs = this->inputs.size();
         CV_Assert(ninputs == 2);
         return !netimpl_->isConstArg(this->inputs[1]);
+    }
+
+    bool canComputeDynamicOutputShapes() const CV_OVERRIDE { return true; }
+
+    void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs, int requiredOutputs,
+                                         std::vector<MatShape>& outputs) const CV_OVERRIDE
+    {
+        CV_UNUSED(requiredOutputs);
+        CV_Assert(inputs.size() == 2);
+        Mat shapeTensor;
+        inputs[1].copyTo(shapeTensor);
+        outputs.assign(1, getOutShape(inputs[0].shape(), shapeTensor));
     }
 
     MatShape getOutShape(const MatShape& inpshape, const Mat& shapeTensor) const

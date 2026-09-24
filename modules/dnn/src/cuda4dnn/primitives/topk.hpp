@@ -9,6 +9,7 @@
 #include "../../op_cuda.hpp"
 
 #include "../csl/stream.hpp"
+#include "../csl/memory.hpp"
 
 #include "../kernels/topk.hpp"
 
@@ -54,13 +55,25 @@ namespace cv { namespace dnn { namespace cuda4dnn {
              * avoids duplicating the attribute-vs-input resolution the layer already did. */
             const int k = outShape[a];
 
+            if (inner == 1 && static_cast<std::int64_t>(k) * dim_axis > sort_threshold) {
+                const std::size_t bytes = kernels::topk_sort_workspace<T>(stream, outer, dim_axis, largest);
+                if (scratch.size() < bytes)
+                    scratch.reset(bytes);
+                kernels::topk_sort<T>(stream, values, indices, input, outer, dim_axis, k, largest,
+                                      scratch.get().get(), bytes);
+                return;
+            }
+
             kernels::topk<T>(stream, values, indices, input, outer, dim_axis, inner, k, largest);
         }
 
     private:
+        static constexpr std::int64_t sort_threshold = std::int64_t(1) << 16;
+
         csl::Stream stream;
         int axis;
         bool largest;
+        csl::ManagedPtr<unsigned char> scratch;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

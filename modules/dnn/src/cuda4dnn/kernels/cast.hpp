@@ -18,6 +18,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 void cast_int64_to_fp32(const csl::Stream& stream, csl::Span<float> output, csl::View<std::int64_t> input);
 void cast_fp32_to_int64(const csl::Stream& stream, csl::Span<std::int64_t> output, csl::View<float> input);
 
+template <class TOut, class TIn>
+void cast(const csl::Stream& stream, csl::Span<TOut> output, csl::View<TIn> input);
+
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 
 #endif /* OPENCV_DNN_SRC_CUDA4DNN_KERNELS_CAST_HPP */

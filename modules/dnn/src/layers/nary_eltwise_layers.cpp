@@ -27,6 +27,7 @@
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/eltwise.hpp"
+#include "../cuda4dnn/primitives/logical.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -323,7 +324,33 @@ public:
                 Net::Impl* netimpl_ = getNetImpl(this);
                 if (!netimpl_ || inputs.size() != 2)
                     return false;
-                return netimpl_->argType(inputs[0]) == netimpl_->argType(inputs[1]);
+                const int t0 = netimpl_->argType(inputs[0]), t1 = netimpl_->argType(inputs[1]);
+                return t0 < 0 || t1 < 0 || t0 == t1;
+            }
+            if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL ||
+                op == OPERATION::LESS || op == OPERATION::LESS_EQUAL || op == OPERATION::AND ||
+                op == OPERATION::OR || op == OPERATION::XOR || op == OPERATION::WHERE) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_)
+                    return false;
+                std::vector<int> depths;
+                for (const Arg& a : inputs) {
+                    const int t = netimpl_->argType(a);
+                    if (t < 0)
+                        return false;
+                    depths.push_back(CV_MAT_DEPTH(t));
+                }
+                auto isValueDepth = [](int d) {
+                    return d == CV_32F || d == CV_16F || d == CV_8S || d == CV_8U || d == CV_32S || d == CV_64S;
+                };
+                if (op == OPERATION::WHERE)
+                    return depths.size() == 3 && depths[0] == CV_Bool && depths[1] == depths[2] &&
+                           (isValueDepth(depths[1]) || depths[1] == CV_Bool);
+                if (depths.size() != 2 || depths[0] != depths[1])
+                    return false;
+                if (op == OPERATION::AND || op == OPERATION::OR || op == OPERATION::XOR)
+                    return depths[0] == CV_Bool;
+                return isValueDepth(depths[0]) || (op == OPERATION::EQUAL && depths[0] == CV_Bool);
             }
             return op == OPERATION::MAX  || op == OPERATION::MIN  || op == OPERATION::SUM ||
                    op == OPERATION::PROD || op == OPERATION::DIV  || op == OPERATION::ADD ||
@@ -1385,6 +1412,36 @@ public:
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
 
+        if (op == OPERATION::WHERE) {
+            CV_CheckEQ(inputs.size(), (size_t)3, "");
+            if (inputs[1].depth() == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::WhereOp>(std::move(context->stream));
+            return make_cuda_node_with_type<cuda4dnn::WhereOp>(preferableTarget, inputs[1].depth(), std::move(context->stream));
+        }
+        if (op == OPERATION::AND || op == OPERATION::OR || op == OPERATION::XOR) {
+            CV_CheckEQ(inputs.size(), (size_t)2, "");
+            const cuda4dnn::LogicalOpType logicalOp = op == OPERATION::AND ? cuda4dnn::LogicalOpType::AND :
+                                                      op == OPERATION::OR  ? cuda4dnn::LogicalOpType::OR :
+                                                                             cuda4dnn::LogicalOpType::XOR;
+            return make_cuda_node_bool<cuda4dnn::LogicalOp>(std::move(context->stream), logicalOp);
+        }
+        if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL ||
+            op == OPERATION::LESS || op == OPERATION::LESS_EQUAL) {
+            CV_CheckEQ(inputs.size(), (size_t)2, "");
+            cuda4dnn::CompareOpType compareOp = cuda4dnn::CompareOpType::EQUAL;
+            switch (op) {
+                case OPERATION::GREATER: compareOp = cuda4dnn::CompareOpType::GREATER; break;
+                case OPERATION::GREATER_EQUAL: compareOp = cuda4dnn::CompareOpType::GREATER_EQUAL; break;
+                case OPERATION::LESS: compareOp = cuda4dnn::CompareOpType::LESS; break;
+                case OPERATION::LESS_EQUAL: compareOp = cuda4dnn::CompareOpType::LESS_EQUAL; break;
+                default: break;
+            }
+            if (inputs[0].depth() == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::CompareOp>(std::move(context->stream), compareOp);
+            return make_cuda_node_with_type<cuda4dnn::CompareOp>(preferableTarget, inputs[0].depth(),
+                                                                 std::move(context->stream), compareOp);
+        }
+
         cuda4dnn::EltwiseOpType op_ = cuda4dnn::EltwiseOpType::SUM;
         switch (op) {
             case OPERATION::MAX:
@@ -1415,6 +1472,8 @@ public:
                 op_ = cuda4dnn::EltwiseOpType::FMOD;
                 break;
             case OPERATION::POW:
+                CV_CheckEQ(inputs.size(), (size_t)2, "");
+                CV_CheckTypeEQ(inputs[0].type(), inputs[1].type(), "Pow on CUDA needs matching input types");
                 op_ = cuda4dnn::EltwiseOpType::POW;
                 break;
             default: return Ptr<BackendNode>(); // return empty cuda_node if the EltwiseOpType is unsupported type.

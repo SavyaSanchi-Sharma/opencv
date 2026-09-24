@@ -19,6 +19,7 @@
 #include "../csl/tensor_ops.hpp"
 
 #include "../kernels/eltwise_ops.hpp" // for adding bias
+#include "fusion_expr.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -33,8 +34,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
         MatMulBroadcastOp(csl::Stream stream_, csl::cublas::Handle handle, const Mat &B, const Mat &bias, bool _transA, bool _transB,
                  const std::vector<size_t> &A_offsets_, const std::vector<size_t> &B_offsets_, std::vector<size_t> &C_offsets_,
-                 size_t batch_)
-            : stream(std::move(stream_)), cublasHandle(std::move(handle)), A_offsets(A_offsets_), B_offsets(B_offsets_), C_offsets(C_offsets_), batch(batch_)
+                 size_t batch_, FusionExprPlan fusion_ = FusionExprPlan())
+            : stream(std::move(stream_)), cublasHandle(std::move(handle)), A_offsets(A_offsets_), B_offsets(B_offsets_), C_offsets(C_offsets_), batch(batch_),
+              fusion(std::move(fusion_))
         {
             if (!B.empty()) {
                 input_B_tensor = csl::makeTensorHeader<T>(B);
@@ -113,6 +115,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
                 kernels::eltwise_sum_2<T>(stream, output, output, bias);
             }
+
+            if (!fusion.empty())
+                fusion.run<T>(stream, output, static_cast<std::size_t>(output.get_axis_size(-1)));
         }
 
     private:
@@ -126,6 +131,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         std::vector<size_t> B_offsets;
         std::vector<size_t> C_offsets;
         size_t batch;
+        FusionExprPlan fusion;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

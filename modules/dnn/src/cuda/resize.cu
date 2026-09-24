@@ -15,6 +15,8 @@
 #include "../cuda4dnn/csl/tensor.hpp"
 #include "../cuda4dnn/csl/span.hpp"
 
+#include "../cuda4dnn/kernels/resize.hpp"
+
 #include <cuda_runtime.h>
 
 using namespace cv::dnn::cuda4dnn::csl;
@@ -241,5 +243,97 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     template void resize_bilinear<__half>(const Stream&, TensorSpan<__half>, TensorView<__half>, float, float, bool);
 #endif
     template void resize_bilinear<float>(const Stream&, TensorSpan<float>, TensorView<float>, float, float, bool);
+
+    namespace raw {
+        __device__ inline float cubic_source(index_type dst, float scale, size_type out_len, ResizeCoordMode coord_mode)
+        {
+            if (coord_mode == ResizeCoordMode::PYTORCH_HALF_PIXEL)
+                return out_len > 1 ? (dst + 0.5f) * scale - 0.5f : 0.f;
+            if (coord_mode == ResizeCoordMode::HALF_PIXEL)
+                return (dst + 0.5f) * scale - 0.5f;
+            return dst * scale;
+        }
+
+        __device__ inline void cubic_taps(float src, size_type in_len, float A, bool exclude_outside,
+                                          index_type (&ids)[4], float (&w)[4])
+        {
+            const float fl = floorf(src);
+            const float d = src - fl;
+            const index_type i = static_cast<index_type>(fl);
+            w[0] = ((A * (d + 1) - 5 * A) * (d + 1) + 8 * A) * (d + 1) - 4 * A;
+            w[1] = ((A + 2) * d - (A + 3)) * d * d + 1;
+            w[2] = ((A + 2) * (1 - d) - (A + 3)) * (1 - d) * (1 - d) + 1;
+            w[3] = 1.f - w[0] - w[1] - w[2];
+            float sw = 0.f;
+            for (int k = 0; k < 4; k++) {
+                const index_type p = i + k - 1;
+                const bool valid = p >= 0 && p < in_len;
+                if (exclude_outside) {
+                    ids[k] = valid ? p : 0;
+                    if (!valid)
+                        w[k] = 0.f;
+                } else {
+                    ids[k] = p < 0 ? 0 : (p >= in_len ? in_len - 1 : p);
+                }
+                sw += w[k];
+            }
+            if (sw != 0.f)
+                for (int k = 0; k < 4; k++)
+                    w[k] /= sw;
+        }
+
+        template <class T>
+        __global__ void resize_cubic(
+            Span<T> output, size_type out_height, size_type out_width,
+            View<T> input, size_type in_height, size_type in_width,
+            float o2i_fy, float o2i_fx, ResizeCoordMode coord_mode, float cubic_a, bool exclude_outside)
+        {
+            const auto out_image_size = out_height * out_width;
+            const auto in_image_size = in_height * in_width;
+            for (auto idx : grid_stride_range(output.size())) {
+                const index_type c = idx / out_image_size;
+                const index_type y = (idx % out_image_size) / out_width;
+                const index_type x = idx % out_width;
+
+                index_type ys[4], xs[4];
+                float wy[4], wx[4];
+                cubic_taps(cubic_source(y, o2i_fy, out_height, coord_mode), in_height, cubic_a, exclude_outside, ys, wy);
+                cubic_taps(cubic_source(x, o2i_fx, out_width, coord_mode), in_width, cubic_a, exclude_outside, xs, wx);
+
+                const index_type base = c * in_image_size;
+                float acc = 0.f;
+                for (int a = 0; a < 4; a++) {
+                    float row = 0.f;
+                    for (int b = 0; b < 4; b++)
+                        row += wx[b] * static_cast<float>(input[base + ys[a] * in_width + xs[b]]);
+                    acc += wy[a] * row;
+                }
+                output[idx] = static_cast<T>(acc);
+            }
+        }
+    }
+
+    template <class T>
+    void resize_cubic(const Stream& stream, TensorSpan<T> output, TensorView<T> input, float scale_y, float scale_x,
+                      ResizeCoordMode coord_mode, float cubic_a, bool exclude_outside) {
+        auto out_height = output.get_axis_size(-2);
+        auto out_width = output.get_axis_size(-1);
+
+        auto in_height = input.get_axis_size(-2);
+        auto in_width = input.get_axis_size(-1);
+
+        if (output.size() == 0)
+            return;
+
+        auto kernel = raw::resize_cubic<T>;
+        auto policy = make_policy(kernel, output.size(), 0, stream);
+        launch_kernel(kernel, policy, Span<T>(output), out_height, out_width, View<T>(input), in_height, in_width,
+                      scale_y, scale_x, coord_mode, cubic_a, exclude_outside);
+    }
+
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)
+    template void resize_cubic<__half>(const Stream&, TensorSpan<__half>, TensorView<__half>, float, float, ResizeCoordMode, float, bool);
+#endif
+    template void resize_cubic<float>(const Stream&, TensorSpan<float>, TensorView<float>, float, float, ResizeCoordMode, float, bool);
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */

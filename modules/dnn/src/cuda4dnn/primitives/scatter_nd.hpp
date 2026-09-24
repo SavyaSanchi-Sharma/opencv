@@ -38,12 +38,19 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             CV_UNUSED(workspace);
             CV_Assert(inputs.size() == 3 && outputs.size() == 1);
 
+            if (inputs[0].total() == 0)
+                return;
+
             auto data = csl::viewOf<T>(inputs[0]);
-            auto indices = csl::viewOf<TIdx>(inputs[1]);
-            auto updates = csl::viewOf<T>(inputs[2]);
             auto output = csl::spanOf<T>(outputs[0]);
 
             kernels::copy<T>(stream, output, data);
+
+            if (inputs[1].total() == 0 || inputs[2].total() == 0)
+                return;
+
+            auto indices = csl::viewOf<TIdx>(inputs[1]);
+            auto updates = csl::viewOf<T>(inputs[2]);
 
             MatShape dataShape = cv::dnn::shape(inputs[0]);
             MatShape indShape = cv::dnn::shape(inputs[1]);
