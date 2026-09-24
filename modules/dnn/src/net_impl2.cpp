@@ -869,6 +869,12 @@ static bool cudaOpDisabled(const std::string& type)
     return std::find(disabled.begin(), disabled.end(), type) != disabled.end();
 }
 
+static bool cudaCheckNanEnabled()
+{
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_CHECK_NAN", false);
+    return flag;
+}
+
 static bool cudaHostShapesEnabled()
 {
     static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_HOST_SHAPES", true);
@@ -3177,6 +3183,68 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                         op->name.c_str(), h2dCount, formatBytes(h2dBytes).c_str(),
                         d2hCount, formatBytes(d2hBytes).c_str()));
         }
+
+#ifdef HAVE_CUDA
+        if (cudaCheckNanEnabled()) {
+            const int maxNanReports = 12;
+            static int reported = 0;
+            auto finite = [](const UMat& u) {
+                if (u.empty() || (u.depth() != CV_32F && u.depth() != CV_16F))
+                    return true;
+                Mat m, f;
+                u.copyTo(m);
+                if (m.depth() == CV_16F)
+                    m.convertTo(f, CV_32F);
+                else
+                    f = m;
+                return checkRange(f.reshape(1, 1), true);
+            };
+            syncDnnStream(this);
+            for (i = 0; i < noutputs && reported < maxNanReports; i++) {
+                if (outputs[i].empty() || finite(argTensor(outputs[i])))
+                    continue;
+                bool inputsFinite = true;
+                for (const Arg& in : inputs)
+                    if (!in.empty() && !finite(argTensor(in)))
+                        inputsFinite = false;
+                const int backend = (opidx < gimpl->execBackend_.size()) ? gimpl->execBackend_[opidx]
+                                                                         : DNN_BACKEND_OPENCV;
+                CV_LOG_WARNING(NULL, cv::format("DNN/CheckNaN: op #%zu '%s' (%s) on %s: output #%zu has NaN/Inf, "
+                                                "inputs %s", opidx, op->name.c_str(), op->type.c_str(),
+                                                backend == DNN_BACKEND_CUDA ? "CUDA" : "CPU", i,
+                                                inputsFinite ? "all finite" : "already non-finite"));
+                if (inputsFinite) {
+                    auto describe = [&](const char* role, const Arg& a) {
+                        const UMat& u = argTensor(a);
+                        std::ostringstream s;
+                        s << role << " '" << argName(a) << "' shape=" << cv::dnn::shape(u)
+                          << " type=" << typeToString(u.type()) << " umatdata=" << (const void*)u.u
+                          << " offset=" << u.offset << " bytes=" << u.total() * u.elemSize()
+                          << " pool=" << (u.u ? u.u->size : 0);
+                        if (u.depth() == CV_32F) {
+                            Mat m;
+                            u.copyTo(m);
+                            Mat f = m.reshape(1, 1);
+                            Mat bad = f != f;
+                            int firstBad = -1;
+                            for (int k = 0; k < f.cols && firstBad < 0; k++)
+                                if (bad.at<uchar>(0, k))
+                                    firstBad = k;
+                            s << " nan=" << countNonZero(bad) << "/" << f.cols << " firstNan=" << firstBad;
+                        }
+                        CV_LOG_WARNING(NULL, "DNN/CheckNaN:   " << s.str());
+                    };
+                    for (const Arg& in : inputs)
+                        if (!in.empty())
+                            describe("in ", in);
+                    for (const Arg& out : outputs)
+                        if (!out.empty())
+                            describe("out", out);
+                }
+                reported++;
+            }
+        }
+#endif
 
         if (tracingMode != DNN_TRACE_NONE) {
             strm_ << "TIME (\"" << layer->name << "\", \"" << layer->type << "\"): " <<
