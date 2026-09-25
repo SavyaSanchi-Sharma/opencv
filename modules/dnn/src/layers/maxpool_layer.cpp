@@ -10,6 +10,7 @@
 #include "../op_cuda.hpp"
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/pooling.hpp"
+#include "../cuda4dnn/primitives/max_pooling.hpp"
 #endif
 #include "../hal_replacement.hpp"
 
@@ -620,10 +621,27 @@ public:
                               InputArrayOfArrays) CV_OVERRIDE
     {
         auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
-        std::vector<cuda::GpuMatND> inputs;
-        inputs_.getGpuMatNDVector(inputs);
-        MatShape inShape = inputs[0].size;
+        std::vector<UMat> inputs;
+        inputs_.getUMatVector(inputs);
+        MatShape inShape = cv::dnn::shape(inputs[0]);
         const int nspatial = (int)kernel_shape.size();
+
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+        {
+            cuda4dnn::MaxPoolConfiguration mpconfig;
+            mpconfig.kernel_shape.assign(kernel_shape.begin(), kernel_shape.end());
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.strides.push_back(strides.empty() ? 1 : (int64_t)strides[i]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.pads.push_back(pads.empty() ? 0 : (int64_t)pads[i]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.pads.push_back(pads.empty() ? 0 : (int64_t)pads[i + nspatial]);
+            for (int i = 0; i < nspatial; i++)
+                mpconfig.dilations.push_back(dilations.empty() ? 1 : (int64_t)dilations[i]);
+            mpconfig.storage_order = storage_order;
+            return make_cuda_node<cuda4dnn::MaxPoolOp>(preferableTarget, std::move(context->stream), mpconfig);
+        }
+#endif
 
         cuda4dnn::PoolingConfiguration config;
         config.poolMode = cuda4dnn::PoolingConfiguration::PoolingMode::MAX;
@@ -642,7 +660,8 @@ public:
         config.roundMode = ceil_mode ? cuda4dnn::PoolingConfiguration::RoundingMode::CEIL
                                      : cuda4dnn::PoolingConfiguration::RoundingMode::FLOOR;
         config.input_shape.assign(inShape.begin(), inShape.end());
-        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->cudnn_handle), config);
+        return make_cuda_node<cuda4dnn::PoolingOp>(preferableTarget, std::move(context->stream),
+                                                   std::move(context->cudnn_handle), config);
     }
 #endif
 
