@@ -11,12 +11,20 @@
 #include "memory.hpp"
 
 #include <opencv2/core.hpp>
+#include <opencv2/core/utils/configuration.private.hpp>
+#include <opencv2/dnn/version.hpp>
 
 #include <cublas_v2.h>
 
 #include <cstddef>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <utility>
+
+namespace cv { namespace dnn { CV__DNN_INLINE_NS_BEGIN
+bool getParam_DNN_CUDA_FMA_MATH();
+CV__DNN_INLINE_NS_END }}
 
 #define CUDA4DNN_CHECK_CUBLAS(call) \
     ::cv::dnn::cuda4dnn::csl::cublas::detail::check((call), CV_Func, __FILE__, __LINE__)
@@ -28,6 +36,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
     public:
         using CUDAException::CUDAException;
     };
+
+    // same switch as the cuDNN convolution path
+    inline bool cudaFmaMathOnly() { return getParam_DNN_CUDA_FMA_MATH(); }
 
     namespace detail {
         static void check(cublasStatus_t status, const char* func, const char* file, int line) {
@@ -79,6 +90,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             CUDA4DNN_CHECK_CUBLAS(cublasCreate(&handle));
             try {
                 CUDA4DNN_CHECK_CUBLAS(cublasSetStream(handle, stream.get()));
+#if CUDART_VERSION >= 11000
+                // cuBLAS defaults to plain FP32 unlike cuDNN; ONNXRuntime enables TF32, so match it
+                CUDA4DNN_CHECK_CUBLAS(cublasSetMathMode(
+                    handle, cudaFmaMathOnly() ? CUBLAS_DEFAULT_MATH : CUBLAS_TF32_TENSOR_OP_MATH));
+#endif
             } catch (...) {
                 /* cublasDestroy won't throw if a valid handle is passed */
                 CUDA4DNN_CHECK_CUBLAS(cublasDestroy(handle));
@@ -402,6 +418,23 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
                      const DevicePtr<T> C, std::size_t ldc, std::vector<std::size_t> C_offsets,
                      std::size_t batchCount);
 
+    namespace detail {
+        inline void* batchedPointerBuffer(cudaStream_t stream, std::size_t bytes)
+        {
+            static std::mutex m;
+            static std::map<cudaStream_t, std::pair<void*, std::size_t>> buffers;
+            std::lock_guard<std::mutex> lock(m);
+            auto& b = buffers[stream];
+            if (b.second < bytes) {
+                if (b.first)
+                    CUDA4DNN_CHECK_CUDA(cudaFree(b.first));
+                CUDA4DNN_CHECK_CUDA(cudaMalloc(&b.first, bytes));
+                b.second = bytes;
+            }
+            return b.first;
+        }
+    }
+
     template <> inline
     void gemmBatched<half>(const Handle &handle,
                            bool trans_a, bool trans_b,
@@ -436,20 +469,16 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             C_slices[i] = (half*)(C.get()) + C_offsets[i];
         }
 
-        const half **dev_A_slices = 0, **dev_B_slices = 0;
-        half **dev_C_slices = 0;
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_A_slices, batch_count * sizeof(half*)));
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_B_slices, batch_count * sizeof(half*)));
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_C_slices, batch_count * sizeof(half*)));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_A_slices, A_slices, batch_count * sizeof(half*), cudaMemcpyHostToDevice));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_B_slices, B_slices, batch_count * sizeof(half*), cudaMemcpyHostToDevice));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_C_slices, C_slices, batch_count * sizeof(half*), cudaMemcpyHostToDevice));
+        cudaStream_t stream = nullptr;
+        CUDA4DNN_CHECK_CUBLAS(cublasGetStream(handle.get(), &stream));
+        const std::size_t bytes = 3 * batch_count * sizeof(half*);
+        auto dev_slices = static_cast<half**>(detail::batchedPointerBuffer(stream, bytes));
+        CUDA4DNN_CHECK_CUDA(cudaMemcpyAsync(dev_slices, A_slices, bytes, cudaMemcpyHostToDevice, stream));
+        const half **dev_A_slices = const_cast<const half**>(dev_slices);
+        const half **dev_B_slices = dev_A_slices + batch_count;
+        half **dev_C_slices = dev_slices + 2 * batch_count;
 
         CUDA4DNN_CHECK_CUBLAS(cublasHgemmBatched(handle.get(), opa, opb, iM, iN, iK, &alpha, dev_A_slices, ilda, dev_B_slices, ildb, &beta, dev_C_slices, ildc, batch_count));
-
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_A_slices));
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_B_slices));
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_C_slices));
     }
 
     template <> inline
@@ -486,21 +515,17 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
             C_slices[i] = (float*)(C.get()) + C_offsets[i];
         }
 
-        const float **dev_A_slices = 0, **dev_B_slices = 0;
-        float **dev_C_slices = 0;
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_A_slices, batch_count * sizeof(float*)));
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_B_slices, batch_count * sizeof(float*)));
-        CUDA4DNN_CHECK_CUDA(cudaMalloc((void**)&dev_C_slices, batch_count * sizeof(float*)));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_A_slices, A_slices, batch_count * sizeof(float*), cudaMemcpyHostToDevice));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_B_slices, B_slices, batch_count * sizeof(float*), cudaMemcpyHostToDevice));
-        CUDA4DNN_CHECK_CUDA(cudaMemcpy(dev_C_slices, C_slices, batch_count * sizeof(float*), cudaMemcpyHostToDevice));
+        cudaStream_t stream = nullptr;
+        CUDA4DNN_CHECK_CUBLAS(cublasGetStream(handle.get(), &stream));
+        const std::size_t bytes = 3 * batch_count * sizeof(float*);
+        auto dev_slices = static_cast<float**>(detail::batchedPointerBuffer(stream, bytes));
+        CUDA4DNN_CHECK_CUDA(cudaMemcpyAsync(dev_slices, A_slices, bytes, cudaMemcpyHostToDevice, stream));
+        const float **dev_A_slices = const_cast<const float**>(dev_slices);
+        const float **dev_B_slices = dev_A_slices + batch_count;
+        float **dev_C_slices = dev_slices + 2 * batch_count;
 
         // cuBLAS is column-major
         CUDA4DNN_CHECK_CUBLAS(cublasSgemmBatched(handle.get(), opa, opb, iM, iN, iK, &alpha, dev_A_slices, ilda, dev_B_slices, ildb, &beta, dev_C_slices, ildc, batch_count));
-
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_A_slices));
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_B_slices));
-        CUDA4DNN_CHECK_CUDA(cudaFree(dev_C_slices));
     }
 
 }}}}} /* namespace cv::dnn::cuda4dnn::csl::cublas */

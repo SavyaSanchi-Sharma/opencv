@@ -208,12 +208,7 @@ namespace cv { namespace dnn {
         CUDABackendNode() : BackendNode(DNN_BACKEND_CUDA) { }
         virtual ~CUDABackendNode() { }
 
-        /** classic-engine entry point (wrapper-based).
-         *
-         * The default adapts the wrappers to UMat headers and dispatches to the UMat
-         * overload, so ops ported to the new graph engine only implement the UMat forward.
-         * Ops not yet ported keep overriding this method directly.
-         */
+        /** classic-engine entry point; the default forwards to the UMat overload */
         virtual void forward(
             const std::vector<cv::Ptr<BackendWrapper>>& inputs,
             const std::vector<cv::Ptr<BackendWrapper>>& outputs,
@@ -320,12 +315,7 @@ namespace cv { namespace dnn {
         return Ptr<BackendNode>(new NodeType<bool>(std::forward<Args>(args)...));
     }
 
-    /** @brief returns a UMat header that shares `buf`'s device memory but views only the
-     * `shape`-sized slice starting `offsetElems` elements in.
-     *
-     * Used to give several backend wrappers their own view into one larger, contiguous
-     * pre-allocated buffer (e.g. classic-engine concat fusion). `buf` must be contiguous.
-     */
+    /** @brief `shape`-sized view into contiguous `buf`, starting `offsetElems` elements in */
     static inline UMat sliceUMat(const UMat& buf, const MatShape& shape, std::size_t offsetElems)
     {
         std::size_t total = shape.total();
@@ -523,7 +513,7 @@ namespace cv { namespace dnn {
                 m.copyTo(u);
             else
             {
-                // a fresh CUDA buffer is device-authoritative, so convertTo() into it would map RW and read unwritten memory
+                // convertTo() into a fresh CUDA buffer would map it RW and read unwritten memory
                 Mat converted;
                 m.convertTo(converted, deviceDepth);
                 converted.copyTo(u);
@@ -562,12 +552,12 @@ namespace cv { namespace dnn {
         }
 
         void copyToHost() override {
-            // Drain the stream first; hostCopyObsolete() says nothing about in-flight kernels.
-            shared_block->stream.synchronize();
-
             UMatData* u = shared_block->boundUMat.u;
             if (!u || !u->hostCopyObsolete())
                 return;
+
+            // hostCopyObsolete() says nothing about in-flight kernels
+            shared_block->stream.synchronize();
 
             if (!hostMat.empty())
             {
@@ -647,9 +637,10 @@ namespace cv { namespace dnn {
                     u->markDeviceCopyObsolete(false);
                     u->markHostCopyObsolete(false);
                 }
-                // the upload runs on the default stream; DNN's stream is non-blocking, so kernels
-                // would otherwise start reading this buffer before the transfer completes
-                CUDA4DNN_CHECK_CUDA(cudaDeviceSynchronize());
+                // the upload ran on the default stream, which the non-blocking DNN stream ignores
+                cuda4dnn::csl::Event uploaded(true);
+                CUDA4DNN_CHECK_CUDA(cudaEventRecord(uploaded.get(), 0));
+                cuda4dnn::csl::StreamWaitOnEvent(shared_block->stream, uploaded);
             }
         }
 

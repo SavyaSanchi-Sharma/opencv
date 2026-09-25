@@ -1,0 +1,29 @@
+{
+  "project_name": "opencv",
+  "doot_dir": ".doot",
+  "unmatched_strategy": "doc-only-ask",
+  "sync_confirm": true,
+  "clickup": {
+    "workspace_id": "9016555665",
+    "space_id": "90162028034",
+    "default_list_id": "901604471329",
+    "feedback_list_id": "",
+    "attach_docx": false,
+    "project_doc_id": "",
+    "project_doc_page_id": "",
+    "doc_parent": { "id": "901604471329", "type": 6 },
+    "doc_sections": ["Overview", "Components / Architecture", "Recent changes", "Decisions", "Open items"],
+    "branch_map": { "cuda_full": "14ym01udndg" }
+  },
+  "context": {
+    "domain": "CUDA backend for OpenCV 5's new DNN engine (ENGINE_NEW): cuda4dnn per-op executors, cuDNN JIT (HAVE_CUDNNJIT), UMat CUDA buffers; benchmarking and correctness against CPU and ONNX Runtime before merging the stacked CUDA branches.",
+    "key_dirs": [
+      "modules/dnn/src/net_impl2.cpp",
+      "modules/dnn/src/graph_const_fold.cpp",
+      "modules/dnn/src/cuda4dnn",
+      "modules/dnn/src/cuda",
+      "modules/dnn/src/layers",
+      "modules/core/src/cuda_umat.cpp"
+    ]
+  }
+}

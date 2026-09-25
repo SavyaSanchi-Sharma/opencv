@@ -62,6 +62,20 @@ bool getParam_DNN_CHECK_NAN_INF_RAISE_ERROR()
     return DNN_CHECK_NAN_INF_RAISE_ERROR;
 }
 
+// exact FP32 on CUDA: disables TF32 in cuDNN and cuBLAS
+bool getParam_DNN_CUDA_FMA_MATH()
+{
+    static bool DNN_CUDA_FMA_MATH = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
+    return DNN_CUDA_FMA_MATH;
+}
+
+// kill switch for cost-based CPU/GPU placement
+bool getParam_DNN_CUDA_COST_MODEL()
+{
+    static bool DNN_CUDA_COST_MODEL = utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_COST_MODEL", true);
+    return DNN_CUDA_COST_MODEL;
+}
+
 
 CV__DNN_INLINE_NS_END
 }}  // namespace cv::dnn

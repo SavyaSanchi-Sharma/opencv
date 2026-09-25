@@ -325,6 +325,12 @@ CV__DNN_INLINE_NS_BEGIN
 
         virtual bool dynamicOutputShapes() const;
 
+        virtual bool canComputeDynamicOutputShapes() const;
+
+        virtual void getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
+                                                      int requiredOutputs,
+                                                      std::vector<MatShape>& outputs) const;
+
         virtual bool isDataShuffling() const;
 
         virtual void getScaleShift(Mat& scale, Mat& shift) const;
@@ -1083,7 +1089,9 @@ CV__DNN_INLINE_NS_BEGIN
         bool haveArg(const std::string& name) const;
 
         bool isConstArg(Arg arg) const;
-        // by value: UMat::getMat() returns a temporary Mat, so there is nothing to reference
+        /** @brief Returns the tensor of @p arg for reading.
+         *  @return a read-only Mat mapped with ACCESS_READ; it may share memory with the network, so never write to it.
+         */
         Mat argTensor(Arg arg) const;
         int argType(Arg arg) const;
 
