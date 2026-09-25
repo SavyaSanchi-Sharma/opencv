@@ -178,6 +178,14 @@ struct Net::Impl : public detail::NetImplBase
     bool fusedSnapshotValid = false;
     std::vector<FusedGraphSnapshot> fusedSnapshot;
     std::unordered_map<const LayerInfo*, int> cudaPlacementMemo;
+    // memoized getMemoryShapes()/getTypes(), keyed on the input signature and weightEpoch
+    struct InferCache {
+        bool valid = false;
+        unsigned weightEpoch = 0;
+        std::vector<MatShape> inpShapes, outShapes, tempShapes;
+        std::vector<int> inpTypes, outTypes, tempTypes;
+    };
+    std::unordered_map<const LayerInfo*, InferCache> inferCache;
     std::vector<Ptr<BackendWrapper> > argWrappers;
     std::vector<const void*> argWrapperData;
     enum ArgResidency { ARG_RESIDENCY_UNKNOWN = 0, ARG_RESIDENCY_HOST, ARG_RESIDENCY_DEVICE };

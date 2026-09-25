@@ -344,11 +344,6 @@ bool LayerInfo::alwaysSupportInplace() const
     return false;
 }
 
-bool LayerInfo::needsHostData(int) const
-{
-    return true;
-}
-
 bool LayerInfo::dynamicOutputShapes() const
 {
     return false;
@@ -366,12 +361,6 @@ void LayerInfo::getMemoryShapesForDynamicOutput(const std::vector<UMat>& inputs,
     CV_UNUSED(inputs); CV_UNUSED(requiredOutputs); CV_UNUSED(outputs);
     CV_Error(Error::StsNotImplemented,
              format("layer '%s' (%s) does not implement getMemoryShapesForDynamicOutput()", name.c_str(), type.c_str()));
-}
-
-bool LayerInfo::getDynamicOutputShapesAfterForward(std::vector<MatShape>& outputs) const
-{
-    CV_UNUSED(outputs);
-    return false;
 }
 
 bool LayerInfo::isDataShuffling() const

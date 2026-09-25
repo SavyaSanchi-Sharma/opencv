@@ -1652,6 +1652,9 @@ void Net::Impl::finalize()
         restoreFusedSnapshot();
     }
 
+    // fusion may have freed layers whose addresses a new layer can reuse
+    inferCache.clear();
+
     bool useCUDA = false;
 #ifdef HAVE_CUDA
     if (preferableBackend == DNN_BACKEND_CUDA && haveCUDA()) {
@@ -1765,23 +1768,24 @@ void Net::Impl::allocateLayerOutputs(
     tempShapes.clear();
     tempTypes.clear();
     // inference is a pure function of the input signature, so re-run it only when that changes
-    if (layer->inferCacheValid && layer->inferWeightEpoch == layer->weightEpoch &&
-        layer->inferInpShapes == inpShapes && layer->inferInpTypes == inpTypes) {
-        outShapes = layer->inferOutShapes;
-        outTypes = layer->inferOutTypes;
-        tempShapes = layer->inferTempShapes;
-        tempTypes = layer->inferTempTypes;
+    InferCache& ic = inferCache[layer.get()];
+    if (ic.valid && ic.weightEpoch == layer->weightEpoch &&
+        ic.inpShapes == inpShapes && ic.inpTypes == inpTypes) {
+        outShapes = ic.outShapes;
+        outTypes = ic.outTypes;
+        tempShapes = ic.tempShapes;
+        tempTypes = ic.tempTypes;
     } else {
         layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
         layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
-        layer->inferInpShapes = inpShapes;
-        layer->inferInpTypes = inpTypes;
-        layer->inferOutShapes = outShapes;
-        layer->inferOutTypes = outTypes;
-        layer->inferTempShapes = tempShapes;
-        layer->inferTempTypes = tempTypes;
-        layer->inferWeightEpoch = layer->weightEpoch;
-        layer->inferCacheValid = true;
+        ic.inpShapes = inpShapes;
+        ic.inpTypes = inpTypes;
+        ic.outShapes = outShapes;
+        ic.outTypes = outTypes;
+        ic.tempShapes = tempShapes;
+        ic.tempTypes = tempTypes;
+        ic.weightEpoch = layer->weightEpoch;
+        ic.valid = true;
     }
     CV_Assert(tempShapes.size() == tempTypes.size());
     CV_Assert(outShapes.size() == outTypes.size());
@@ -2716,9 +2720,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                     inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
                 else
                     inpMats[i] = Mat();  // drop the previous op's entry rather than hold it
-            } else if (!layer->needsHostData((int)i)) {
-                // shape/type carrier only, like the output side: never allocate what nothing reads
-                inpMats[i] = Mat(u.shape(), u.type(), (void*)nullptr);
             } else if (useSchedule) {
                 // the schedule already brought this down; nothing to check per input
                 inpMats[i] = u.getMat(ACCESS_READ);
@@ -2856,49 +2857,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             }
 #ifdef HAVE_CUDA
             if (opBackend == DNN_BACKEND_CUDA) {
-                bool cudaFailed = false;
-                try {
-                    forwardOpCUDA(this, gimpl, opidx, inputs, outputs, h2dCount, h2dBytes);
-                    std::vector<MatShape> finalShapes;
-                    if (dynamicOutShapes && op->getDynamicOutputShapesAfterForward(finalShapes)) {
-                        CV_Assert(finalShapes.size() == noutputs);
-                        for (size_t k = 0; k < noutputs; k++) {
-                            UMat& t = argTensor(outputs[k]);
-                            t.fit(finalShapes[k], t.type());
-                            if (outputs[k].idx < (int)argWrapperData.size())
-                                argWrapperData[outputs[k].idx] = nullptr;
-                        }
-                    }
-                } catch (const cv::Exception& e) {
-                    // these CUDA errors are sticky: the context is dead, so a CPU retry only defers the crash
-                    cudaError_t cudaStatus = cudaPeekAtLastError();
-                    if (cudaStatus == cudaErrorIllegalAddress ||
-                        cudaStatus == cudaErrorLaunchFailure ||
-                        cudaStatus == cudaErrorLaunchTimeout ||
-                        cudaStatus == cudaErrorHardwareStackError ||
-                        cudaStatus == cudaErrorMisalignedAddress)
-                    {
-                        CV_LOG_ERROR(NULL, cv::format("DNN/NewEngine: op #%zu '%s' (%s) hit an unrecoverable "
-                                                      "CUDA error (%s); not retrying", opidx,
-                                                      op->name.c_str(), op->type.c_str(),
-                                                      cudaGetErrorString(cudaStatus)));
-                        throw;
-                    }
-                    CV_LOG_WARNING(NULL, cv::format("DNN/NewEngine: op #%zu '%s' (%s) failed on CUDA (%s); "
-                                                    "demoting to CPU and re-running", opidx,
-                                                    op->name.c_str(), op->type.c_str(), e.what()));
-                    gimpl->execBackend_[opidx] = DNN_BACKEND_OPENCV;
-                    gimpl->exec_[opidx] = makeCpuExec(op);
-                    cudaFailed = true;
-                }
-                if (cudaFailed) {
-                    inpMats.clear();
-                    outMats.clear();
-                    tempMats.clear();
-                    outOrigData.clear();
-                    opidx--;
-                    continue;
-                }
+                forwardOpCUDA(this, gimpl, opidx, inputs, outputs, h2dCount, h2dBytes);
             } else
 #endif
             {
