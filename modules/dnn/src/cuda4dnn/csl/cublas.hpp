@@ -12,6 +12,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/utils/configuration.private.hpp>
+#include <opencv2/dnn/version.hpp>
 
 #include <cublas_v2.h>
 
@@ -20,6 +21,10 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+
+namespace cv { namespace dnn { CV__DNN_INLINE_NS_BEGIN
+bool getParam_DNN_CUDA_FMA_MATH();
+CV__DNN_INLINE_NS_END }}
 
 #define CUDA4DNN_CHECK_CUBLAS(call) \
     ::cv::dnn::cuda4dnn::csl::cublas::detail::check((call), CV_Func, __FILE__, __LINE__)
@@ -32,13 +37,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         using CUDAException::CUDAException;
     };
 
-    // shares the switch with the cuDNN convolution path, so one flag restores exact FP32 everywhere
-    inline bool cudaFmaMathOnly()
-    {
-        static const bool flag =
-            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
-        return flag;
-    }
+    // same switch as the cuDNN convolution path
+    inline bool cudaFmaMathOnly() { return getParam_DNN_CUDA_FMA_MATH(); }
 
     namespace detail {
         static void check(cublasStatus_t status, const char* func, const char* file, int line) {

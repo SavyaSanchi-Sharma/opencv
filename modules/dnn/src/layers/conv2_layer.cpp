@@ -849,34 +849,23 @@ public:
     }
 
 #ifdef HAVE_CUDA
-    // Preconditions independent of the fused activation -- weights/shape/padding
-    // must always be CUDA-friendly regardless of how the activation gets executed.
+    // weight/shape checks that hold whatever the fused activation is
     bool cudaSupportedBase() const
     {
-        // cuda4dnn::ConvolutionOp handles 1-D/2-D/3-D convolution -- it asserts
-        // 1 <= convolution_order <= 3 -- and initCudaConvNode() builds kernel_size,
-        // strides, dilations and pads generically from nspatial. So the only real
-        // constraint is that the weight rank lands in that range:
-        //   3 -> [Cout, Cin/g, kw]        (1-D)
-        //   4 -> [Cout, Cin/g, kh, kw]    (2-D)
-        //   5 -> [Cout, Cin/g, kd, kh, kw](3-D)
+        // 2-D only for now, although ConvolutionOp itself accepts 1-D to 3-D
         if (origWeights.empty() || wshape0.dims != 4)
             return false;
         return true;
     }
 
-    // True iff the fused activation (if any) can run inside the same cuDNN conv kernel
-    // via the CPU-oriented FastActivation whitelist (RELU/LeakyReLU/Clip/PReLU-adjacent).
+    // fast activations the CUDA conv applies itself; PReLU is not one of them
     bool cudaFastActivation() const
     {
         return fastActivation == FAST_ACTIV_NONE || fastActivation == FAST_ACTIV_RELU ||
                fastActivation == FAST_ACTIV_LEAKY_RELU || fastActivation == FAST_ACTIV_CLIP;
     }
 
-    // cuda4dnn::ConvolutionOp already has single-kernel fusion support for these
-    // activations (see ConvolutionConfiguration::ActivationType), independent of
-    // the CPU-oriented FastActivation whitelist above. Checked against the ORIGINAL
-    // activation layer (retained in `activ` by fuseActivation()'s generic branch).
+    // generic activations ConvolutionOp can fuse, matched on the retained `activ` layer
     static bool nativeCudaActivationType(const String& type, ConvolutionConfiguration::ActivationType& out)
     {
         if (type == "Swish")   { out = ConvolutionConfiguration::ActivationType::SWISH;   return true; }
@@ -893,9 +882,7 @@ public:
 
     bool cudaSupported() const
     {
-        ConvolutionConfiguration::ActivationType unused;
-        return cudaSupportedBase() && cudaFastActivation() &&
-               (activationFunc == nullptr || cudaNativeActivation(unused));
+        return cudaSupportedBase() && cudaFastActivation();
     }
 
     Ptr<BackendNode> initCudaConvNode(void* context_, const MatShape& inpShape,
@@ -1012,27 +999,18 @@ public:
     static Ptr<Layer> create(const Ptr<LayerInfo>& data, void* backendCtx)
     {
         Ptr<Conv2LayerImpl> conv = data.dynamicCast<Conv2LayerImpl>();
-        if (!conv || !backendCtx || !conv->cudaSupportedBase())
+        if (!conv || !backendCtx || !conv->cudaSupported())
             return Ptr<Layer>();
 
         ConvolutionConfiguration::ActivationType nativeAct = ConvolutionConfiguration::ActivationType::IDENTITY;
         bool hasNativeAct = false;
         Ptr<Layer> activExec;
-        // conv->activ is set only by fuseActivation()'s generic branch (an activation
-        // outside the fast RELU/LeakyReLU/Clip enum, e.g. Swish/Mish/Sigmoid/TanH) --
-        // that's exactly the case needing native-fusion-or-fallback resolution below.
-        // (cudaFastActivation() is the wrong check here: it returns true for
-        // FAST_ACTIV_NONE too, which is also the state a Swish-fused conv is in.)
+        // activ is set only for activations outside the fast enum (Swish, Mish, Elu, ...)
         if (!conv->activ.empty()) {
             if (conv->cudaNativeActivation(nativeAct)) {
-                // cuda4dnn::ConvolutionOp can fuse this activation into the same kernel
-                // (e.g. Swish/Mish/Sigmoid/TanH) -- no separate exec needed.
-                hasNativeAct = true;
+                hasNativeAct = true;  // fused into the conv kernel
             } else {
-                // Not a natively-fusable activation. Run the conv bare (IDENTITY) and
-                // re-create the original activation layer as its own standalone CUDA
-                // exec, run right after -- mirrors ORT's model of independent per-op
-                // CUDA kernels instead of gating GPU eligibility on fusion recognition.
+                // run the conv bare and the activation as its own CUDA exec right after
                 activExec = LayerFactory::createExec(conv->activ->type, DNN_BACKEND_CUDA, conv->activ, backendCtx);
                 if (!activExec)
                     return Ptr<Layer>();  // that activation type has no CUDA exec either

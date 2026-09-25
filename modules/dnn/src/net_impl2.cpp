@@ -430,8 +430,7 @@ public:
     std::vector<int> execBackend_;
     std::vector<int> execReason_;
 
-    // one entry per arg that actually crosses the bus, in op order; args that merely flow past a
-    // host op never appear here. Rebuilt whenever placement or the input signature changes.
+    // one entry per arg that crosses the bus, in op order; rebuilt when placement changes
     struct TransferPoint {
         int opIdx;
         int argIdx;
@@ -708,22 +707,14 @@ void Net::Impl::prepareForInference()
 
     if (!prepared) {
 #if CV_SIMD_SCALABLE
-        // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
-        // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
-        // so a wider block gives no benefit and breaks them. Only fp32 graphs use the wider
-        // vlanes()-based defaultC0. Signed-int8 (CV_8S) args are the quantization signature
-        // (uint8 image inputs are CV_8U, so they don't trigger this).
+        // RVV (#28852): int8 kernels are hardwired to C0=8, so CV_8S graphs keep it
         for (const ArgData& a : args) {
             if (a.type == CV_8S) { defaultC0 = 8; break; }
         }
 #endif
         widenHalfConstants();
 #if CV_SIMD_SCALABLE
-        // RVV (#28852): keep quantized graphs at C0=8. The int8 kernels are hardwired to
-        // C0=8 (VNNI/NEON weight packing + per-channel quantization) and run scalar on RVV,
-        // so a wider block gives no benefit and breaks them. Only fp32 graphs use the wider
-        // vlanes()-based defaultC0. Signed-int8 (CV_8S) args are the quantization signature
-        // (uint8 image inputs are CV_8U, so they don't trigger this).
+        // RVV (#28852): int8 kernels are hardwired to C0=8, so CV_8S graphs keep it
         for (const ArgData& a : args) {
             if (a.type == CV_8S) { defaultC0 = 8; break; }
         }
@@ -849,7 +840,6 @@ static size_t isqrtRounded(size_t n)
     return r;
 }
 
-// Cost is in transfer-byte equivalents, never seconds; constants are compiled in so placement reproduces everywhere.
 static bool cudaOpDisabled(const std::string& type)
 {
     static const std::vector<std::string> disabled = [] {
@@ -927,32 +917,15 @@ static bool keepHostShapeInput(const std::string& type, size_t i, const UMat& t)
 }
 #endif
 
-static bool cudaCostModelEnabled()
-{
-    return utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_COST_MODEL", true);
-}
+// placement cost in transfer-byte equivalents, uncalibrated reference-desktop estimates
+// host ~200 GFLOP/s over a ~25 GB/s PCIe link
+static const int64 CUDA_COST_FLOPS_PER_BYTE = 8;
+// host ~50 GB/s DRAM over the same link, for memory-bound layers
+static const int64 CUDA_COST_TOUCH_PER_BYTE = 2;
+// ~20 us of sync and launch per host<->device transition at ~25 GB/s
+static const int64 CUDA_COST_BARRIER_BYTES = 512 * 1024;
 
-// FLOPs won back per transferred byte: host throughput (~200 GFLOP/s) over link bw (~25 GB/s).
-static int64 cudaCostFlopsPerByte()
-{
-    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_FLOPS_PER_BYTE", 8);
-    return (int64)std::max<size_t>(v, 1);
-}
-
-// Memory-bound half of the roofline; covers the ~90 layer types with no getFLOPS() override.
-static int64 cudaCostTouchPerByte()
-{
-    size_t v = utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_TOUCH_PER_BYTE", 2);
-    return (int64)std::max<size_t>(v, 1);
-}
-
-// Cost of one host<->device transition before any payload: pipeline drain plus launch overhead.
-static int64 cudaCostBarrierBytes()
-{
-    return (int64)utils::getConfigurationParameterSizeT("OPENCV_DNN_CUDA_COST_BARRIER_BYTES", 512 * 1024);
-}
-
-// Index spaces: prog i in [0,nops) with null holes, compacted k in [0,n) where ops[k]==i, cut c in [0,n] before ops[c], args.
+// indices: prog i (with null holes), compacted k with ops[k]==i, cut c before ops[c]
 struct PlacementCost
 {
     std::vector<int64> cumBenefit;    // [n+1]   prefix sum of per-op benefit, placement-independent
@@ -988,7 +961,7 @@ static bool buildPlacementCost(Net::Impl* netimpl,
     pc.seen.assign(nargs, 0);
     pc.stamp = 0;
 
-    // consts carry their shape on ArgData; the rest comes from the cache. Symbolic dims aren't sizeable.
+    // consts carry their shape on ArgData, the rest come from the cache
     for (size_t a = 1; a < nargs; a++) {
         const ArgData& ad = netimpl->args[a];
         MatShape sh;
@@ -1017,7 +990,7 @@ static bool buildPlacementCost(Net::Impl* netimpl,
                 pc.producer[out.idx] = (int)k;
     }
 
-    // Difference array: an arg spans every cut from producer to last reader; consts upload once per finalize().
+    // difference array: an arg is live on every cut from its producer to its last reader
     for (size_t a = 1; a < nargs; a++) {
         const int64 bytes = pc.argBytes[a];
         if (bytes <= 0 || netimpl->args[a].kind == DNN_ARG_CONST)
@@ -1034,8 +1007,8 @@ static bool buildPlacementCost(Net::Impl* netimpl,
     for (size_t c = 1; c <= n; c++)
         pc.liveBytes[c] += pc.liveBytes[c - 1];
 
-    const int64 flopsPerByte = cudaCostFlopsPerByte();
-    const int64 touchPerByte = cudaCostTouchPerByte();
+    const int64 flopsPerByte = CUDA_COST_FLOPS_PER_BYTE;
+    const int64 touchPerByte = CUDA_COST_TOUCH_PER_BYTE;
     std::vector<MatShape> inpShapes, outShapes;
     std::vector<MatType> inpTypes, outTypes;
     std::vector<int64> benefit(n, 0);
@@ -1439,8 +1412,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
             }
         }
 
-        // the compacted program -- indices of the ops that survived fusion -- is the list both the
-        // window filter and the segment pass below walk, so build it once
+        // ops that survived fusion, shared by the window filter and the segment pass
         std::vector<size_t> ops;
         bool allPlaced = true;
         for (i = 0; i < nops; i++) {
@@ -1452,15 +1424,15 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
 
         PlacementCost pc;
         bool costModel = demoteReason < 0 && !allPlaced && cudaPlacementMemo.empty() && haveShapes &&
-                         cudaCostModelEnabled() &&
+                         getParam_DNN_CUDA_COST_MODEL() &&
                          buildPlacementCost(this, prog, ops, placed, shapeCache, typeCache, pc);
 
         if (costModel) {
             const size_t n = ops.size();
-            const int64 barrier = cudaCostBarrierBytes();
+            const int64 barrier = CUDA_COST_BARRIER_BYTES;
             size_t demotedByWindow = 0, demotedBySegment = 0;
 
-            // Tier 1: costed window, O(1) per position; liveBytes bounds the cut, so rejecting here is safe.
+            // tier 1: O(1) costed window; liveBytes bounds the cut, so rejecting is safe
             size_t wlen = std::min(std::max(isqrtRounded(n), CUDA_AUTO_WINDOW_LO), CUDA_AUTO_WINDOW_HI);
             wlen = std::min(wlen, n);
             if (wlen >= 2) {
@@ -1485,7 +1457,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
                 }
             }
 
-            // Tier 2: exact cut per segment; demotion merges neighbours so iterate, monotone hence settles.
+            // tier 2: exact cut per segment, iterated until no segment is demoted
             for (int pass = 0; pass < 8; pass++) {
                 bool changed = false;
                 for (size_t a = 0; a < n; ) {
@@ -1568,9 +1540,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowD
     buildTransferSchedule(graph);
 }
 
-// Walks the placed program once and records every arg that actually crosses the bus. An arg is
-// downloaded before the first host op that reads it and uploaded before the first device op that
-// reads it; anything merely live across a boundary without being read there never appears.
+// records each arg at the first op on the other side that reads it
 void Net::Impl::buildTransferSchedule(const Ptr<Graph>& graph)
 {
     GraphImpl* g = static_cast<GraphImpl*>(graph.get());
@@ -1687,7 +1657,7 @@ void Net::Impl::finalize()
     if (preferableBackend == DNN_BACKEND_CUDA && haveCUDA()) {
         useCUDA = true;
         if (preferableTarget == DNN_TARGET_CUDA_FP16) {
-            // no FP16 execution path on the new engine; run FP32 rather than reinterpret FP32 buffers as half
+            // the new engine has no FP16 path, so run FP32
             CV_LOG_WARNING(NULL, "DNN/NewEngine: CUDA FP16 target is not supported; switching to FP32 target.");
             preferableTarget = DNN_TARGET_CUDA;
         }
@@ -1828,7 +1798,7 @@ void Net::Impl::allocateLayerOutputs(
             MatAllocator* bufAlloc = (opBackend == DNN_BACKEND_CUDA) ? tensorAllocator() : Mat::getDefaultAllocator();
             bool aliasesInput = false;
             if (out_t.u && out_t.u->currAllocator != bufAlloc && !out_t.empty()) {
-                // an in-place op aliases output onto input; releasing to switch allocators would destroy that input
+                // in-place op: releasing to switch allocators would destroy its input
                 for (const Arg& in : layer->inputs) {
                     if (!in.empty() && &argTensor(in) == &out_t) { aliasesInput = true; break; }
                 }
@@ -2549,14 +2519,13 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
             transferTaken = needConv ? "convert+upload" : "upload";
         }
 
-        // buffer stayed device-homed but a CPU op wrote it: both dirty bits read clean, so force the upload
+        // a CPU op wrote a device-homed buffer, the dirty bits miss it, so force the upload
         if (!migrated && hostIsNewer && t.u) {
             t.u->markDeviceCopyObsolete(true);
             transferTaken = "flag-upload";
         }
         if (inputs[i].idx < (int)netimpl->argResidency.size()) {
-            // only temps/outputs are ever written on the device; for consts and model inputs the host
-            // copy is authoritative, and stamping them DEVICE makes a later CPU reader discard it
+            // consts and model inputs stay host-authoritative, or a later CPU reader drops them
             const ArgKind kind = netimpl->args.at(inputs[i].idx).kind;
             if (kind == DNN_ARG_TEMP || kind == DNN_ARG_OUTPUT)
                 netimpl->argResidency[inputs[i].idx] = Net::Impl::ARG_RESIDENCY_DEVICE;
@@ -2756,8 +2725,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
             } else {
                 const bool deviceIsNewer = inp.idx < (int)argResidency.size() &&
                                            argResidency[inp.idx] == ARG_RESIDENCY_DEVICE;
-                // forced unless OPENCV_DNN_CUDA_TRUST_RESIDENCY=1; setDeviceDirty() already marks
-                // CUDA op outputs host-obsolete, so the flag should suffice on its own
+                // forced download unless OPENCV_DNN_CUDA_TRUST_RESIDENCY=1
                 if (!cudaTrustResidency() && u.u && u.u->currAllocator == cv::cuda::getCudaAllocator())
                     u.u->markHostCopyObsolete(true);
                 // a cached wrapper can still be bound to a freed allocation, so revalidate it here
@@ -3146,7 +3114,21 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 }
             } else {
                 UMat& cur = __tensors__.at(out.idx);
-                if (cur.u != m.u || cur.shape() != m.shape() || cur.type() != m.type()) {
+                if (!dynamicOutShapes) {
+                    // a reallocated output would silently detach from the graph
+                    if (m.shape() != outShapes[i] || m.type() != outTypes[i] ||
+                        (m.u && (m.u->data != outOrigData[i].first || m.u->size != outOrigData[i].second)))
+                    {
+                        std::ostringstream oss;
+                        oss << "layer '" << layer->name << "' (" << layer->type << "): output #" << i
+                            << " changed during forward(): inferred shape " << outShapes[i]
+                            << " / type " << typeToString(outTypes[i])
+                            << ", actual " << m.shape() << " / " << typeToString(m.type())
+                            << (m.u && m.u->data != outOrigData[i].first
+                                ? "; the tensor was reallocated (the layer must write in place)" : "");
+                        CV_Error(Error::StsInternal, oss.str());
+                    }
+                } else if (cur.u != m.u || cur.shape() != m.shape() || cur.type() != m.type()) {
                     UMat freshT;
                     rehomeAllocator(freshT, Mat::getDefaultAllocator());
                     freshT.fit(m.shape(), m.type());

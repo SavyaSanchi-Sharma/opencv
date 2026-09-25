@@ -21,15 +21,15 @@
 #include <iterator>
 
 #include <opencv2/core/utils/configuration.private.hpp>
+#include <opencv2/dnn/version.hpp>
+
+namespace cv { namespace dnn { CV__DNN_INLINE_NS_BEGIN
+bool getParam_DNN_CUDA_FMA_MATH();
+CV__DNN_INLINE_NS_END }}
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cudnn {
 
-    inline bool cudaFmaMathOnly()
-    {
-        static const bool flag =
-            utils::getConfigurationParameterBool("OPENCV_DNN_CUDA_FMA_MATH", false);
-        return flag;
-    }
+    inline bool cudaFmaMathOnly() { return getParam_DNN_CUDA_FMA_MATH(); }
 
     inline bool cudaConvAlgoFind()
     {

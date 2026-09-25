@@ -81,10 +81,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         return desc;
     }
 
-    /** channel-last (NHWC / NDHWC / ...) strides for a tensor whose logical axis order is
-     *  [N, C, spatial...], so the descriptor's dimensions stay in that order while the
-     *  physical layout has C as the fastest-varying axis.
-     */
+    /** channel-last strides for a tensor whose dims stay in [N, C, spatial...] order */
     inline std::vector<int64_t> channelLastStrides(const std::vector<int64_t>& shape) {
         const int64_t rank = static_cast<int64_t>(shape.size());
         CV_Assert(rank >= 3);
@@ -110,10 +107,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         return stride;
     }
 
-    /** JIT-compiled forward convolution (NHWC data, KRSC filter) built on the cuDNN graph engine.
-     *
-     * The plan is compiled once at construction and cached; convolve() rebinds pointers and executes.
-     */
+    /** cuDNN graph convolution (NHWC data, KRSC filter); the plan is built once at construction */
     template <class T>
     class ConvolutionGraph {
     public:
@@ -283,12 +277,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         void* cachedPointers[4] = { nullptr, nullptr, nullptr, nullptr };
     };
 
-    /** JIT-compiled forward resample (pooling) built on the cuDNN graph engine.
-     *
-     * Covers CUDNN_RESAMPLE_AVGPOOL_{INCLUDE,EXCLUDE}_PADDING and CUDNN_RESAMPLE_MAXPOOL,
-     * 2 spatial dimensions, no dilation (the resample descriptor has no dilation attribute).
-     * The plan is compiled once at construction and cached; resample() rebinds pointers and executes.
-     */
+    /** cuDNN graph 2-D avg/max pooling without dilation; the plan is built once at construction */
     template <class T>
     class ResampleGraph {
     public:

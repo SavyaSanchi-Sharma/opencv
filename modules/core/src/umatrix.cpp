@@ -1185,8 +1185,7 @@ Mat UMat::getMat(AccessFlag accessFlags) const
             hdr.datastart = u->data;
             hdr.data = u->data + offset;
             hdr.datalimit = hdr.dataend = u->data + u->size;
-            // the Mat header ctor above does not carry over the tensor layout/block-channel
-            // metadata (as UMat::fit() does), so propagate them explicitly
+            // the header ctor drops the tensor layout and block-channel count
             hdr.size.layout = size.layout;
             hdr.size.C = size.C;
             return hdr;
