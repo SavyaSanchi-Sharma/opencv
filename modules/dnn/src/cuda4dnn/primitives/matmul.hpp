@@ -7,6 +7,12 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN) && defined(HAVE_CUDNNJIT)) || defined(HAVE_CUDNN)
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/stream.hpp"
 #include "../csl/cublas.hpp"
 #include "../csl/tensor.hpp"
@@ -45,27 +51,22 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         }
 
         void forward(
-            const std::vector<cv::Ptr<BackendWrapper>>& inputs,
-            const std::vector<cv::Ptr<BackendWrapper>>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             CV_Assert(((inputs.size() == 2 && constTensor.empty()) ||
                        (inputs.size() == 1 && !constTensor.empty())) && outputs.size() == 1);
 
-            auto input1_wrapper = inputs[0].dynamicCast<wrapper_type>();
-            auto input1 = input1_wrapper->getView();
+            auto input1 = csl::viewOf<T>(inputs[0]);
 
             csl::TensorView<T> input2;
             if (constTensor.empty())
-            {
-                auto input2_wrapper = inputs[1].dynamicCast<wrapper_type>();
-                input2 = input2_wrapper->getView();
-            }
+                input2 = csl::viewOf<T>(inputs[1]);
             else
                 input2 = csl::TensorView<T>(constTensor);
 
-            auto output_wrapper = outputs[0].dynamicCast<wrapper_type>();
-            auto output = output_wrapper->getSpan();
+            auto output = csl::spanOf<T>(outputs[0]);
 
             auto rank = output.rank();
             CV_Assert(rank == input1.rank());

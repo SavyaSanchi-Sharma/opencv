@@ -7,10 +7,22 @@
 
 #include "../../op_cuda.hpp"
 
+#if (defined(HAVE_CUDNN))
+#include <cudnn.h>
+#elif defined(HAVE_CUDNNJIT)
+#include <cudnn_graph.h>
+#endif
+
 #include "../csl/cudnn.hpp"
 #include "../csl/stream.hpp"
 #include "../csl/tensor.hpp"
 #include "../csl/tensor_ops.hpp"
+
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+#include "../csl/cudnn/graph.hpp"
+#include "../kernels/permute.hpp"
+#include "../kernels/fill_copy.hpp"
+#endif
 
 #include "../kernels/scale_shift.hpp"
 #include "../kernels/activations.hpp"
@@ -272,7 +284,69 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 }
             }
 
+#if !defined(HAVE_CUDNNJIT) || defined(HAVE_CUDNN)
             convoluter = csl::Convolution<T>(cudnnHandle, params);
+#endif
+
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+            {
+                const auto& conv_in = params.input_shape;
+                CV_Assert(conv_in.size() == rank);
+                CV_Assert(output_shape.size() == rank);
+                CV_Assert(fshape.size() == rank);
+
+                auto toInt64 = [](const std::vector<std::size_t>& v) {
+                    return std::vector<int64_t>(v.begin(), v.end());
+                };
+                /* [N, C, spatial...] -> [N, spatial..., C] */
+                auto toChannelLast = [](const std::vector<std::size_t>& v) {
+                    std::vector<std::size_t> out;
+                    out.push_back(v[0]);
+                    out.insert(out.end(), v.begin() + 2, v.end());
+                    out.push_back(v[1]);
+                    return out;
+                };
+                /* axis permutation taking a [N, C, spatial...]-ordered tensor to [N, spatial..., C] */
+                auto nchwToNhwcOrder = [](std::size_t rank_) {
+                    std::vector<std::size_t> order = { 0 };
+                    for (std::size_t k = 2; k < rank_; k++) order.push_back(k);
+                    order.push_back(1);
+                    return order;
+                };
+                /* axis permutation taking a [N, spatial..., C]-ordered tensor to [N, C, spatial...] */
+                auto nhwcToNchwOrder = [](std::size_t rank_) {
+                    std::vector<std::size_t> order = { 0, rank_ - 1 };
+                    for (std::size_t k = 1; k < rank_ - 1; k++) order.push_back(k);
+                    return order;
+                };
+
+                typename csl::cudnn::ConvolutionGraph<T>::params_type jit_params;
+                jit_params.input_shape  = toInt64(conv_in);
+                jit_params.output_shape = toInt64(output_shape);
+                jit_params.filter_shape = toInt64(fshape);
+                jit_params.padding  = toInt64(params.padding);
+                jit_params.stride   = toInt64(params.stride);
+                jit_params.dilation = toInt64(params.dilation);
+
+                jitConvoluter = csl::cudnn::ConvolutionGraph<T>(cudnnHandle, jit_params);
+
+                auto conv_in_cl = toChannelLast(conv_in);
+                auto fshape_cl  = toChannelLast(fshape);
+                auto out_cl     = toChannelLast(output_shape);
+                jitInputNHWC  = csl::Tensor<T>(conv_in_cl.begin(), conv_in_cl.end());
+                jitFilterKRSC = csl::Tensor<T>(fshape_cl.begin(), fshape_cl.end());
+                jitOutputNHWC = csl::Tensor<T>(out_cl.begin(), out_cl.end());
+
+                csl::TensorView<T> filter_oihw(filtersTensor.get(), fshape.begin(), fshape.end());
+                if (filter_oihw.size() == 1)
+                    kernels::copy<T>(stream, jitFilterKRSC, filter_oihw);
+                else
+                    kernels::permute<T>(stream, jitFilterKRSC, filter_oihw, nchwToNhwcOrder(rank));
+
+                jitNchwToNhwcOrder = nchwToNhwcOrder(rank);
+                jitNhwcToNchwOrder = nhwcToNchwOrder(rank);
+            }
+#endif
 
             csl::WorkspaceBuilder builder;
             if (!transformed_shape.empty())
@@ -281,13 +355,17 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 auto sz = std::accumulate(std::begin(shape), std::end(shape), 1, std::multiplies<std::size_t>());
                 builder.require<T>(sz);
             }
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+            builder.require(jitConvoluter.get_workspace_size());
+#else
             builder.require(convoluter.get_workspace_size());
+#endif
             scratch_mem_in_bytes = builder.required_workspace_size();
         }
 
         void forward(
-            const std::vector<cuda::GpuMatND>& inputs,
-            const std::vector<cuda::GpuMatND>& outputs,
+            const std::vector<UMat>& inputs,
+            const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
             /* input[0] = conv input, input[1] = bias (from fused eltwise layer) */
@@ -338,7 +416,13 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (fusion_location == InternalFusionLocation::NATIVE)
             {
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+                kernels::permute<T>(stream, jitInputNHWC, input, jitNchwToNhwcOrder);   /* NCHW/NCDHW -> NHWC/NDHWC */
+                jitConvoluter.convolve(cudnnHandle, jitInputNHWC.get(), jitFilterKRSC.get(), jitOutputNHWC.get(), conv_scratchpad);
+                kernels::permute<T>(stream, output, jitOutputNHWC, jitNhwcToNchwOrder);  /* NHWC/NDHWC -> NCHW/NCDHW */
+#else
                 convoluter.convolve(output, input, filtersTensor, conv_scratchpad);
+#endif
 
                 if (fusion_mode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM ||
                     fusion_mode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM_THEN_ACTIVATION ||
@@ -584,6 +668,12 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
         std::vector<std::size_t> transformed_shape;
         csl::TensorTransform<T> inputTransformer;
+
+#if defined(HAVE_CUDNNJIT) && !defined(HAVE_CUDNN)
+        csl::cudnn::ConvolutionGraph<T> jitConvoluter;
+        csl::Tensor<T> jitInputNHWC, jitFilterKRSC, jitOutputNHWC;
+        std::vector<std::size_t> jitNchwToNhwcOrder, jitNhwcToNchwOrder;
+#endif
 
         std::size_t scratch_mem_in_bytes;
 
