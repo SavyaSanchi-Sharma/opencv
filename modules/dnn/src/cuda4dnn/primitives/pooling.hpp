@@ -20,7 +20,7 @@
 #ifdef HAVE_CUDNNJIT
 #include "../csl/span.hpp"
 #include "../kernels/average_pooling.hpp"
-#include "../kernels/max_pooling.hpp"
+#include "../kernels/max_unpooling.hpp"
 #endif
 
 #include <opencv2/core.hpp>
@@ -249,6 +249,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 kernelPads.push_back(static_cast<std::int64_t>(common_padding[i + 2] + padding_left[i + 2]));
             for (std::size_t i = 0; i < window_size.size(); i++)
                 kernelPads.push_back(static_cast<std::int64_t>(common_padding[i + 2]));
+            maxWindow.assign(kernelWindow.begin(), kernelWindow.end());
+            maxStrides.assign(kernelStrides.begin(), kernelStrides.end());
+            maxPadsBegin.assign(kernelPads.begin(), kernelPads.begin() + kernelWindow.size());
 
             isMaxPooling = (config.poolMode == PoolingConfiguration::PoolingMode::MAX);
             countIncludePad = (config.poolMode == PoolingConfiguration::PoolingMode::AVERAGE_INCLUDE_PADDING);
@@ -272,10 +275,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             if (isMaxPooling)
             {
-                csl::Span<std::int64_t> indices;
-                kernels::max_pool_with_index<T>(stream, output, indices, input,
-                                                kernelInputShape, kernelOutputShape, kernelWindow,
-                                                kernelStrides, kernelPads, kernelDilations, 0);
+                csl::TensorSpan<std::int64_t> indices;
+                kernels::max_pooling_with_indices<T, std::int64_t>(stream, output, indices, input,
+                                                                   maxWindow, maxStrides, maxPadsBegin);
             }
             else
             {
@@ -301,6 +303,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 #ifdef HAVE_CUDNNJIT
         std::vector<std::int64_t> kernelInputShape, kernelOutputShape;
         std::vector<std::int64_t> kernelWindow, kernelStrides, kernelPads, kernelDilations;
+        std::vector<std::size_t> maxWindow, maxStrides, maxPadsBegin;
         bool isMaxPooling = false, countIncludePad = false;
 #else
         csl::Pooling<T> pooler;

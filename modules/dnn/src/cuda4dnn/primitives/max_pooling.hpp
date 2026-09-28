@@ -10,7 +10,7 @@
 
 #include "../csl/stream.hpp"
 
-#include "../kernels/max_pooling.hpp"
+#include "../kernels/max_unpooling.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -33,10 +33,10 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     public:
         MaxPoolOp(csl::Stream stream_, const MaxPoolConfiguration& config)
             : stream(std::move(stream_)),
-              kernel_shape(config.kernel_shape),
-              strides(config.strides),
-              pads(config.pads),
-              dilations(config.dilations),
+              kernel_shape(config.kernel_shape.begin(), config.kernel_shape.end()),
+              strides(config.strides.begin(), config.strides.end()),
+              pads_begin(config.pads.begin(), config.pads.begin() + config.kernel_shape.size()),
+              dilations(config.dilations.begin(), config.dilations.end()),
               storage_order(config.storage_order)
         {
         }
@@ -52,22 +52,17 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);
 
-            MatShape inShape = cv::dnn::shape(inputs[0]);
-            MatShape outShape = cv::dnn::shape(outputs[0]);
-            std::vector<std::int64_t> in_shape(inShape.begin(), inShape.end());
-            std::vector<std::int64_t> out_shape(outShape.begin(), outShape.end());
-
-            csl::Span<std::int64_t> indices;
+            csl::TensorSpan<std::int64_t> indices;
             if (outputs.size() > 1)
                 indices = csl::spanOf<std::int64_t>(outputs[1]);
 
-            kernels::max_pool_with_index<T>(stream, output, indices, input,
-                                            in_shape, out_shape, kernel_shape, strides, pads, dilations, storage_order);
+            kernels::max_pooling_with_indices<T, std::int64_t>(stream, output, indices, input,
+                kernel_shape, strides, pads_begin, dilations, true, storage_order == 1);
         }
 
     private:
         csl::Stream stream;
-        std::vector<std::int64_t> kernel_shape, strides, pads, dilations;
+        std::vector<std::size_t> kernel_shape, strides, pads_begin, dilations;
         std::int64_t storage_order;
     };
 

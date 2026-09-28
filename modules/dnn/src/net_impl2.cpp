@@ -706,19 +706,7 @@ void Net::Impl::prepareForInference()
 #endif
 
     if (!prepared) {
-#if CV_SIMD_SCALABLE
-        // RVV (#28852): int8 kernels are hardwired to C0=8, so CV_8S graphs keep it
-        for (const ArgData& a : args) {
-            if (a.type == CV_8S) { defaultC0 = 8; break; }
-        }
-#endif
         widenHalfConstants();
-#if CV_SIMD_SCALABLE
-        // RVV (#28852): int8 kernels are hardwired to C0=8, so CV_8S graphs keep it
-        for (const ArgData& a : args) {
-            if (a.type == CV_8S) { defaultC0 = 8; break; }
-        }
-#endif
         fuseQDQ();
         constFold();
         fuseBN();
