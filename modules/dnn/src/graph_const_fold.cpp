@@ -4,6 +4,7 @@
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
+#include <opencv2/core/utils/configuration.private.hpp>
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -14,12 +15,33 @@ using std::string;
 typedef std::pair<int, int> int_pair;
 typedef std::pair<int, Arg> int_arg_pair;
 
+static bool shapeFoldEnabled()
+{
+    static bool flag = utils::getConfigurationParameterBool("OPENCV_DNN_SHAPE_FOLD", true);
+    return flag;
+}
+
+static bool isConcreteShape(const MatShape& shape)
+{
+    return !shape.empty() && !shape.hasSymbols();
+}
+
 struct ConstFolding
 {
     Net::Impl* netimpl;
     std::vector<int> usecounts;
+    std::vector<MatShape> knownShapes;
+    std::vector<int> knownTypes;
+    std::vector<char> shapeKnown;
 
     ConstFolding(Net::Impl* netimpl_) : netimpl(netimpl_) {}
+
+    void setKnown(Arg arg, const MatShape& shape, int type)
+    {
+        knownShapes[arg.idx] = shape;
+        knownTypes[arg.idx] = type;
+        shapeKnown[arg.idx] = 1;
+    }
 
     void process()
     {
@@ -30,8 +52,38 @@ struct ConstFolding
             if (usecounts[i] == 0 && netimpl->args[i].kind == DNN_ARG_CONST)
                 netimpl->__tensors__[i].release();
         }
+        knownShapes.assign(nargs, MatShape());
+        knownTypes.assign(nargs, -1);
+        shapeKnown.assign(nargs, 0);
+        if (shapeFoldEnabled()) {
+            for (const Arg& inp : netimpl->mainGraph->inputs()) {
+                const ArgData& adata = netimpl->args.at(inp.idx);
+                if (adata.type >= 0 && isConcreteShape(adata.shape))
+                    setKnown(inp, adata.shape, adata.type);
+            }
+        }
         processGraph(netimpl->mainGraph);
         netimpl->scratchBufs.clear();
+    }
+
+    void inferOutputs(const Ptr<LayerInfo>& layer, const std::vector<MatShape>& inpShapes,
+                      const std::vector<int>& inpTypes)
+    {
+        const std::vector<Arg>& outputs = layer->outputs;
+        std::vector<MatShape> outShapes, tempShapes;
+        std::vector<int> outTypes, tempTypes;
+        try {
+            layer->getMemoryShapes(inpShapes, (int)outputs.size(), outShapes, tempShapes);
+            layer->getTypes(inpTypes, (int)outputs.size(), (int)tempShapes.size(), outTypes, tempTypes);
+        } catch (const std::exception&) {
+            return;
+        }
+        if (outShapes.size() != outputs.size() || outTypes.size() != outputs.size())
+            return;
+        for (size_t k = 0; k < outputs.size(); k++) {
+            if (outputs[k].idx > 0 && outTypes[k] >= 0 && !outShapes[k].hasSymbols())
+                setKnown(outputs[k], outShapes[k], outTypes[k]);
+        }
     }
 
     LayerInfo* getLayer(std::vector<Ptr<LayerInfo> >& newprog, int op_idx) const
@@ -75,7 +127,7 @@ struct ConstFolding
             const std::vector<Arg>& inputs = layer->inputs;
             const std::vector<Arg>& outputs = layer->outputs;
             size_t j, ninputs = inputs.size(), noutputs = outputs.size();
-            bool all_const = true;
+            bool all_const = true, all_known = true;
             inpMats.assign(ninputs, Mat());
             inpTypes.resize(ninputs);
             inpShapes.resize(ninputs);
@@ -89,10 +141,22 @@ struct ConstFolding
                     inpMats[j] = m;
                     inpTypes[j] = m.type();
                     inpShapes[j] = m.shape();
+                } else if (const_arg) {
+                    const ArgData& adata = netimpl->args.at(inp.idx);
+                    inpTypes[j] = adata.type;
+                    inpShapes[j] = adata.shape;
+                } else if (shapeKnown[inp.idx]) {
+                    inpTypes[j] = knownTypes[inp.idx];
+                    inpShapes[j] = knownShapes[inp.idx];
+                } else {
+                    all_known = false;
                 }
             }
+            const bool fold_shape = !all_const && all_known && ninputs == 1 && layer->type == "Shape";
+            if (fold_shape)
+                inpMats[0] = Mat(inpShapes[0], inpTypes[0], (void*)nullptr);
 
-            if (all_const /*&&
+            if ((all_const || fold_shape) /*&&
                 op->supportBlockLayout(0, (int)ninputs) <= 0 // we don't currently support constant folding
                                                // for block-layout operations (Convolution, MaxPool, AveragePool)
                 */) {
@@ -117,6 +181,8 @@ struct ConstFolding
                     out_data.shape = m.shape();
                     out_data.kind = DNN_ARG_CONST; // re-classify each output as constant
                     netimpl->__tensors__.at(out.idx) = netimpl->toArgTensor(m);
+                    if (out.idx > 0)
+                        setKnown(out, m.shape(), m.type());
                 }
 
                 modified = true;
@@ -131,6 +197,8 @@ struct ConstFolding
                 // because the output of the all-const inputs operation is now a constant,
                 // stored in a separate tensor
             } else {
+                if (all_known && !layer->dynamicOutputShapes())
+                    inferOutputs(layer, inpShapes, inpTypes);
                 newprog.push_back(layer);
             }
         }

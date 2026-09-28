@@ -13,12 +13,14 @@
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
+    /* empty indices are skipped; global_indices and column_major give ONNX MaxPool Indices */
     template <class T, class T_INDEX>
     void max_pooling_with_indices(
         const csl::Stream& stream,
         csl::TensorSpan<T> output, csl::TensorSpan<T_INDEX> indices, csl::TensorView<T> input,
         const std::vector<std::size_t>& kernel_size, const std::vector<std::size_t>& strides,
-        const std::vector<std::size_t>& padding_left);
+        const std::vector<std::size_t>& padding_left, const std::vector<std::size_t>& dilations = {},
+        bool global_indices = false, bool column_major = false);
 
     template <class T, class T_INDEX>
     void max_unpooling(

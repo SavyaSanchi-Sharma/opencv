@@ -215,13 +215,13 @@ struct ModelFusionSharedGemm
             fp.set("alpha", 1.f);
             fp.set("beta",  1.f);
             fp.set("flatten_a", all_flatten_a);
-            // Mirror the constB / const_C / have_bias signalling that the
+            // Mirror the constB / constC / have_bias signalling that the
             // GemmLayerImpl's getOpMode() reads from LayerParams. We always
             // ship the weights as a constant blob, and (when biased) the bias
             // too — so this fused Gemm has only one runtime input.
             fp.set("constB", true);
             fp.set("have_bias", all_have_bias);
-            fp.set("const_C", all_have_bias);
+            fp.set("constC", all_have_bias);  // "constC", not "const_C" — the layer reads that key
             if (all_have_bias) fp.set("real_ndims_C", 1);
             fp.blobs.push_back(W_concat);
             if (all_have_bias) fp.blobs.push_back(b_concat);

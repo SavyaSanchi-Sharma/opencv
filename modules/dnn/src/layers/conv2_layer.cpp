@@ -273,6 +273,7 @@ public:
             activationFunc = activ_ptr->getActivationFunc(CV_32F, activParams);
             if (!activationFunc)
                 return false;
+            activ = activlayer;  // retain so the CUDA path can run it as its own standalone exec
         }
         return true;
     }
@@ -848,22 +849,45 @@ public:
     }
 
 #ifdef HAVE_CUDA
-    bool cudaSupported() const
+    // weight/shape checks that hold whatever the fused activation is
+    bool cudaSupportedBase() const
     {
-        if (origWeights.empty() || wshape0.dims != 4)  // [Cout, Cin/group, kh, kw] (2D conv)
-            return false;
-        if (auto_pad != AUTO_PAD_NONE && auto_pad != AUTO_PAD_VALID)
-            return false;
-        if (activationFunc != nullptr || !activ.empty())
-            return false;
-        if (fastActivation != FAST_ACTIV_NONE && fastActivation != FAST_ACTIV_RELU &&
-            fastActivation != FAST_ACTIV_LEAKY_RELU && fastActivation != FAST_ACTIV_CLIP)
+        // 2-D only for now, although ConvolutionOp itself accepts 1-D to 3-D
+        if (origWeights.empty() || wshape0.dims != 4)
             return false;
         return true;
     }
 
+    // fast activations the CUDA conv applies itself; PReLU is not one of them
+    bool cudaFastActivation() const
+    {
+        return fastActivation == FAST_ACTIV_NONE || fastActivation == FAST_ACTIV_RELU ||
+               fastActivation == FAST_ACTIV_LEAKY_RELU || fastActivation == FAST_ACTIV_CLIP;
+    }
+
+    // generic activations ConvolutionOp can fuse, matched on the retained `activ` layer
+    static bool nativeCudaActivationType(const String& type, ConvolutionConfiguration::ActivationType& out)
+    {
+        if (type == "Swish")   { out = ConvolutionConfiguration::ActivationType::SWISH;   return true; }
+        if (type == "Mish")    { out = ConvolutionConfiguration::ActivationType::MISH;    return true; }
+        if (type == "Sigmoid") { out = ConvolutionConfiguration::ActivationType::SIGMOID; return true; }
+        if (type == "TanH")    { out = ConvolutionConfiguration::ActivationType::TANH;    return true; }
+        return false;
+    }
+
+    bool cudaNativeActivation(ConvolutionConfiguration::ActivationType& out) const
+    {
+        return fastActivation == FAST_ACTIV_NONE && !activ.empty() && nativeCudaActivationType(activ->type, out);
+    }
+
+    bool cudaSupported() const
+    {
+        return cudaSupportedBase() && cudaFastActivation();
+    }
+
     Ptr<BackendNode> initCudaConvNode(void* context_, const MatShape& inpShape,
-                                      const MatShape& outShape, int targetId)
+                                      const MatShape& outShape, int targetId,
+                                      bool hasNativeAct, ConvolutionConfiguration::ActivationType nativeAct)
     {
         csl::CSLContext context = *reinterpret_cast<csl::CSLContext*>(context_);
         const int nspatial = wshape0.dims - 2;
@@ -879,8 +903,14 @@ public:
         } else {
             config.padMode = ConvolutionConfiguration::PaddingMode::MANUAL;
             for (int i = 0; i < nspatial; i++) {
-                config.pads_begin.push_back(pads.empty() ? 0 : (size_t)pads[i]);
-                config.pads_end.push_back(pads.empty() ? 0 : (size_t)pads[i + nspatial]);
+                int pad0, pad1;
+                getPadding(pads, i, nspatial, auto_pad,
+                           {(int)wshape0[2 + i], inpShape[i + 2],
+                            strides.empty() ? 1 : strides[i],
+                            dilations.empty() ? 1 : dilations[i]},
+                           pad0, pad1);
+                config.pads_begin.push_back((size_t)pad0);
+                config.pads_end.push_back((size_t)pad1);
             }
         }
         config.input_shape.assign(inpShape.begin(), inpShape.end());
@@ -906,7 +936,7 @@ public:
         config.relu_negative_slope = 0.f;
         config.crelu_floor = 0.f; config.crelu_ceil = 0.f;
         config.power_exp = 1.f; config.power_scale = 1.f; config.power_shift = 0.f;
-        bool hasAct = fastActivation != FAST_ACTIV_NONE;
+        bool hasAct = fastActivation != FAST_ACTIV_NONE || hasNativeAct;
         if (fastActivation == FAST_ACTIV_RELU) {
             config.activation_type = ConvolutionConfiguration::ActivationType::RELU;
         } else if (fastActivation == FAST_ACTIV_LEAKY_RELU) {
@@ -916,6 +946,8 @@ public:
             config.activation_type = ConvolutionConfiguration::ActivationType::CLIPPED_RELU;
             config.crelu_floor = activParams.size() > 0 ? activParams[0] : 0.f;
             config.crelu_ceil  = activParams.size() > 1 ? activParams[1] : 6.f;
+        } else if (hasNativeAct) {
+            config.activation_type = nativeAct;
         }
 
         if (addResidual && hasAct)
@@ -969,7 +1001,26 @@ public:
         Ptr<Conv2LayerImpl> conv = data.dynamicCast<Conv2LayerImpl>();
         if (!conv || !backendCtx || !conv->cudaSupported())
             return Ptr<Layer>();
+
+        ConvolutionConfiguration::ActivationType nativeAct = ConvolutionConfiguration::ActivationType::IDENTITY;
+        bool hasNativeAct = false;
+        Ptr<Layer> activExec;
+        // activ is set only for activations outside the fast enum (Swish, Mish, Elu, ...)
+        if (!conv->activ.empty()) {
+            if (conv->cudaNativeActivation(nativeAct)) {
+                hasNativeAct = true;  // fused into the conv kernel
+            } else {
+                // run the conv bare and the activation as its own CUDA exec right after
+                activExec = LayerFactory::createExec(conv->activ->type, DNN_BACKEND_CUDA, conv->activ, backendCtx);
+                if (!activExec)
+                    return Ptr<Layer>();  // that activation type has no CUDA exec either
+            }
+        }
+
         Ptr<CUDAConv2Layer> layer(new CUDAConv2Layer(conv, backendCtx));
+        layer->activExec = activExec;
+        layer->hasNativeAct = hasNativeAct;
+        layer->nativeAct = nativeAct;
         layer->name = conv->name;
         layer->type = conv->type;
         layer->inputs = conv->inputs;
@@ -988,18 +1039,26 @@ public:
 
         auto& ws = *reinterpret_cast<cuda4dnn::csl::Workspace*>(workspace);
         if (!node) {
-            node = conv->initCudaConvNode(ctx, cv::dnn::shape(inputs[0]), cv::dnn::shape(outputs[0]), preferableTarget);
+            node = conv->initCudaConvNode(ctx, cv::dnn::shape(inputs[0]), cv::dnn::shape(outputs[0]),
+                                          preferableTarget, hasNativeAct, nativeAct);
             cudaNode = node.dynamicCast<CUDABackendNode>();
             CV_Assert(cudaNode);
             ws.require(cudaNode->get_workspace_memory_in_bytes());
         }
         cudaNode->forward(inputs, outputs, ws);
+        if (activExec) {
+            activExec->preferableTarget = preferableTarget;
+            activExec->forwardCUDA(outputs_, outputs_, workspace);  // in-place, safe for a pointwise activation
+        }
     }
 
     Ptr<Conv2LayerImpl> conv;
     void* ctx;
     Ptr<BackendNode> node;
     Ptr<CUDABackendNode> cudaNode;
+    bool hasNativeAct = false;
+    ConvolutionConfiguration::ActivationType nativeAct = ConvolutionConfiguration::ActivationType::IDENTITY;
+    Ptr<Layer> activExec;
 };
 
 void registerConv2CudaBackend()

@@ -618,7 +618,7 @@ public:
 
         if (!trans_b)
             cv::transpose(B, B);
-        auto flatten_start_axis = normalize_axis(1, inputs[0].dims);
+        auto flatten_start_axis = normalize_axis(inputs[0].dims - 1, inputs[0].dims);
         return make_cuda_node<cuda4dnn::InnerProductOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), flatten_start_axis, B, C);
     }
 #endif // HAVE_CUDA

@@ -53,6 +53,32 @@ struct ModelFusionAttention
         return prog[idx]->type == "Softmax";
     }
 
+    bool isSqueezeAxis0(const vector<Ptr<LayerInfo>>& prog, int idx, int rank) const
+    {
+        if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
+            return false;
+        SqueezeLayer* sq = dynamic_cast<SqueezeLayer*>(prog[idx].get());
+        if (!sq)
+            return false;
+        std::vector<int> axes = sq->axes;
+        if (prog[idx]->inputs.size() >= 2 && !prog[idx]->inputs[1].empty()) {
+            Arg a = prog[idx]->inputs[1];
+            if (!netimpl->isConstArg(a))
+                return false;
+            Mat t = netimpl->argTensor(a).getMat(ACCESS_READ);
+            axes.clear();
+            for (size_t i = 0; i < t.total(); i++) {
+                if (t.type() == CV_64S)
+                    axes.push_back((int)t.ptr<int64_t>()[i]);
+                else if (t.type() == CV_32S)
+                    axes.push_back(t.ptr<int32_t>()[i]);
+                else
+                    return false;
+            }
+        }
+        return axes.size() == 1 && (axes[0] == 0 || axes[0] == -rank);
+    }
+
     bool isMatMul(const vector<Ptr<LayerInfo>>& prog, int idx) const
     {
         if (idx < 0 || idx >= (int)prog.size() || !prog[idx])
@@ -401,10 +427,23 @@ struct ModelFusionAttention
 
         Arg tr_out = prog[transpose_idx]->outputs[0];
         auto cit = consumers_.find(tr_out.idx);
-        if (cit == consumers_.end() || cit->second.size() != 3) return false;
+        if (cit == consumers_.end()) return false;
 
         int gather_for_idx[3] = { -1, -1, -1 };  // [Q,K,V] = [0,1,2]
-        for (int c : cit->second) {
+        int split_idx = -1;
+        if (cit->second.size() == 1 && cit->second[0] >= 0 && cit->second[0] < (int)prog.size() &&
+            prog[cit->second[0]] && dynamic_cast<Split2Layer*>(prog[cit->second[0]].get())) {
+            split_idx = cit->second[0];
+            Split2Layer* sp = dynamic_cast<Split2Layer*>(prog[split_idx].get());
+            if (sp->axis != 0 || prog[split_idx]->outputs.size() != 3) return false;
+            for (int v = 0; v < 3; v++) {
+                const int sq = singleConsumer(prog[split_idx]->outputs[v]);
+                if (!isSqueezeAxis0(prog, sq, (int)tr->perm.size())) return false;
+                gather_for_idx[v] = sq;
+            }
+        }
+        if (split_idx < 0 && cit->second.size() != 3) return false;
+        for (int c : (split_idx >= 0 ? std::vector<int>() : cit->second)) {
             if (c < 0 || c >= (int)prog.size() || !prog[c]) return false;
             Gather2Layer* g = dynamic_cast<Gather2Layer*>(prog[c].get());
             if (!g || g->axis != 0 || prog[c]->inputs.size() < 2) return false;
@@ -435,12 +474,31 @@ struct ModelFusionAttention
         int qk_matmul_idx = singleConsumer(prog[q_mul_idx]->outputs[0]);
         if (!isMatMul(prog, qk_matmul_idx)) return false;
 
-        int k_trans_idx = singleConsumer(k_out);
-        if (!isTranspose(prog, k_trans_idx)) return false;
-        Arg k_trans_out = prog[k_trans_idx]->outputs[0];
+        float k_scale = 1.f;
+        int k_mul_idx = -1;
+        int k_trans_idx = -1;
+        Arg k_final;
+        const int k_first = singleConsumer(k_out);
+        if (isTranspose(prog, k_first)) {
+            k_trans_idx = k_first;
+            k_final = prog[k_trans_idx]->outputs[0];
+            const int m = singleConsumer(k_final);
+            if (m != qk_matmul_idx && isScalarMul(prog, m, &k_scale)) {
+                k_mul_idx = m;
+                k_final = prog[k_mul_idx]->outputs[0];
+            }
+        } else if (isScalarMul(prog, k_first, &k_scale)) {
+            k_mul_idx = k_first;
+            k_trans_idx = singleConsumer(prog[k_mul_idx]->outputs[0]);
+            if (!isTranspose(prog, k_trans_idx)) return false;
+            k_final = prog[k_trans_idx]->outputs[0];
+        } else {
+            return false;
+        }
+        if (k_scale == 0.f) return false;
         bool k_connected = false;
         for (Arg in : prog[qk_matmul_idx]->inputs)
-            if (in.idx == k_trans_out.idx) { k_connected = true; break; }
+            if (in.idx == k_final.idx) { k_connected = true; break; }
         if (!k_connected) return false;
 
         int softmax_idx = singleConsumer(prog[qk_matmul_idx]->outputs[0]);
@@ -473,7 +531,7 @@ struct ModelFusionAttention
 
         // Attention `scale` is the pre-softmax divisor; Q was multiplied by
         // q_scale, so scale = 1/q_scale.
-        const float param_scale = 1.0f / q_scale;
+        const float param_scale = 1.0f / (q_scale * k_scale);
 
         LayerParams attn_params;
         attn_params.name = prog[qkv_matmul_idx]->name + "_fused_attention";
@@ -501,6 +559,8 @@ struct ModelFusionAttention
             av_matmul_idx, out_trans_idx, out_reshape_idx
         };
         if (add_idx >= 0) to_remove.insert(add_idx);
+        if (split_idx >= 0) to_remove.insert(split_idx);
+        if (k_mul_idx >= 0) to_remove.insert(k_mul_idx);
         for (int op : extra_ops) to_remove.insert(op);
 
         (void)input_hidden;  // input_hidden currently unused; kept for symmetry with existing path.

@@ -177,8 +177,19 @@ struct Net::Impl : public detail::NetImplBase
     };
     bool fusedSnapshotValid = false;
     std::vector<FusedGraphSnapshot> fusedSnapshot;
+    std::unordered_map<const LayerInfo*, int> cudaPlacementMemo;
+    // memoized getMemoryShapes()/getTypes(), keyed on the input signature and weightEpoch
+    struct InferCache {
+        bool valid = false;
+        unsigned weightEpoch = 0;
+        std::vector<MatShape> inpShapes, outShapes, tempShapes;
+        std::vector<int> inpTypes, outTypes, tempTypes;
+    };
+    std::unordered_map<const LayerInfo*, InferCache> inferCache;
     std::vector<Ptr<BackendWrapper> > argWrappers;
     std::vector<const void*> argWrapperData;
+    enum ArgResidency { ARG_RESIDENCY_UNKNOWN = 0, ARG_RESIDENCY_HOST, ARG_RESIDENCY_DEVICE };
+    std::vector<uchar> argResidency;
     TracingMode tracingMode;
     ProfilingMode profilingMode;
     std::vector<int64_t> dimvalues;
@@ -439,6 +450,7 @@ struct Net::Impl : public detail::NetImplBase
     bool isConstArg(Arg arg) const;
     UMat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
+    void inferArgTypes();
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
 
@@ -447,7 +459,17 @@ struct Net::Impl : public detail::NetImplBase
     void prepareForInference();
     void finalize();
     // Selects executors for a single graph (recursing into subgraphs).
-    void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA);
+    void finalizeGraph(const Ptr<Graph>& graph, bool useCUDA, bool allowDevicePlacement);
+    void buildTransferSchedule(const Ptr<Graph>& graph);
+    Ptr<Layer> makeCpuExec(const Ptr<LayerInfo>& op);
+    void logGraphPlacement(const Ptr<Graph>& graph) const;
+    bool gatherOpShapes(const Ptr<LayerInfo>& op,
+                        const std::vector<MatShape>& shapeCache,
+                        const std::vector<MatType>& typeCache,
+                        std::vector<MatShape>& inpShapes,
+                        std::vector<MatShape>& outShapes,
+                        std::vector<MatType>& inpTypes,
+                        std::vector<MatType>& outTypes) const;
     // Save/restore the fused graph so finalize() is re-entrant across backend changes.
     void saveFusedSnapshot();
     void restoreFusedSnapshot();
@@ -471,7 +493,8 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<Mat>& temps, // [TODO] ditto
                               std::vector<Mat>& globalTemps,
                               bool useBufferPool,
-                              int opBackend
+                              int opBackend,
+                              bool buildOutputMats = true  // CUDA: the Mat is scaffolding, skip when nothing reads it
                               );
 
     // set input of the model before running it
