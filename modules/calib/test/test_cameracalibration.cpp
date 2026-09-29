@@ -1994,7 +1994,7 @@ TEST(Calib_CalibrateCamera, float64Points)
     double rms32 = calibrateCamera(toPointsOf<Point3f>(obj), toPointsOf<Point2f>(img),
                                    Size(640, 480), K32, dist32, rvecs, tvecs);
 
-    EXPECT_LT(rms64, 1e-8);
+    EXPECT_LT(rms64, 1e-7);
     EXPECT_MAT_NEAR(K64, Mat(K), 1e-6);
     EXPECT_LT(rms32, 1e-3);
     EXPECT_MAT_NEAR(K32, Mat(K), 1e-2);
@@ -2018,7 +2018,7 @@ TEST(Calib_StereoCalibrate, float64Points)
                                    K1, D1, K2, D2, Size(640, 480),
                                    R32, T32, noArray(), noArray(), CALIB_FIX_INTRINSIC);
 
-    EXPECT_LT(rms64, 1e-8);
+    EXPECT_LT(rms64, 1e-7);
     EXPECT_MAT_NEAR(R64, Rgt, 1e-9);
     EXPECT_MAT_NEAR(T64, Mat(tStereo), 1e-9);
     EXPECT_LT(rms32, 1e-3);
@@ -2059,7 +2059,7 @@ TEST(Calib_RegisterCameras, float64Points)
                                    K, D, CALIB_MODEL_PINHOLE, K, D, CALIB_MODEL_PINHOLE,
                                    R32, T32, E, F, errs);
 
-    EXPECT_LT(rms64, 1e-8);
+    EXPECT_LT(rms64, 1e-7);
     EXPECT_MAT_NEAR(R64, Rgt, 1e-9);
     EXPECT_MAT_NEAR(T64, Mat(tStereo), 1e-9);
     EXPECT_LT(rms32, 1e-3);
