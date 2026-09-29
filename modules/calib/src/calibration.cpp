@@ -2980,7 +2980,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
     int np = npoints.at<int>( 0 );
     Mat newObjPt;
     if( newobj_needed ) {
-        newObjPoints.create( 1, np, CV_32FC3 );
+        newObjPoints.create( 1, np, CV_MAKETYPE(_objectPoints.depth(0), 3) );
         newObjPt = newObjPoints.getMat();
     }
 

@@ -2000,6 +2000,30 @@ TEST(Calib_CalibrateCamera, float64Points)
     EXPECT_MAT_NEAR(K32, Mat(K), 1e-2);
 }
 
+TEST(Calib_CalibrateCameraRO, float64Points)
+{
+    const Matx33d K(800, 0, 320, 0, 800, 240, 0, 0, 1);
+    std::vector<std::vector<Point3d> > obj;
+    std::vector<std::vector<Point2d> > img, img2;
+    makeFloat64Views(K, Vec3d::all(0), Vec3d(-0.1, 0, 0), obj, img, img2);
+    std::vector<std::vector<Point3f> > obj32 = toPointsOf<Point3f>(obj);
+
+    Mat K64, dist64, K32, dist32;
+    std::vector<Mat> rvecs, tvecs;
+    std::vector<Point3d> newObj64;
+    std::vector<Point3f> newObj32;
+    double rms64 = calibrateCameraRO(obj, img, Size(640, 480), 8, K64, dist64, rvecs, tvecs, newObj64);
+    double rms32 = calibrateCameraRO(obj32, toPointsOf<Point2f>(img), Size(640, 480), 8,
+                                     K32, dist32, rvecs, tvecs, newObj32);
+
+    EXPECT_LT(rms64, 1e-7);
+    EXPECT_MAT_NEAR(K64, Mat(K), 1e-6);
+    EXPECT_MAT_NEAR(Mat(newObj64).reshape(1), Mat(obj[0]).reshape(1), 1e-9);
+    EXPECT_LT(rms32, 1e-3);
+    EXPECT_MAT_NEAR(K32, Mat(K), 1e-2);
+    EXPECT_MAT_NEAR(Mat(newObj32).reshape(1), Mat(obj32[0]).reshape(1), 1e-4);
+}
+
 TEST(Calib_StereoCalibrate, float64Points)
 {
     const Matx33d K(800, 0, 320, 0, 800, 240, 0, 0, 1);
