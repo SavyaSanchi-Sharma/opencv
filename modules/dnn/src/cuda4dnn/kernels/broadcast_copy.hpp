@@ -14,16 +14,8 @@
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
-/* Writes every element of `output` by wrapping its coordinate back into `input`'s
- * extent along each axis: out_coord[i] -> out_coord[i] % in_dims[i].
- *
- * That single mapping covers both ONNX ops that need it:
- *   Tile   -- out_dims[i] == in_dims[i] * repeats[i], so the modulo repeats the input.
- *   Expand -- broadcast axes have in_dims[i] == 1, so the modulo is always 0.
- *
- * `in_dims` and `out_dims` must have the same length (left-pad the input with 1s
- * first) and rank must not exceed kMaxBroadcastRank.
- */
+/* output[coord] = input[coord % in_dims] per axis, which serves both Tile and Expand;
+ * in_dims must be left-padded with 1s to the output rank (at most kMaxBroadcastRank) */
 constexpr int kMaxBroadcastRank = 8;
 
 template <class T>

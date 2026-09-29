@@ -20,9 +20,7 @@
 
 namespace cv { namespace dnn { namespace cuda4dnn {
 
-    /* Backs both Tile and Expand -- see kernels/broadcast_copy.hpp for why one
-     * coordinate mapping covers both. The shapes are read per forward() rather than
-     * cached at init, because Expand's target shape is an input tensor. */
+    /* backs both Tile and Expand; shapes are read per forward() since Expand's target shape is an input */
     template <class T>
     class BroadcastCopyOp final : public CUDABackendNode {
     public:

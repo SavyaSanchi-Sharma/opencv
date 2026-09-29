@@ -25,22 +25,10 @@ using namespace cv::dnn::cuda4dnn::csl::device;
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
     namespace raw {
-        __host__ __device__ inline std::int64_t get_index_value(const void* index_data, std::size_t index_element_size, std::size_t offset) {
-            switch (index_element_size) {
-                case sizeof(std::int32_t):
-                    return *(reinterpret_cast<const std::int32_t*>(index_data) + offset);
-                case sizeof(std::int64_t):
-                    return *(reinterpret_cast<const std::int64_t*>(index_data) + offset);
-                default:
-                    break;
-            }
-            return 0;
-        }
-
-        template <class T>
+        template <class T, class TIndex>
         __global__ void gather(
             Span<T> output, View<T> input,
-            const void* indices, std::size_t index_element_size,
+            const TIndex* indices,
             std::int64_t input_block_size, std::int64_t indices_max,
             fast_divmod output_block_size, fast_divmod block_size)
         {
@@ -49,7 +37,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 output_block_size.divmod(id, input_block_index, block_offset);
                 int indices_index, offset;
                 block_size.divmod(block_offset, indices_index, offset);
-                std::int64_t idx = get_index_value(indices, index_element_size, indices_index);
+                std::int64_t idx = static_cast<std::int64_t>(indices[indices_index]);
                 idx = idx < 0 ? idx + indices_max : idx;
                 if (idx < 0 || idx >= indices_max) {
                     output[id] = static_cast<T>(0);
@@ -70,10 +58,19 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         std::int64_t input_block_size, std::int64_t indices_max,
         fast_divmod output_block_size, fast_divmod block_size)
     {
-        auto kernel = raw::gather<T>;
-        auto policy = make_policy(kernel, output.size(), 0, stream);
-        launch_kernel(kernel, policy, output, input, indices, index_element_size,
-                      input_block_size, indices_max, output_block_size, block_size);
+        if (index_element_size == sizeof(std::int32_t)) {
+            auto kernel = raw::gather<T, std::int32_t>;
+            auto policy = make_policy(kernel, output.size(), 0, stream);
+            launch_kernel(kernel, policy, output, input, static_cast<const std::int32_t*>(indices),
+                          input_block_size, indices_max, output_block_size, block_size);
+        } else if (index_element_size == sizeof(std::int64_t)) {
+            auto kernel = raw::gather<T, std::int64_t>;
+            auto policy = make_policy(kernel, output.size(), 0, stream);
+            launch_kernel(kernel, policy, output, input, static_cast<const std::int64_t*>(indices),
+                          input_block_size, indices_max, output_block_size, block_size);
+        } else {
+            CV_Error(Error::StsNotImplemented, "Gather: indices must be int32 or int64");
+        }
     }
 
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)

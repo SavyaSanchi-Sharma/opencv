@@ -46,9 +46,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             std::int64_t reduction_count{};
         };
 
-        // Collapses `dims` into runs of reduced / non-reduced axes so the kernels can
-        // walk the output and the reduction with one coordinate decode each, instead of
-        // decoding the full rank per element. Host-side only.
+        // Host-side: collapses `dims` into runs of reduced / non-reduced axes to shorten the per-element index decode.
         static inline void build_reduce_metadata(const std::vector<std::int64_t>& dims,
                                                  const std::vector<std::int64_t>& axes,
                                                  ReduceSumNdMetadata& metadata) {
@@ -107,33 +105,35 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             __device__ __forceinline__ T Result() const { return sum; }
         };
 
-        template <>
-        struct SumState<double> {
-            double sum{};
-            double correction{};
-
-            __device__ __forceinline__ void Add(double value) {
-                const double next = __dadd_rn(sum, value);
-                const double error = fabs(sum) >= fabs(value)
-                                         ? __dadd_rn(__dsub_rn(sum, next), value)
-                                         : __dadd_rn(__dsub_rn(value, next), sum);
-                correction = __dadd_rn(correction, error);
-                sum = next;
-            }
-
-            __device__ __forceinline__ double Result() const { return __dadd_rn(sum, correction); }
-        };
-
         template <typename T>
         struct MergeSumState {
             __device__ __forceinline__ SumState<T> operator()(SumState<T> lhs, const SumState<T>& rhs) const {
                 lhs.Add(rhs.sum);
-                if constexpr (std::is_same_v<T, double>) {
-                    lhs.Add(rhs.correction);
-                }
                 return lhs;
             }
         };
+
+        __device__ __forceinline__ std::int64_t reduce_output_base(const ReduceSumNdMetadata& metadata, std::int64_t output_index) {
+            std::int64_t remaining = output_index;
+            std::int64_t base = 0;
+            for (int segment = metadata.output_segment_count - 1; segment >= 0; --segment) {
+                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.output_segment_sizes[segment];
+                if (segment != 0) remaining /= metadata.output_segment_sizes[segment];
+                base += coordinate * metadata.output_segment_strides[segment];
+            }
+            return base;
+        }
+
+        __device__ __forceinline__ std::int64_t reduce_input_offset(const ReduceSumNdMetadata& metadata, std::int64_t input_base, std::int64_t reduction_index) {
+            std::int64_t remaining = reduction_index;
+            std::int64_t input_index = input_base;
+            for (int segment = metadata.reduction_segment_count - 1; segment >= 0; --segment) {
+                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.reduction_segment_sizes[segment];
+                if (segment != 0) remaining /= metadata.reduction_segment_sizes[segment];
+                input_index += coordinate * metadata.reduction_segment_strides[segment];
+            }
+            return input_index;
+        }
 
         template <typename T, typename TAccum>
         __device__ __forceinline__ T CastReduceSumResult(TAccum value) {
@@ -148,8 +148,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename T, int BlockSize>
-        __global__ void reduce_sum_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata, double inv_norm) {
-            using TAccum = std::conditional_t<std::is_integral_v<T>, double, typename accumulation_type<T>::type>;
+        __global__ void reduce_sum_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata, bool mean) {
+            using TAccum = std::conditional_t<std::is_integral_v<T>, std::uint64_t, typename accumulation_type<T>::type>;
             using BlockReduce = cub::BlockReduce<SumState<TAccum>, BlockSize>;
             __shared__ typename BlockReduce::TempStorage reduce_storage;
             __shared__ std::int64_t input_base;
@@ -157,34 +157,24 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             for (std::int64_t output_index = blockIdx.x;
                  output_index < metadata.output_count;
                  output_index += gridDim.x) {
-                if (threadIdx.x == 0) {
-                    std::int64_t remaining = output_index;
-                    std::int64_t base = 0;
-                    for (int segment = metadata.output_segment_count - 1; segment >= 0; --segment) {
-                        const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.output_segment_sizes[segment];
-                        if (segment != 0) remaining /= metadata.output_segment_sizes[segment];
-                        base += coordinate * metadata.output_segment_strides[segment];
-                    }
-                    input_base = base;
-                }
+                if (threadIdx.x == 0)
+                    input_base = reduce_output_base(metadata, output_index);
                 __syncthreads();
 
                 SumState<TAccum> thread_sum{};
                 for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
-                     reduction_index += BlockSize) {
-                    std::int64_t remaining = reduction_index;
-                    std::int64_t input_index = input_base;
-                    for (int segment = metadata.reduction_segment_count - 1; segment >= 0; --segment) {
-                        const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.reduction_segment_sizes[segment];
-                        if (segment != 0) remaining /= metadata.reduction_segment_sizes[segment];
-                        input_index += coordinate * metadata.reduction_segment_strides[segment];
-                    }
-                    thread_sum.Add(static_cast<TAccum>(input[input_index]));
-                }
+                     reduction_index += BlockSize)
+                    thread_sum.Add(static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]));
 
                 const SumState<TAccum> block_sum = BlockReduce(reduce_storage).Reduce(thread_sum, MergeSumState<TAccum>{});
                 if (threadIdx.x == 0) {
-                    output[output_index] = CastReduceSumResult<T>(static_cast<TAccum>(block_sum.Result() * static_cast<TAccum>(inv_norm)));
+                    if constexpr (std::is_integral_v<T>) {
+                        const T sum = static_cast<T>(block_sum.Result());
+                        output[output_index] = mean ? static_cast<T>(sum / static_cast<T>(metadata.reduction_count)) : sum;
+                    } else {
+                        const TAccum inv_norm = mean ? static_cast<TAccum>(1.0 / static_cast<double>(metadata.reduction_count)) : TAccum(1);
+                        output[output_index] = static_cast<T>(block_sum.Result() * inv_norm);
+                    }
                 }
                 __syncthreads();
             }
@@ -203,13 +193,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             if (output_count == 0 || reduction_count == 0)
                 return;
 
-            const double inv_norm = mean ? 1.0 / static_cast<double>(reduction_count) : 1.0;
-
             constexpr int block_size = 256;
             constexpr int max_blocks = 65535;
             const int grid_size = static_cast<int>(std::min<std::int64_t>(max_blocks, output_count));
             reduce_sum_nd_kernel<T, block_size><<<grid_size, block_size, 0, stream.get()>>>(
-                input.data().get(), output.data().get(), metadata, inv_norm);
+                input.data().get(), output.data().get(), metadata, mean);
         }
     }
 
@@ -226,9 +214,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     }
 
     namespace detail {
-        // Independent from ReduceSumNdMetadata's SUM/MEAN kernel above -- max/min don't
-        // accumulate floating point error, so no TAccum promotion or normalization is
-        // needed, just a running best-so-far value per thread.
+        // max/min accumulate no rounding error, so they keep T and track a running best value per thread.
         template <typename T, bool IsMax>
         struct MinMaxState {
             T value{};
@@ -261,30 +247,14 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             for (std::int64_t output_index = blockIdx.x;
                  output_index < metadata.output_count;
                  output_index += gridDim.x) {
-                if (threadIdx.x == 0) {
-                    std::int64_t remaining = output_index;
-                    std::int64_t base = 0;
-                    for (int segment = metadata.output_segment_count - 1; segment >= 0; --segment) {
-                        const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.output_segment_sizes[segment];
-                        if (segment != 0) remaining /= metadata.output_segment_sizes[segment];
-                        base += coordinate * metadata.output_segment_strides[segment];
-                    }
-                    input_base = base;
-                }
+                if (threadIdx.x == 0)
+                    input_base = reduce_output_base(metadata, output_index);
                 __syncthreads();
 
                 State thread_state{};
                 for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
-                     reduction_index += BlockSize) {
-                    std::int64_t remaining = reduction_index;
-                    std::int64_t input_index = input_base;
-                    for (int segment = metadata.reduction_segment_count - 1; segment >= 0; --segment) {
-                        const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.reduction_segment_sizes[segment];
-                        if (segment != 0) remaining /= metadata.reduction_segment_sizes[segment];
-                        input_index += coordinate * metadata.reduction_segment_strides[segment];
-                    }
-                    thread_state.Add(input[input_index]);
-                }
+                     reduction_index += BlockSize)
+                    thread_state.Add(input[reduce_input_offset(metadata, input_base, reduction_index)]);
 
                 const State block_state = BlockReduce(reduce_storage).Reduce(thread_state, MergeMinMaxState<T, IsMax>{});
                 if (threadIdx.x == 0) {
@@ -328,10 +298,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     }
 
     namespace detail {
-        // PROD/L1/L2/SUM_SQUARE/LOG_SUM/LOG_SUM_EXP share the block-per-output-element
-        // shape of the SUM/MEAN and MIN/MAX kernels above; only the per-element
-        // transform, the combine and the finalisation differ, so they go through one
-        // kernel templated on the op rather than six near-copies.
+        // PROD/L1/L2/SUM_SQUARE/LOG_SUM/LOG_SUM_EXP differ only in transform, combine and finalisation,
+        // so they share one kernel templated on the op.
         enum class GenericReduceOp { PROD, L1, L2, SUM_SQUARE, LOG_SUM, LOG_SUM_EXP };
 
         template <typename TAccum>
@@ -344,31 +312,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             __device__ __forceinline__ TAccum operator()(const TAccum& lhs, const TAccum& rhs) const { return lhs > rhs ? lhs : rhs; }
         };
 
-        __device__ __forceinline__ std::int64_t reduce_output_base(const ReduceSumNdMetadata& metadata, std::int64_t output_index) {
-            std::int64_t remaining = output_index;
-            std::int64_t base = 0;
-            for (int segment = metadata.output_segment_count - 1; segment >= 0; --segment) {
-                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.output_segment_sizes[segment];
-                if (segment != 0) remaining /= metadata.output_segment_sizes[segment];
-                base += coordinate * metadata.output_segment_strides[segment];
-            }
-            return base;
-        }
-
-        __device__ __forceinline__ std::int64_t reduce_input_offset(const ReduceSumNdMetadata& metadata, std::int64_t input_base, std::int64_t reduction_index) {
-            std::int64_t remaining = reduction_index;
-            std::int64_t input_index = input_base;
-            for (int segment = metadata.reduction_segment_count - 1; segment >= 0; --segment) {
-                const std::int64_t coordinate = segment == 0 ? remaining : remaining % metadata.reduction_segment_sizes[segment];
-                if (segment != 0) remaining /= metadata.reduction_segment_sizes[segment];
-                input_index += coordinate * metadata.reduction_segment_strides[segment];
-            }
-            return input_index;
-        }
-
         template <typename T, GenericReduceOp Op, int BlockSize>
         __global__ void reduce_generic_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata) {
-            using TAccum = std::conditional_t<std::is_integral_v<T>, double, typename accumulation_type<T>::type>;
+            constexpr bool kIntegerAccum = std::is_integral_v<T> &&
+                (Op == GenericReduceOp::PROD || Op == GenericReduceOp::L1 || Op == GenericReduceOp::SUM_SQUARE);
+            using TAccum = std::conditional_t<kIntegerAccum, std::uint64_t,
+                           std::conditional_t<std::is_integral_v<T>, double, typename accumulation_type<T>::type>>;
             using BlockReduce = cub::BlockReduce<TAccum, BlockSize>;
             __shared__ typename BlockReduce::TempStorage reduce_storage;
             __shared__ std::int64_t input_base;
@@ -388,7 +337,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
                          reduction_index += BlockSize) {
                         const TAccum value = static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]);
-                        if (value > thread_max) thread_max = value;
+                        thread_max = value > thread_max ? value : thread_max;
                     }
                     const TAccum block_max = BlockReduce(reduce_storage).Reduce(thread_max, MaxCombine<TAccum>{});
                     if (threadIdx.x == 0) shared_max = block_max;
@@ -398,9 +347,13 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 TAccum thread_acc = (Op == GenericReduceOp::PROD) ? TAccum(1) : TAccum(0);
                 for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
                      reduction_index += BlockSize) {
-                    const TAccum value = static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]);
+                    const T raw = input[reduce_input_offset(metadata, input_base, reduction_index)];
+                    const TAccum value = static_cast<TAccum>(raw);
                     if constexpr (Op == GenericReduceOp::PROD)             thread_acc *= value;
-                    else if constexpr (Op == GenericReduceOp::L1)          thread_acc += fabs(value);
+                    else if constexpr (Op == GenericReduceOp::L1) {
+                        if constexpr (kIntegerAccum)                      thread_acc += static_cast<TAccum>(raw > 0 ? raw : -raw);
+                        else                                              thread_acc += fabs(value);
+                    }
                     else if constexpr (Op == GenericReduceOp::L2 ||
                                        Op == GenericReduceOp::SUM_SQUARE) thread_acc += value * value;
                     else if constexpr (Op == GenericReduceOp::LOG_SUM)     thread_acc += value;
@@ -418,7 +371,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     if constexpr (Op == GenericReduceOp::L2)               result = sqrt(block_acc);
                     else if constexpr (Op == GenericReduceOp::LOG_SUM)     result = log(block_acc);
                     else if constexpr (Op == GenericReduceOp::LOG_SUM_EXP) result = log(block_acc) + shared_max;
-                    output[output_index] = CastReduceSumResult<T>(result);
+                    if constexpr (kIntegerAccum) output[output_index] = static_cast<T>(result);
+                    else                         output[output_index] = CastReduceSumResult<T>(result);
                 }
                 __syncthreads();
             }

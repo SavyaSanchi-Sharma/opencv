@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include <cuda_runtime.h>
 
@@ -23,16 +25,6 @@ using namespace cv::dnn::cuda4dnn::csl::device;
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
     namespace raw {
-        __global__ void cast_int64_to_fp32(const std::int64_t* input, float* output, std::size_t n) {
-            for (auto i : grid_stride_range(n))
-                output[i] = static_cast<float>(input[i]);
-        }
-
-        __global__ void cast_fp32_to_int64(const float* input, std::int64_t* output, std::size_t n) {
-            for (auto i : grid_stride_range(n))
-                output[i] = static_cast<std::int64_t>(input[i]);
-        }
-
         template <class TOut, class TIn>
         struct Converter {
             __device__ static TOut apply(TIn v) { return static_cast<TOut>(v); }
@@ -48,6 +40,16 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             __device__ static std::int32_t apply(std::int64_t v) {
                 return v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : static_cast<std::int32_t>(v));
             }
+        };
+
+        template <>
+        struct Converter<std::int32_t, float> {
+            __device__ static std::int32_t apply(float v) { return __float2int_rn(v); }
+        };
+
+        template <>
+        struct Converter<std::int64_t, float> {
+            __device__ static std::int64_t apply(float v) { return __double2ll_rz(round(static_cast<double>(v))); }
         };
 
         template <class TOut, class TIn>
@@ -83,19 +85,5 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     template void cast(const Stream&, Span<float>, View<std::int32_t>);
     template void cast(const Stream&, Span<float>, View<std::int64_t>);
     template void cast(const Stream&, Span<float>, View<float>);
-
-    void cast_int64_to_fp32(const Stream& stream, Span<float> output, View<std::int64_t> input) {
-        CV_Assert(output.size() == input.size());
-        auto kernel = raw::cast_int64_to_fp32;
-        auto policy = make_policy(kernel, output.size(), 0, stream);
-        launch_kernel(kernel, policy, input.data().get(), output.data().get(), output.size());
-    }
-
-    void cast_fp32_to_int64(const Stream& stream, Span<std::int64_t> output, View<float> input) {
-        CV_Assert(output.size() == input.size());
-        auto kernel = raw::cast_fp32_to_int64;
-        auto policy = make_policy(kernel, output.size(), 0, stream);
-        launch_kernel(kernel, policy, input.data().get(), output.data().get(), output.size());
-    }
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */

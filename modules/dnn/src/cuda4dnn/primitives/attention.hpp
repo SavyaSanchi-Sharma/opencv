@@ -46,10 +46,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             std::size_t offset = 0;
             for (int i = 0; i < 3; i++) {
                 const int width = static_cast<int>(cfg.qkv_hidden_sizes[i]);
-                Mat part(K, width, CV_32F);
-                for (int r = 0; r < K; r++)
-                    weight.row(r).colRange(static_cast<int>(offset), static_cast<int>(offset) + width)
-                          .copyTo(part.row(r));
+                Mat part = weight.rowRange(0, K).colRange(static_cast<int>(offset), static_cast<int>(offset) + width).clone();
                 weightTensor[i] = csl::makeTensorHeader<T>(part);
                 csl::copyMatToTensor<T>(part, weightTensor[i], stream);
 
@@ -80,7 +77,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             const std::vector<UMat>& outputs,
             csl::Workspace& workspace) override
         {
-            CV_Assert(inputs.size() >= 1 && outputs.size() == 1);
+            CV_CheckEQ(inputs.size(), (size_t)1, "DNN/CUDA Attention: mask, rotary and non-constant weight inputs are not supported");
+            CV_Assert(outputs.size() == 1);
 
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);

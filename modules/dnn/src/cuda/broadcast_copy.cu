@@ -38,9 +38,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         __global__ void broadcast_copy(Span<T> output, View<T> input, BroadcastLayout layout)
         {
             for (auto id : grid_stride_range(output.size())) {
-                /* Decode the output coordinate innermost-first and immediately fold it
-                 * into the input offset, so we never materialise the coordinate vector.
-                 * The modulo is what makes this serve Tile and Expand alike. */
+                /* fold each output coordinate straight into the input offset; the modulo covers Tile and Expand */
                 std::int64_t remaining = id;
                 std::int64_t input_index = 0;
                 for (int axis = layout.rank - 1; axis >= 0; --axis) {

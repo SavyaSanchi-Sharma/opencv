@@ -35,6 +35,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         {
             CV_UNUSED(workspace);
             CV_Assert(inputs.size() == 2 && outputs.size() == 1);
+            CV_CheckType(inputs[1].depth(), inputs[1].depth() == CV_32S || inputs[1].depth() == CV_64S,
+                         "Gather: indices must be int32 or int64");
 
             auto data = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);

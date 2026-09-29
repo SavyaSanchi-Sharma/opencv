@@ -537,8 +537,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 acc_t max_value = -::cuda::std::numeric_limits<acc_t>::infinity();
                 for (int k = 0; k < axis_size; k++) {
                     const acc_t v = static_cast<acc_t>(src[base + k * stride]);
-                    if (v > max_value)
-                        max_value = v;
+                    max_value = v > max_value ? v : max_value;
                 }
 
                 acc_t sum = static_cast<acc_t>(0);
