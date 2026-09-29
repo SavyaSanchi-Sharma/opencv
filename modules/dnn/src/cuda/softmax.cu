@@ -521,14 +521,14 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
         __global__ void softmax_strided_forward(output_t* dst, const input_t* src,
-                                                int axis_size, int inner_size, long long num_lanes) {
-            for (long long lane = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+                                                int axis_size, int inner_size, std::int64_t num_lanes) {
+            for (std::int64_t lane = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
                  lane < num_lanes;
-                 lane += (long long)gridDim.x * blockDim.x)
+                 lane += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
             {
-                const long long outer = lane / inner_size;
-                const long long stride = inner_size;
-                const long long base = outer * (long long)axis_size * stride + (lane - outer * stride);
+                const std::int64_t outer = lane / inner_size;
+                const std::int64_t stride = inner_size;
+                const std::int64_t base = outer * static_cast<std::int64_t>(axis_size) * stride + (lane - outer * stride);
 
                 acc_t max_value = -::cuda::std::numeric_limits<acc_t>::infinity();
                 for (int k = 0; k < axis_size; k++) {
@@ -543,12 +543,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 if (is_log_softmax) {
                     const acc_t log_sum = static_cast<acc_t>(std::log((float)sum));
                     for (int k = 0; k < axis_size; k++) {
-                        const long long o = base + k * stride;
+                        const std::int64_t o = base + k * stride;
                         dst[o] = static_cast<output_t>(static_cast<acc_t>(src[o]) - max_value - log_sum);
                     }
                 } else {
                     for (int k = 0; k < axis_size; k++) {
-                        const long long o = base + k * stride;
+                        const std::int64_t o = base + k * stride;
                         dst[o] = static_cast<output_t>(std::exp((float)(static_cast<acc_t>(src[o]) - max_value)) / sum);
                     }
                 }
@@ -558,9 +558,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
         void dispatch_strided_softmax_forward(cudaStream_t stream, output_t* output, const input_t* input,
                                               int axis_size, int outer_size, int inner_size) {
-            const long long num_lanes = (long long)outer_size * (long long)inner_size;
+            const std::int64_t num_lanes = static_cast<std::int64_t>(outer_size) * static_cast<std::int64_t>(inner_size);
             constexpr int BLOCK_SIZE = 256;
-            long long num_blocks = (num_lanes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            std::int64_t num_blocks = (num_lanes + BLOCK_SIZE - 1) / BLOCK_SIZE;
             if (num_blocks > 65535)
                 num_blocks = 65535;
             softmax_strided_forward<input_t, output_t, acc_t, is_log_softmax>

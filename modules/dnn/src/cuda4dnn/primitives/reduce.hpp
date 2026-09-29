@@ -11,6 +11,7 @@
 #include "../csl/stream.hpp"
 
 #include "../kernels/reduce.hpp"
+#include "../kernels/fill_copy.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -25,8 +26,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     template <class T>
     class ReduceOp final : public CUDABackendNode {
     public:
-        ReduceOp(csl::Stream stream_, ReduceOpType op_, std::vector<std::int64_t> axes_)
-            : stream(std::move(stream_)), op(op_), axes(std::move(axes_))
+        ReduceOp(csl::Stream stream_, ReduceOpType op_, std::vector<std::int64_t> axes_, bool noop_with_empty_axes_)
+            : stream(std::move(stream_)), op(op_), axes(std::move(axes_)), noop_with_empty_axes(noop_with_empty_axes_)
         {
         }
 
@@ -40,6 +41,11 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             auto input = csl::viewOf<T>(inputs[0]);
             auto output = csl::spanOf<T>(outputs[0]);
+
+            if (axes.empty() && noop_with_empty_axes) {
+                kernels::copy<T>(stream, output, input);
+                return;
+            }
 
             MatShape inShape = cv::dnn::shape(inputs[0]);
             std::vector<std::int64_t> dims(inShape.begin(), inShape.end());
@@ -62,6 +68,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
         csl::Stream stream;
         ReduceOpType op;
         std::vector<std::int64_t> axes;
+        bool noop_with_empty_axes;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */

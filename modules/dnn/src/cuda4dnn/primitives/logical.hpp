@@ -121,9 +121,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     };
 
     template <class T>
-    class NotOp final : public CUDABackendNode {
+    class LogicalNotOp final : public CUDABackendNode {
     public:
-        NotOp(csl::Stream stream_) : stream(std::move(stream_)) { }
+        LogicalNotOp(csl::Stream stream_) : stream(std::move(stream_)) { }
 
         void forward(
             const std::vector<UMat>& inputs,
