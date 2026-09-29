@@ -221,27 +221,23 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
     kernel_name<input_t, output_t, acc_t, log2_elements_value, is_log_softmax> \
         <<<blocks, threads, shared_memory_size, stream>>>(dst, src, batch_count, softmax_elements_stride, softmax_elements);
 
-#define CASE_LOG2_ELEMENTS(log2_elements_value)                                   \
+#define CASE_LOG2_ELEMENTS(kernel_name, log2_elements_value)                      \
     case log2_elements_value: {                                                   \
-        if constexpr (log2_elements_value <= 10) {                                \
-            LAUNCH_KERNEL(softmax_warp_forward, log2_elements_value)              \
-        } else {                                                                  \
-            LAUNCH_KERNEL(softmax_warp_forward_resource_efficient, log2_elements_value) \
-        }                                                                         \
+        LAUNCH_KERNEL(kernel_name, log2_elements_value)                           \
     } break
 
-                    CASE_LOG2_ELEMENTS(0);
-                    CASE_LOG2_ELEMENTS(1);
-                    CASE_LOG2_ELEMENTS(2);
-                    CASE_LOG2_ELEMENTS(3);
-                    CASE_LOG2_ELEMENTS(4);
-                    CASE_LOG2_ELEMENTS(5);
-                    CASE_LOG2_ELEMENTS(6);
-                    CASE_LOG2_ELEMENTS(7);
-                    CASE_LOG2_ELEMENTS(8);
-                    CASE_LOG2_ELEMENTS(9);
-                    CASE_LOG2_ELEMENTS(10);
-                    CASE_LOG2_ELEMENTS(11);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 0);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 1);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 2);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 3);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 4);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 5);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 6);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 7);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 8);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 9);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 10);
+                    CASE_LOG2_ELEMENTS(softmax_warp_forward_resource_efficient, 11);
 #undef LAUNCH_KERNEL
 #undef CASE_LOG2_ELEMENTS
                 }

@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace cv { namespace dnn { namespace cuda4dnn {
@@ -53,6 +54,7 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             const std::size_t num_indices = inputs[1].total();
             const std::int64_t output_block_size = block_size * static_cast<std::int64_t>(num_indices);
 
+            CV_Assert(output_block_size <= std::numeric_limits<int>::max());
             csl::device::fast_divmod divmod_output_block_size(static_cast<int>(output_block_size));
             csl::device::fast_divmod divmod_block_size(static_cast<int>(block_size));
 

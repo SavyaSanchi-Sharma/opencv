@@ -136,20 +136,40 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename T, typename TAccum>
-        __device__ __forceinline__ T CastReduceSumResult(TAccum value) {
-            if constexpr (std::is_integral_v<T>) {
-                const double value_as_double = static_cast<double>(value);
-                const double max_value = static_cast<double>(::cuda::std::numeric_limits<T>::max());
-                const double min_value = static_cast<double>(::cuda::std::numeric_limits<T>::min());
-                if (value_as_double >= max_value) return ::cuda::std::numeric_limits<T>::max();
-                if (value_as_double <= min_value) return ::cuda::std::numeric_limits<T>::min();
-            }
+        __device__ __forceinline__ T CastReduceSumResult(TAccum value, std::true_type) {
+            const double value_as_double = static_cast<double>(value);
+            const double max_value = static_cast<double>(::cuda::std::numeric_limits<T>::max());
+            const double min_value = static_cast<double>(::cuda::std::numeric_limits<T>::min());
+            if (value_as_double >= max_value) return ::cuda::std::numeric_limits<T>::max();
+            if (value_as_double <= min_value) return ::cuda::std::numeric_limits<T>::min();
             return static_cast<T>(value);
+        }
+
+        template <typename T, typename TAccum>
+        __device__ __forceinline__ T CastReduceSumResult(TAccum value, std::false_type) {
+            return static_cast<T>(value);
+        }
+
+        template <typename T, typename TAccum>
+        __device__ __forceinline__ T CastReduceSumResult(TAccum value) {
+            return CastReduceSumResult<T>(value, std::is_integral<T>{});
+        }
+
+        template <typename T, typename TAccum>
+        __device__ __forceinline__ T FinalizeReduceSum(TAccum sum, std::int64_t count, bool mean, std::true_type) {
+            const T result = static_cast<T>(sum);
+            return mean ? static_cast<T>(result / static_cast<T>(count)) : result;
+        }
+
+        template <typename T, typename TAccum>
+        __device__ __forceinline__ T FinalizeReduceSum(TAccum sum, std::int64_t count, bool mean, std::false_type) {
+            const TAccum inv_norm = mean ? static_cast<TAccum>(1.0 / static_cast<double>(count)) : TAccum(1);
+            return static_cast<T>(sum * inv_norm);
         }
 
         template <typename T, int BlockSize>
         __global__ void reduce_sum_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata, bool mean) {
-            using TAccum = std::conditional_t<std::is_integral_v<T>, std::uint64_t, typename accumulation_type<T>::type>;
+            using TAccum = std::conditional_t<std::is_integral<T>::value, std::uint64_t, typename accumulation_type<T>::type>;
             using BlockReduce = cub::BlockReduce<SumState<TAccum>, BlockSize>;
             __shared__ typename BlockReduce::TempStorage reduce_storage;
             __shared__ std::int64_t input_base;
@@ -167,15 +187,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     thread_sum.Add(static_cast<TAccum>(input[reduce_input_offset(metadata, input_base, reduction_index)]));
 
                 const SumState<TAccum> block_sum = BlockReduce(reduce_storage).Reduce(thread_sum, MergeSumState<TAccum>{});
-                if (threadIdx.x == 0) {
-                    if constexpr (std::is_integral_v<T>) {
-                        const T sum = static_cast<T>(block_sum.Result());
-                        output[output_index] = mean ? static_cast<T>(sum / static_cast<T>(metadata.reduction_count)) : sum;
-                    } else {
-                        const TAccum inv_norm = mean ? static_cast<TAccum>(1.0 / static_cast<double>(metadata.reduction_count)) : TAccum(1);
-                        output[output_index] = static_cast<T>(block_sum.Result() * inv_norm);
-                    }
-                }
+                if (threadIdx.x == 0)
+                    output[output_index] = FinalizeReduceSum<T>(block_sum.Result(), metadata.reduction_count, mean, std::is_integral<T>{});
                 __syncthreads();
             }
         }
@@ -312,12 +325,72 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             __device__ __forceinline__ TAccum operator()(const TAccum& lhs, const TAccum& rhs) const { return lhs > rhs ? lhs : rhs; }
         };
 
+        template <GenericReduceOp Op>
+        struct GenericReduceStep;
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::PROD> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T, TAccum value, const TAccum&) { acc *= value; }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum&) { return acc; }
+        };
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::L1> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T raw, TAccum value, const TAccum&) {
+                AccumulateAbs(acc, raw, value, std::is_integral<TAccum>{});
+            }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum&) { return acc; }
+
+        private:
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void AccumulateAbs(TAccum& acc, T raw, TAccum, std::true_type) { acc += static_cast<TAccum>(raw > 0 ? raw : -raw); }
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void AccumulateAbs(TAccum& acc, T, TAccum value, std::false_type) { acc += fabs(value); }
+        };
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::L2> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T, TAccum value, const TAccum&) { acc += value * value; }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum&) { return sqrt(acc); }
+        };
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::SUM_SQUARE> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T, TAccum value, const TAccum&) { acc += value * value; }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum&) { return acc; }
+        };
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::LOG_SUM> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T, TAccum value, const TAccum&) { acc += value; }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum&) { return log(acc); }
+        };
+
+        template <>
+        struct GenericReduceStep<GenericReduceOp::LOG_SUM_EXP> {
+            template <typename T, typename TAccum>
+            static __device__ __forceinline__ void Accumulate(TAccum& acc, T, TAccum value, const TAccum& shared_max) { acc += exp(value - shared_max); }
+            template <typename TAccum>
+            static __device__ __forceinline__ TAccum Finalize(TAccum acc, const TAccum& shared_max) { return log(acc) + shared_max; }
+        };
+
         template <typename T, GenericReduceOp Op, int BlockSize>
         __global__ void reduce_generic_nd_kernel(const T* input, T* output, ReduceSumNdMetadata metadata) {
-            constexpr bool kIntegerAccum = std::is_integral_v<T> &&
+            constexpr bool kIntegerAccum = std::is_integral<T>::value &&
                 (Op == GenericReduceOp::PROD || Op == GenericReduceOp::L1 || Op == GenericReduceOp::SUM_SQUARE);
             using TAccum = std::conditional_t<kIntegerAccum, std::uint64_t,
-                           std::conditional_t<std::is_integral_v<T>, double, typename accumulation_type<T>::type>>;
+                           std::conditional_t<std::is_integral<T>::value, double, typename accumulation_type<T>::type>>;
+            using Step = GenericReduceStep<Op>;
             using BlockReduce = cub::BlockReduce<TAccum, BlockSize>;
             __shared__ typename BlockReduce::TempStorage reduce_storage;
             __shared__ std::int64_t input_base;
@@ -332,7 +405,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
                 // exp(x) overflows well before the reduction is done, so LOG_SUM_EXP
                 // walks the reduction twice: once for max(x), then for sum(exp(x - max)).
-                if constexpr (Op == GenericReduceOp::LOG_SUM_EXP) {
+                if (Op == GenericReduceOp::LOG_SUM_EXP) {
                     TAccum thread_max = -::cuda::std::numeric_limits<TAccum>::infinity();
                     for (std::int64_t reduction_index = threadIdx.x; reduction_index < metadata.reduction_count;
                          reduction_index += BlockSize) {
@@ -349,30 +422,19 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                      reduction_index += BlockSize) {
                     const T raw = input[reduce_input_offset(metadata, input_base, reduction_index)];
                     const TAccum value = static_cast<TAccum>(raw);
-                    if constexpr (Op == GenericReduceOp::PROD)             thread_acc *= value;
-                    else if constexpr (Op == GenericReduceOp::L1) {
-                        if constexpr (kIntegerAccum)                      thread_acc += static_cast<TAccum>(raw > 0 ? raw : -raw);
-                        else                                              thread_acc += fabs(value);
-                    }
-                    else if constexpr (Op == GenericReduceOp::L2 ||
-                                       Op == GenericReduceOp::SUM_SQUARE) thread_acc += value * value;
-                    else if constexpr (Op == GenericReduceOp::LOG_SUM)     thread_acc += value;
-                    else                                                  thread_acc += exp(value - shared_max);
+                    Step::Accumulate(thread_acc, raw, value, shared_max);
                 }
 
                 TAccum block_acc;
-                if constexpr (Op == GenericReduceOp::PROD)
+                if (Op == GenericReduceOp::PROD)
                     block_acc = BlockReduce(reduce_storage).Reduce(thread_acc, ProdCombine<TAccum>{});
                 else
                     block_acc = BlockReduce(reduce_storage).Sum(thread_acc);
 
                 if (threadIdx.x == 0) {
-                    TAccum result = block_acc;
-                    if constexpr (Op == GenericReduceOp::L2)               result = sqrt(block_acc);
-                    else if constexpr (Op == GenericReduceOp::LOG_SUM)     result = log(block_acc);
-                    else if constexpr (Op == GenericReduceOp::LOG_SUM_EXP) result = log(block_acc) + shared_max;
-                    if constexpr (kIntegerAccum) output[output_index] = static_cast<T>(result);
-                    else                         output[output_index] = CastReduceSumResult<T>(result);
+                    const TAccum result = Step::Finalize(block_acc, shared_max);
+                    if (kIntegerAccum) output[output_index] = static_cast<T>(result);
+                    else               output[output_index] = CastReduceSumResult<T>(result);
                 }
                 __syncthreads();
             }
