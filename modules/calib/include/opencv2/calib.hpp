@@ -498,10 +498,10 @@ enum { CALIB_USE_INTRINSIC_GUESS = (1 << 0), //!< Use user provided intrinsics a
        CALIB_FIX_PRINCIPAL_POINT = (1 << 2), //!< The principal point (cx, cy) stays the same as in the input camera matrix. Image center is used as principal point, if CALIB_USE_INTRINSIC_GUESS is not set.
        CALIB_ZERO_TANGENT_DIST   = (1 << 3), //!< For pinhole model only. Tangential distortion coefficients \f$(p_1, p_2)\f$ are set to zeros and stay zero.
        CALIB_FIX_FOCAL_LENGTH    = (1 << 4), //!< Use with CALIB_USE_INTRINSIC_GUESS. The focal length (fx, fy) stays the same as in the input cameraMatrix.
-       CALIB_FIX_K1              = (1 << 5), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For fisheye model, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
-       CALIB_FIX_K2              = (1 << 6), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For fisheye model, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
-       CALIB_FIX_K3              = (1 << 7), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For fisheye model, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
-       CALIB_FIX_K4              = (1 << 11), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For fisheye model, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
+       CALIB_FIX_K1              = (1 << 5), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For #fisheye::calibrate, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
+       CALIB_FIX_K2              = (1 << 6), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For #fisheye::calibrate, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
+       CALIB_FIX_K3              = (1 << 7), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For #fisheye::calibrate, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
+       CALIB_FIX_K4              = (1 << 11), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set. For #fisheye::calibrate, the coefficient is set to 0 and stays 0 even if CALIB_USE_INTRINSIC_GUESS is set.
        CALIB_FIX_K5              = (1 << 12), //!< For pinhole model only. The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set.
        CALIB_FIX_K6              = (1 << 13), //!< For pinhole model only. The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set.
        CALIB_RATIONAL_MODEL      = (1 << 14), //!< For pinhole model only. Use rational distortion model with coefficients k4..k6.
@@ -1511,7 +1511,7 @@ of intrinsic optimization.
 -   @ref cv::CALIB_CHECK_COND  The functions will check validity of condition number.
 -   @ref cv::CALIB_FIX_SKEW  Skew coefficient (alpha) is set to zero and stay zero.
 -   @ref cv::CALIB_FIX_K1,..., @ref cv::CALIB_FIX_K4 Selected distortion coefficients are set to zeros and stay
-zero.
+zero. They have no effect with @ref cv::CALIB_FIX_INTRINSIC, which keeps D1 and D2 as given.
 @param criteria Termination criteria for the iterative optimization algorithm.
  */
 CV_EXPORTS_W double stereoCalibrate(InputArrayOfArrays objectPoints, InputArrayOfArrays imagePoints1, InputArrayOfArrays imagePoints2,
