@@ -69,6 +69,9 @@ namespace cv { namespace dnn { namespace cuda4dnn {
 
             auto output = csl::spanOf<std::int64_t>(outputs[0]);
             CV_Assert(output.size() == (std::size_t)(end_ - start_));
+            // Shape of a scalar, or start == end, is a valid empty tensor; csl::memcpy rejects n == 0.
+            if (output.size() == 0)
+                return;
             csl::memcpy<std::int64_t>(output.get(), shapeData, output.size(), stream);
         }
 

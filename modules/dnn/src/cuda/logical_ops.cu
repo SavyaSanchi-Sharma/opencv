@@ -6,9 +6,11 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include "array.hpp"
 #include "types.hpp"
 #include "grid_stride_range.hpp"
 #include "execution.hpp"
+#include "kernel_dispatcher.hpp"
 
 #include "../cuda4dnn/csl/stream.hpp"
 #include "../cuda4dnn/csl/span.hpp"
@@ -20,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 using namespace cv::dnn::cuda4dnn::csl;
@@ -28,10 +31,26 @@ using namespace cv::dnn::cuda4dnn::csl::device;
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
     namespace raw {
-        struct BroadcastIndexLayout {
-            int rank{};
-            std::int64_t out_dims[CSL_MAX_TENSOR_RANK]{};
-            std::int64_t strides[3][CSL_MAX_TENSOR_RANK]{};
+        /* maps an output index to an offset in each of N broadcast inputs; a zero stride marks a broadcast axis */
+        template <std::size_t Rank, std::size_t N>
+        struct BroadcastIndex {
+            array<size_type, Rank> out_strides;
+            array<size_type, Rank> in_strides[N];
+
+            __device__ void input_offsets(index_type i, index_type (&offsets)[N]) const {
+                for (int k = 0; k < N; k++)
+                    offsets[k] = 0;
+                index_type remaining = i;
+                for (int axis = 0; axis < Rank; axis++) {
+                    index_type coord = remaining;
+                    if (axis != Rank - 1) {
+                        coord = remaining / out_strides[axis];
+                        remaining -= coord * out_strides[axis];
+                    }
+                    for (int k = 0; k < N; k++)
+                        offsets[k] += coord * in_strides[k][axis];
+                }
+            }
         };
 
         struct EqualFunctor {
@@ -66,37 +85,24 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             __device__ bool operator()(bool a, bool b) const { return a != b; }
         };
 
-        template <class T, class Functor>
-        __global__ void binary_to_bool(Span<bool> output, View<T> x, View<T> y, BroadcastIndexLayout layout)
+        template <class T, class Functor, std::size_t Rank>
+        __global__ void binary_to_bool(Span<bool> output, View<T> x, View<T> y, BroadcastIndex<Rank, 2> index)
         {
             Functor functor;
-            for (auto id : grid_stride_range(output.size())) {
-                std::int64_t remaining = id;
-                std::int64_t x_index = 0, y_index = 0;
-                for (int axis = layout.rank - 1; axis >= 0; --axis) {
-                    const std::int64_t coord = remaining % layout.out_dims[axis];
-                    remaining /= layout.out_dims[axis];
-                    x_index += coord * layout.strides[0][axis];
-                    y_index += coord * layout.strides[1][axis];
-                }
-                output[id] = functor(x.data().get()[x_index], y.data().get()[y_index]);
+            for (auto i : grid_stride_range(output.size())) {
+                index_type offsets[2];
+                index.input_offsets(i, offsets);
+                output[i] = functor(x[offsets[0]], y[offsets[1]]);
             }
         }
 
-        template <class T>
-        __global__ void where(Span<T> output, View<bool> cond, View<T> x, View<T> y, BroadcastIndexLayout layout)
+        template <class T, std::size_t Rank>
+        __global__ void where(Span<T> output, View<bool> cond, View<T> x, View<T> y, BroadcastIndex<Rank, 3> index)
         {
-            for (auto id : grid_stride_range(output.size())) {
-                std::int64_t remaining = id;
-                std::int64_t c_index = 0, x_index = 0, y_index = 0;
-                for (int axis = layout.rank - 1; axis >= 0; --axis) {
-                    const std::int64_t coord = remaining % layout.out_dims[axis];
-                    remaining /= layout.out_dims[axis];
-                    c_index += coord * layout.strides[0][axis];
-                    x_index += coord * layout.strides[1][axis];
-                    y_index += coord * layout.strides[2][axis];
-                }
-                output[id] = cond.data().get()[c_index] ? x.data().get()[x_index] : y.data().get()[y_index];
+            for (auto i : grid_stride_range(output.size())) {
+                index_type offsets[3];
+                index.input_offsets(i, offsets);
+                output[i] = cond[offsets[0]] ? x[offsets[1]] : y[offsets[2]];
             }
         }
 
@@ -107,8 +113,10 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
     }
 
+    /* Left-pads every input shape to the output rank and returns that rank. When all shapes
+     * match there is no broadcasting, so every shape collapses to a single axis. */
     template <class Shape> static
-    raw::BroadcastIndexLayout make_broadcast_layout(Shape out_shape, std::vector<Shape> in_shapes)
+    int normalize_broadcast_shapes(Shape& out_shape, std::vector<Shape>& in_shapes)
     {
         CV_Assert(in_shapes.size() <= 3);
 
@@ -132,36 +140,65 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         const int rank = static_cast<int>(out_shape.size());
         CV_Assert(rank >= 1 && rank <= CSL_MAX_TENSOR_RANK);
 
-        raw::BroadcastIndexLayout layout;
-        layout.rank = rank;
-        for (int axis = 0; axis < rank; axis++)
-            layout.out_dims[axis] = static_cast<std::int64_t>(out_shape[axis]);
-
-        for (std::size_t k = 0; k < in_shapes.size(); k++) {
-            const Shape& shape = in_shapes[k];
+        for (Shape& shape : in_shapes) {
             CV_Assert(shape.size() <= out_shape.size());
-            const int pad = rank - static_cast<int>(shape.size());
-            std::int64_t stride = 1;
-            for (int axis = rank - 1; axis >= 0; --axis) {
-                const std::int64_t dim = axis < pad ? 1 : static_cast<std::int64_t>(shape[axis - pad]);
-                CV_Assert(dim == 1 || dim == layout.out_dims[axis]);
-                layout.strides[k][axis] = dim == 1 ? 0 : stride;
-                stride *= dim;
+            shape.insert(shape.begin(), out_shape.size() - shape.size(), 1);
+            for (int axis = 0; axis < rank; axis++)
+                CV_Assert(shape[axis] == 1 || shape[axis] == out_shape[axis]);
+        }
+        return rank;
+    }
+
+    template <std::size_t Rank, std::size_t N, class Shape> static
+    raw::BroadcastIndex<Rank, N> make_broadcast_index(const Shape& out_shape, const std::vector<Shape>& in_shapes)
+    {
+        CV_Assert(out_shape.size() == Rank && in_shapes.size() == N);
+
+        raw::BroadcastIndex<Rank, N> index;
+        size_type stride = 1;
+        for (int axis = Rank - 1; axis >= 0; --axis) {
+            index.out_strides[axis] = stride;
+            stride *= static_cast<size_type>(out_shape[axis]);
+        }
+        for (std::size_t k = 0; k < N; k++) {
+            size_type in_stride = 1;
+            for (int axis = Rank - 1; axis >= 0; --axis) {
+                const auto dim = static_cast<size_type>(in_shapes[k][axis]);
+                index.in_strides[k][axis] = dim == 1 ? 0 : in_stride;
+                in_stride *= dim;
             }
         }
-        return layout;
+        return index;
     }
+
+    /* the CSL index types are 32-bit, like the rest of the CUDA backend */
+    static void check_index_range(std::size_t size) {
+        CV_Assert(size <= static_cast<std::size_t>(std::numeric_limits<index_type>::max()));
+    }
+
+    template <class T, class Functor, std::size_t Rank, class Shape> static
+    void launch_binary_to_bool_kernel(const Stream& stream, Span<bool> output, View<T> x, View<T> y,
+                                      const Shape& out_shape, const std::vector<Shape>& in_shapes)
+    {
+        auto kernel = raw::binary_to_bool<T, Functor, Rank>;
+        auto policy = make_policy(kernel, output.size(), 0, stream);
+        launch_kernel(kernel, policy, output, x, y, make_broadcast_index<Rank, 2>(out_shape, in_shapes));
+    }
+
+    GENERATE_KERNEL_DISPATCHER_2TP(binary_to_bool_dispatcher, launch_binary_to_bool_kernel);
 
     template <class T, class Functor> static
     void launch_binary_to_bool(const Stream& stream, TensorSpan<bool> output, TensorView<T> x, TensorView<T> y)
     {
         if (output.size() == 0)
             return;
+        check_index_range(output.size());
 
-        auto layout = make_broadcast_layout(output.shape_as_vector(), {x.shape_as_vector(), y.shape_as_vector()});
-        auto kernel = raw::binary_to_bool<T, Functor>;
-        auto policy = make_policy(kernel, output.size(), 0, stream);
-        launch_kernel(kernel, policy, Span<bool>(output), View<T>(x), View<T>(y), layout);
+        auto out_shape = output.shape_as_vector();
+        std::vector<decltype(out_shape)> in_shapes{x.shape_as_vector(), y.shape_as_vector()};
+        const int rank = normalize_broadcast_shapes(out_shape, in_shapes);
+        binary_to_bool_dispatcher<T, Functor, 1, CSL_MAX_TENSOR_RANK>(rank, stream, Span<bool>(output), View<T>(x), View<T>(y),
+                                                                       out_shape, in_shapes);
     }
 
     template <class T>
@@ -211,16 +248,28 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         launch_kernel(kernel, policy, Span<bool>(output), View<bool>(input));
     }
 
+    template <class T, std::size_t Rank, class Shape> static
+    void launch_where_kernel(const Stream& stream, Span<T> output, View<bool> cond, View<T> x, View<T> y,
+                             const Shape& out_shape, const std::vector<Shape>& in_shapes)
+    {
+        auto kernel = raw::where<T, Rank>;
+        auto policy = make_policy(kernel, output.size(), 0, stream);
+        launch_kernel(kernel, policy, output, cond, x, y, make_broadcast_index<Rank, 3>(out_shape, in_shapes));
+    }
+
+    GENERATE_KERNEL_DISPATCHER(where_dispatcher, launch_where_kernel);
+
     template <class T>
     void where(const Stream& stream, TensorSpan<T> output, TensorView<bool> cond, TensorView<T> x, TensorView<T> y) {
         if (output.size() == 0)
             return;
+        check_index_range(output.size());
 
-        auto layout = make_broadcast_layout(output.shape_as_vector(),
-                                            {cond.shape_as_vector(), x.shape_as_vector(), y.shape_as_vector()});
-        auto kernel = raw::where<T>;
-        auto policy = make_policy(kernel, output.size(), 0, stream);
-        launch_kernel(kernel, policy, Span<T>(output), View<bool>(cond), View<T>(x), View<T>(y), layout);
+        auto out_shape = output.shape_as_vector();
+        std::vector<decltype(out_shape)> in_shapes{cond.shape_as_vector(), x.shape_as_vector(), y.shape_as_vector()};
+        const int rank = normalize_broadcast_shapes(out_shape, in_shapes);
+        where_dispatcher<T, 1, CSL_MAX_TENSOR_RANK>(rank, stream, Span<T>(output), View<bool>(cond), View<T>(x), View<T>(y),
+                                                    out_shape, in_shapes);
     }
 
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 530)

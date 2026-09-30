@@ -8,11 +8,14 @@
 
 #include "math.hpp"
 #include "vector_traits.hpp"
+#include "execution.hpp"
 
 #include "../cuda4dnn/csl/stream.hpp"
 #include "../cuda4dnn/csl/span.hpp"
 
 #include "../cuda4dnn/kernels/softmax.hpp"
+
+#include <opencv2/core.hpp>
 
 #include <cuda/std/limits>
 
@@ -27,6 +30,22 @@ using namespace cv::dnn::cuda4dnn::csl::device;
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
     namespace detail {
+        // The register kernel keeps row_size / 32 values per thread; past 1024 elements they spill.
+        constexpr int kWarpMaxRowSize = 1024;
+        // The shared-memory warp kernel covers rows up to 2048, but only pays off with many rows.
+        constexpr int kWarpSmemMaxRowSize = 2048;
+        constexpr int kWarpSmemMinRows = 8192;
+        // Neither warp kernel takes a row larger than this many bytes.
+        constexpr int kWarpMaxRowBytes = 4096;
+        // Block size of the register kernel: four warps per block.
+        constexpr int kWarpKernelBlockSize = 128;
+        // Hardware limit on threads per block.
+        constexpr int kMaxBlockSize = 1024;
+
+        // Rows of 128 or fewer share a warp two at a time; the kernel and launcher must agree on this.
+        __host__ __device__ constexpr int rows_per_warp(int row_size_pow2) {
+            return row_size_pow2 <= 128 ? 2 : 1;
+        }
 
         template <class T>
         struct softmax_accum { using type = T; };
@@ -34,12 +53,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         struct softmax_accum<__half> { using type = float; };
 
         template <typename T>
-        struct Add {
+        struct SumOp {
             __device__ __forceinline__ T operator()(T a, T b) const { return a + b; }
         };
 
         template <typename T>
-        struct Max {
+        struct MaxOp {
             __device__ __forceinline__ T operator()(T a, T b) const { return a < b ? b : a; }
         };
 
@@ -57,11 +76,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename input_t, typename output_t, typename acc_t, int log2_elements, bool is_log_softmax>
-        __global__ void softmax_warp_forward(output_t* dst, const input_t* src, int batch_size, int stride, int element_count) {
+        __global__ void softmax_warp_kernel(output_t* dst, const input_t* src, int batch_size, int stride, int element_count) {
             constexpr int next_power_of_two = 1 << log2_elements;
             constexpr int WARP_SIZE = (next_power_of_two < GPU_WARP_SIZE) ? next_power_of_two : GPU_WARP_SIZE;
             constexpr int WARP_ITERATIONS = next_power_of_two / WARP_SIZE;
-            constexpr int WARP_BATCH = (next_power_of_two <= 128) ? 2 : 1;
+            constexpr int WARP_BATCH = rows_per_warp(next_power_of_two);
 
             int first_batch = (blockDim.y * blockIdx.x + threadIdx.y) * WARP_BATCH;
 
@@ -96,7 +115,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     max_value[i] = (max_value[i] > elements[i][it]) ? max_value[i] : elements[i][it];
                 }
             }
-            warp_reduce<acc_t, WARP_BATCH, WARP_SIZE, Max>(max_value);
+            warp_reduce<acc_t, WARP_BATCH, WARP_SIZE, MaxOp>(max_value);
 
             acc_t sum[WARP_BATCH]{0.0f};
 #pragma unroll
@@ -111,7 +130,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     }
                 }
             }
-            warp_reduce<acc_t, WARP_BATCH, WARP_SIZE, Add>(sum);
+            warp_reduce<acc_t, WARP_BATCH, WARP_SIZE, SumOp>(sum);
 
 #pragma unroll
             for (int i = 0; i < WARP_BATCH; ++i) {
@@ -135,7 +154,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename input_t, typename output_t, typename acc_t, int log2_elements, bool is_log_softmax>
-        __global__ void softmax_warp_forward_resource_efficient(output_t* dst, const input_t* src, int batch_size, int stride, int element_count) {
+        __global__ void softmax_warp_smem_kernel(output_t* dst, const input_t* src, int batch_size, int stride, int element_count) {
             constexpr int next_power_of_two = 1 << log2_elements;
             constexpr int WARP_SIZE = (next_power_of_two < GPU_WARP_SIZE) ? next_power_of_two : GPU_WARP_SIZE;
             constexpr int WARP_ITERATIONS = next_power_of_two / WARP_SIZE;
@@ -161,7 +180,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             for (int it = 1; it < WARP_ITERATIONS; ++it) {
                 max_value = (max_value > elements[it][local_idx]) ? max_value : elements[it][local_idx];
             }
-            warp_reduce<input_t, 1, WARP_SIZE, Max>(&max_value);
+            warp_reduce<input_t, 1, WARP_SIZE, MaxOp>(&max_value);
             acc_t sum{0.0f};
             for (int it = 0; it < WARP_ITERATIONS; ++it) {
                 int element_index = local_idx + it * WARP_SIZE;
@@ -175,7 +194,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                     sum += tmp;
                 }
             }
-            warp_reduce<acc_t, 1, WARP_SIZE, Add>(&sum);
+            warp_reduce<acc_t, 1, WARP_SIZE, SumOp>(&sum);
             if (is_log_softmax) sum = static_cast<acc_t>(max_value) + std::log((float)(sum));
             acc_t invsum = static_cast<acc_t>(1.0f / sum);
 #pragma unroll
@@ -194,88 +213,86 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
-        void dispatch_warpwise_softmax_forward(cudaStream_t stream, output_t* dst, const input_t* src, int softmax_elements,
-                                               int softmax_elements_stride, int batch_count) {
+        void launch_softmax_warp(const Stream& stream, output_t* dst, const input_t* src, int softmax_elements,
+                                 int softmax_elements_stride, int batch_count) {
             if (softmax_elements == 0) {
                 return;
             } else {
                 int log2_elements = log2_ceil(softmax_elements);
                 const int next_power_of_two = 1 << log2_elements;
 
-                int warp_size = (next_power_of_two < GPU_WARP_SIZE_HOST) ? next_power_of_two : GPU_WARP_SIZE_HOST;
+                int warp_size = (next_power_of_two < GPU_WARP_SIZE) ? next_power_of_two : GPU_WARP_SIZE;
                 int threads_per_block, shared_memory_size;
-                int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
-                if (log2_elements <= 10) {
-                    threads_per_block = 128;
+                int batches_per_warp = rows_per_warp(next_power_of_two);
+                if (next_power_of_two <= kWarpMaxRowSize) {
+                    threads_per_block = kWarpKernelBlockSize;
                     shared_memory_size = 0;
                 } else {
-                    threads_per_block = 32;
+                    // One warp per block, with the whole row staged in shared memory.
+                    threads_per_block = GPU_WARP_SIZE;
                     shared_memory_size = next_power_of_two * sizeof(input_t);
                 }
                 int warps_per_block = (threads_per_block / warp_size);
                 int batches_per_block = warps_per_block * batches_per_warp;
                 int blocks = (batch_count + batches_per_block - 1) / batches_per_block;
                 dim3 threads(warp_size, warps_per_block, 1);
+                const execution_policy policy(blocks, threads, shared_memory_size, stream);
+
+                static_assert(kWarpMaxRowSize == (1 << 10) && kWarpSmemMaxRowSize == (1 << 11),
+                              "the switch below has one case per power of two up to kWarpSmemMaxRowSize");
                 switch (log2_elements) {
 #define LAUNCH_KERNEL(kernel_name, log2_elements_value)                      \
-    kernel_name<input_t, output_t, acc_t, log2_elements_value, is_log_softmax> \
-        <<<blocks, threads, shared_memory_size, stream>>>(dst, src, batch_count, softmax_elements_stride, softmax_elements);
+    launch_kernel(kernel_name<input_t, output_t, acc_t, log2_elements_value, is_log_softmax>, policy, \
+                  dst, src, batch_count, softmax_elements_stride, softmax_elements);
 
 #define CASE_LOG2_ELEMENTS(kernel_name, log2_elements_value)                      \
     case log2_elements_value: {                                                   \
         LAUNCH_KERNEL(kernel_name, log2_elements_value)                           \
     } break
 
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 0);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 1);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 2);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 3);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 4);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 5);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 6);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 7);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 8);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 9);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward, 10);
-                    CASE_LOG2_ELEMENTS(softmax_warp_forward_resource_efficient, 11);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 0);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 1);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 2);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 3);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 4);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 5);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 6);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 7);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 8);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 9);
+                    CASE_LOG2_ELEMENTS(softmax_warp_kernel, 10);
+                    CASE_LOG2_ELEMENTS(softmax_warp_smem_kernel, 11);
 #undef LAUNCH_KERNEL
 #undef CASE_LOG2_ELEMENTS
+                    default:
+                        CV_Error(cv::Error::StsInternal, "softmax: row is too long for the warp kernels");
                 }
             }
         }
 
-        const int max_threads = 1024;
-
-        dim3 SoftMax_getBlockSize(int ILP, uint64_t dim_size) {
+        dim3 pick_block_size(int ILP, uint64_t dim_size) {
             uint64_t block_size = 1;
-            uint64_t max_block_size = std::min(dim_size / ILP, static_cast<uint64_t>(max_threads));
+            uint64_t max_block_size = std::min(dim_size / ILP, static_cast<uint64_t>(kMaxBlockSize));
 
             if (ILP > 1) {
                 max_block_size /= 2;
             }
 
             while (block_size < (max_block_size)) block_size *= 2;
-            block_size = std::max(block_size, static_cast<uint64_t>(GPU_WARP_SIZE_HOST));
+            block_size = std::max(block_size, static_cast<uint64_t>(GPU_WARP_SIZE));
             return dim3(static_cast<unsigned int>(block_size));
         }
 
         template <typename T, typename AccumT>
-        struct MaxFloat {
+        struct MaxStep {
             __device__ __forceinline__ AccumT operator()(AccumT max, T v) const {
                 return ::max(max, (AccumT)v);
             }
         };
 
         template <typename T, typename AccumT>
-        struct AddFloat {
-            __device__ __forceinline__ AccumT operator()(AccumT sum, T v) const {
-                return sum + (AccumT)v;
-            }
-        };
-
-        template <typename T, typename AccumT>
-        struct SumExpFloat {
-            __device__ __forceinline__ SumExpFloat(AccumT v) : max_k(v) {}
+        struct SumExpStep {
+            __device__ __forceinline__ SumExpStep(AccumT v) : max_k(v) {}
 
             __device__ __forceinline__ AccumT operator()(AccumT sum, T v) const {
                 return sum + std::exp((AccumT)v - max_k);
@@ -285,9 +302,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         };
 
         template <template <typename> class Reduction, typename AccumT>
-        __device__ __forceinline__ AccumT blockReduce(AccumT* smem, AccumT val,
-                                                      const Reduction<AccumT>& r,
-                                                      AccumT defaultVal) {
+        __device__ __forceinline__ AccumT block_reduce(AccumT* smem, AccumT val,
+                                                       const Reduction<AccumT>& r,
+                                                       AccumT defaultVal) {
             __syncthreads();
 
             smem[threadIdx.x] = val;
@@ -321,11 +338,11 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <template <typename, typename> class Reduction, int ILP, typename T, typename AccumT>
-        __device__ __forceinline__ AccumT ilpReduce(int shift,
-                                                    T* data,
-                                                    int size,
-                                                    const Reduction<T, AccumT>& r,
-                                                    AccumT defaultVal) {
+        __device__ __forceinline__ AccumT thread_reduce(int shift,
+                                                        T* data,
+                                                        int size,
+                                                        const Reduction<T, AccumT>& r,
+                                                        AccumT defaultVal) {
             using LoadT = aligned_vector<T, ILP>;
             AccumT threadVal = defaultVal;
             int offset = threadIdx.x;
@@ -363,12 +380,12 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             return threadVal;
         }
 
-        template <int ILP, typename scalar_t, typename accum_t, typename outscalar_t, template <typename, typename, typename> class Epilogue>
-        __device__ __forceinline__ void WriteFpropResultsVectorized(int size,
-                                                                    const int shift,
-                                                                    scalar_t* input,
-                                                                    outscalar_t* output,
-                                                                    Epilogue<scalar_t, accum_t, outscalar_t> epilogue) {
+        template <int ILP, typename scalar_t, typename accum_t, typename outscalar_t, template <typename, typename, typename> class OutputOp>
+        __device__ __forceinline__ void write_output_vectorized(int size,
+                                                                const int shift,
+                                                                scalar_t* input,
+                                                                outscalar_t* output,
+                                                                OutputOp<scalar_t, accum_t, outscalar_t> output_op) {
             using LoadT = aligned_vector<scalar_t, ILP>;
             using StoreT = aligned_vector<outscalar_t, ILP>;
 
@@ -380,7 +397,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 size += shift;
 
                 if (threadIdx.x >= shift && threadIdx.x < size) {
-                    output[offset] = epilogue(input[offset]);
+                    output[offset] = output_op(input[offset]);
                 }
                 size -= blockDim.x;
                 input += blockDim.x;
@@ -402,7 +419,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
 #pragma unroll
                 for (int j = 0; j < ILP; ++j) {
-                    out_v[j] = epilogue(in_v[j]);
+                    out_v[j] = output_op(in_v[j]);
                 }
 
                 reinterpret_cast<StoreT*>(output)[offset] = *out_value;
@@ -410,15 +427,15 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
             offset = size - last + threadIdx.x;
             for (; offset < size; offset += blockDim.x) {
-                output[offset] = epilogue(input[offset]);
+                output[offset] = output_op(input[offset]);
             }
         }
 
-        template <int ILP, typename scalar_t, typename accum_t, typename outscalar_t, template <typename, typename, typename> class Epilogue>
-        __device__ __forceinline__ void WriteFpropResults(int classes,
-                                                          scalar_t* input,
-                                                          outscalar_t* output,
-                                                          Epilogue<scalar_t, accum_t, outscalar_t> epilogue) {
+        template <int ILP, typename scalar_t, typename accum_t, typename outscalar_t, template <typename, typename, typename> class OutputOp>
+        __device__ __forceinline__ void write_output(int classes,
+                                                     scalar_t* input,
+                                                     outscalar_t* output,
+                                                     OutputOp<scalar_t, accum_t, outscalar_t> output_op) {
             int offset = threadIdx.x;
 
             int last = classes % (ILP * blockDim.x);
@@ -432,18 +449,18 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 }
 #pragma unroll
                 for (int j = 0; j < ILP; ++j) {
-                    output[offset + j * blockDim.x] = epilogue(tmp[j]);
+                    output[offset + j * blockDim.x] = output_op(tmp[j]);
                 }
             }
 
             for (; offset < classes; offset += blockDim.x) {
-                output[offset] = epilogue(input[offset]);
+                output[offset] = output_op(input[offset]);
             }
         }
 
         template <typename T, typename AccumT, typename OutT>
-        struct LogSoftMaxForwardEpilogue {
-            __device__ __forceinline__ LogSoftMaxForwardEpilogue(AccumT max_input, AccumT sum)
+        struct LogSoftmaxOutput {
+            __device__ __forceinline__ LogSoftmaxOutput(AccumT max_input, AccumT sum)
                 : max_input(max_input), logsum(std::log(sum)) {}
 
             __device__ __forceinline__ OutT operator()(T input) const {
@@ -455,8 +472,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         };
 
         template <typename T, typename AccumT, typename OutT>
-        struct SoftMaxForwardEpilogue {
-            __device__ __forceinline__ SoftMaxForwardEpilogue(AccumT max_input, AccumT sum)
+        struct SoftmaxOutput {
+            __device__ __forceinline__ SoftmaxOutput(AccumT max_input, AccumT sum)
                 : max_input(max_input), sum(sum) {}
 
             __device__ __forceinline__ OutT operator()(T input) const {
@@ -468,9 +485,9 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         };
 
         template <int ILP, typename scalar_t, typename accscalar_t, typename outscalar_t,
-                  template <typename, typename, typename> class Epilogue>
-        __global__ void softmax_block_forward(outscalar_t* output, scalar_t* input, int classes,
-                                              int input_stride, int output_stride) {
+                  template <typename, typename, typename> class OutputOp>
+        __global__ void softmax_block_kernel(outscalar_t* output, scalar_t* input, int classes,
+                                             int input_stride, int output_stride) {
             extern __shared__ unsigned char smem[];
             auto sdata = reinterpret_cast<accscalar_t*>(smem);
 
@@ -483,45 +500,45 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
             const int shift = ((uint64_t)input) % input_align_bytes / sizeof(scalar_t);
             const int output_shift = ((uint64_t)output) % output_align_bytes / sizeof(outscalar_t);
 
-            accscalar_t threadMax = ilpReduce<MaxFloat, ILP, scalar_t, accscalar_t>(
-                shift, input, classes, MaxFloat<scalar_t, accscalar_t>(), -::cuda::std::numeric_limits<accscalar_t>::max());
-            accscalar_t max_k = blockReduce<Max, accscalar_t>(
-                sdata, threadMax, Max<accscalar_t>(), -::cuda::std::numeric_limits<accscalar_t>::max());
+            accscalar_t threadMax = thread_reduce<MaxStep, ILP, scalar_t, accscalar_t>(
+                shift, input, classes, MaxStep<scalar_t, accscalar_t>(), -::cuda::std::numeric_limits<accscalar_t>::max());
+            accscalar_t max_k = block_reduce<MaxOp, accscalar_t>(
+                sdata, threadMax, MaxOp<accscalar_t>(), -::cuda::std::numeric_limits<accscalar_t>::max());
 
-            accscalar_t threadExp = ilpReduce<SumExpFloat, ILP, scalar_t, accscalar_t>(
-                shift, input, classes, SumExpFloat<scalar_t, accscalar_t>(max_k), static_cast<accscalar_t>(0));
-            accscalar_t sumAll = blockReduce<Add, accscalar_t>(
-                sdata, threadExp, Add<accscalar_t>(), static_cast<accscalar_t>(0));
+            accscalar_t threadExp = thread_reduce<SumExpStep, ILP, scalar_t, accscalar_t>(
+                shift, input, classes, SumExpStep<scalar_t, accscalar_t>(max_k), static_cast<accscalar_t>(0));
+            accscalar_t sumAll = block_reduce<SumOp, accscalar_t>(
+                sdata, threadExp, SumOp<accscalar_t>(), static_cast<accscalar_t>(0));
 
-            Epilogue<scalar_t, accscalar_t, outscalar_t> epilogue(max_k, sumAll);
+            OutputOp<scalar_t, accscalar_t, outscalar_t> output_op(max_k, sumAll);
 
             if (shift == output_shift) {
-                WriteFpropResultsVectorized<ILP, scalar_t, accscalar_t, outscalar_t, Epilogue>(classes, shift, input, output, epilogue);
+                write_output_vectorized<ILP, scalar_t, accscalar_t, outscalar_t, OutputOp>(classes, shift, input, output, output_op);
             } else {
-                WriteFpropResults<ILP, scalar_t, accscalar_t, outscalar_t, Epilogue>(classes, input, output, epilogue);
+                write_output<ILP, scalar_t, accscalar_t, outscalar_t, OutputOp>(classes, input, output, output_op);
             }
         }
 
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
-        void dispatch_blockwise_softmax_forward(cudaStream_t stream, output_t* output, const input_t* input, int softmax_elements,
-                                                int input_stride, int output_stride, int batch_count) {
+        void launch_softmax_block(const Stream& stream, output_t* output, const input_t* input, int softmax_elements,
+                                  int input_stride, int output_stride, int batch_count) {
             dim3 grid(batch_count);
+            // Each thread loads 16 bytes at a time: 4 floats or 8 halves.
             constexpr int ILP = sizeof(float4) / sizeof(input_t);
-            dim3 block = SoftMax_getBlockSize(ILP, softmax_elements);
+            dim3 block = pick_block_size(ILP, softmax_elements);
+            const execution_policy policy(grid, block, block.x * sizeof(acc_t), stream);
             if (is_log_softmax) {
-                softmax_block_forward<ILP, input_t, acc_t, output_t, LogSoftMaxForwardEpilogue>
-                    <<<grid, block, block.x * sizeof(acc_t), stream>>>(output, const_cast<input_t*>(input),
-                                                                       softmax_elements, input_stride, output_stride);
+                launch_kernel(softmax_block_kernel<ILP, input_t, acc_t, output_t, LogSoftmaxOutput>, policy,
+                              output, const_cast<input_t*>(input), softmax_elements, input_stride, output_stride);
             } else {
-                softmax_block_forward<ILP, input_t, acc_t, output_t, SoftMaxForwardEpilogue>
-                    <<<grid, block, block.x * sizeof(acc_t), stream>>>(output, const_cast<input_t*>(input),
-                                                                       softmax_elements, input_stride, output_stride);
+                launch_kernel(softmax_block_kernel<ILP, input_t, acc_t, output_t, SoftmaxOutput>, policy,
+                              output, const_cast<input_t*>(input), softmax_elements, input_stride, output_stride);
             }
         }
 
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
-        __global__ void softmax_strided_forward(output_t* dst, const input_t* src,
-                                                int axis_size, int inner_size, std::int64_t num_lanes) {
+        __global__ void softmax_strided_kernel(output_t* dst, const input_t* src,
+                                               int axis_size, int inner_size, std::int64_t num_lanes) {
             for (std::int64_t lane = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
                  lane < num_lanes;
                  lane += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
@@ -556,15 +573,13 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
         }
 
         template <typename input_t, typename output_t, typename acc_t, bool is_log_softmax>
-        void dispatch_strided_softmax_forward(cudaStream_t stream, output_t* output, const input_t* input,
-                                              int axis_size, int outer_size, int inner_size) {
+        void launch_softmax_strided(const Stream& stream, output_t* output, const input_t* input,
+                                    int axis_size, int outer_size, int inner_size) {
             const std::int64_t num_lanes = static_cast<std::int64_t>(outer_size) * static_cast<std::int64_t>(inner_size);
-            constexpr int BLOCK_SIZE = 256;
-            std::int64_t num_blocks = (num_lanes + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            if (num_blocks > 65535)
-                num_blocks = 65535;
-            softmax_strided_forward<input_t, output_t, acc_t, is_log_softmax>
-                <<<(unsigned int)num_blocks, BLOCK_SIZE, 0, stream>>>(output, input, axis_size, inner_size, num_lanes);
+            auto kernel = softmax_strided_kernel<input_t, output_t, acc_t, is_log_softmax>;
+            // The kernel grid-strides over lanes, so the grid only needs to fill the GPU, not cover every lane.
+            auto policy = make_policy(kernel, static_cast<std::size_t>(num_lanes), 0, stream);
+            launch_kernel(kernel, policy, output, input, axis_size, inner_size, num_lanes);
         }
     }
 
@@ -582,24 +597,26 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
 
         if (inner_size != 1) {
             if (log_softmax)
-                detail::dispatch_strided_softmax_forward<T, T, acc_t, true>(stream.get(), dst, src, D, N, inner_size);
+                detail::launch_softmax_strided<T, T, acc_t, true>(stream, dst, src, D, N, inner_size);
             else
-                detail::dispatch_strided_softmax_forward<T, T, acc_t, false>(stream.get(), dst, src, D, N, inner_size);
+                detail::launch_softmax_strided<T, T, acc_t, false>(stream, dst, src, D, N, inner_size);
             return;
         }
 
-        const bool use_softmax_warp_forward_resource_efficient =
-            1024 < D && D <= 2048 && D * static_cast<int>(sizeof(T)) <= 4096 && N >= 8192;
-        if ((D <= 1024 && D * static_cast<int>(sizeof(T)) <= 4096) || use_softmax_warp_forward_resource_efficient) {
+        const int row_bytes = D * static_cast<int>(sizeof(T));
+        const bool fits_warp = D <= detail::kWarpMaxRowSize && row_bytes <= detail::kWarpMaxRowBytes;
+        const bool fits_warp_smem = D > detail::kWarpMaxRowSize && D <= detail::kWarpSmemMaxRowSize &&
+                                    row_bytes <= detail::kWarpMaxRowBytes && N >= detail::kWarpSmemMinRows;
+        if (fits_warp || fits_warp_smem) {
             if (log_softmax)
-                detail::dispatch_warpwise_softmax_forward<T, T, acc_t, true>(stream.get(), dst, src, D, D, N);
+                detail::launch_softmax_warp<T, T, acc_t, true>(stream, dst, src, D, D, N);
             else
-                detail::dispatch_warpwise_softmax_forward<T, T, acc_t, false>(stream.get(), dst, src, D, D, N);
+                detail::launch_softmax_warp<T, T, acc_t, false>(stream, dst, src, D, D, N);
         } else {
             if (log_softmax)
-                detail::dispatch_blockwise_softmax_forward<T, T, acc_t, true>(stream.get(), dst, src, D, D, D, N);
+                detail::launch_softmax_block<T, T, acc_t, true>(stream, dst, src, D, D, D, N);
             else
-                detail::dispatch_blockwise_softmax_forward<T, T, acc_t, false>(stream.get(), dst, src, D, D, D, N);
+                detail::launch_softmax_block<T, T, acc_t, false>(stream, dst, src, D, D, D, N);
         }
     }
 
