@@ -2741,59 +2741,51 @@ static void collectCalibrationData( InputArrayOfArrays objectPoints,
         Mat objectPoint = objectPoints.getMat(i);
         if (objectPoint.empty())
             CV_Error(cv::Error::StsBadSize, "objectPoints should not contain empty vector of vectors of points");
-        int numberOfObjectPoints = objectPoint.checkVector(3, CV_32F);
+        int numberOfObjectPoints = std::max(objectPoint.checkVector(3, CV_32F), objectPoint.checkVector(3, CV_64F));
         if (numberOfObjectPoints <= 0)
-            CV_Error(cv::Error::StsUnsupportedFormat, "objectPoints should contain vector of vectors of points of type Point3f");
+            CV_Error(cv::Error::StsUnsupportedFormat, "objectPoints should contain vector of vectors of points of type Point3f or Point3d");
 
         Mat imagePoint1 = imagePoints1.getMat(i);
         if (imagePoint1.empty())
             CV_Error(cv::Error::StsBadSize, "imagePoints1 should not contain empty vector of vectors of points");
-        int numberOfImagePoints = imagePoint1.checkVector(2, CV_32F);
+        int numberOfImagePoints = std::max(imagePoint1.checkVector(2, CV_32F), imagePoint1.checkVector(2, CV_64F));
         if (numberOfImagePoints <= 0)
-            CV_Error(cv::Error::StsUnsupportedFormat, "imagePoints1 should contain vector of vectors of points of type Point2f");
+            CV_Error(cv::Error::StsUnsupportedFormat, "imagePoints1 should contain vector of vectors of points of type Point2f or Point2d");
         CV_CheckEQ(numberOfObjectPoints, numberOfImagePoints, "Number of object and image points must be equal");
 
         total += numberOfObjectPoints;
     }
 
     npoints.create(1, (int)nimages, CV_32S);
-    objPt.create(1, (int)total, CV_32FC3);
-    imgPt1.create(1, (int)total, CV_32FC2);
-    Point2f* imgPtData2 = 0;
+    objPt.create(1, (int)total, CV_64FC3);
+    imgPt1.create(1, (int)total, CV_64FC2);
+    Mat imgPt2Mat;
 
     Mat imgPt1Mat = imgPt1.getMat();
     if (!imagePoints2.empty())
     {
-        imgPt2.create(1, (int)total, CV_32FC2);
-        imgPtData2 = imgPt2.getMat().ptr<Point2f>();
+        imgPt2.create(1, (int)total, CV_64FC2);
+        imgPt2Mat = imgPt2.getMat();
     }
 
     Mat nPointsMat = npoints.getMat();
     Mat objPtMat = objPt.getMat();
-    Point3f* objPtData = objPtMat.ptr<Point3f>();
-    Point2f* imgPtData1 = imgPt1.getMat().ptr<Point2f>();
 
     for (int i = 0, j = 0; i < nimages; i++)
     {
         Mat objpt = objectPoints.getMat(i);
         Mat imgpt1 = imagePoints1.getMat(i);
-        int numberOfObjectPoints = objpt.checkVector(3, CV_32F);
+        int numberOfObjectPoints = std::max(objpt.checkVector(3, CV_32F), objpt.checkVector(3, CV_64F));
         nPointsMat.at<int>(i) = numberOfObjectPoints;
-        for (int n = 0; n < numberOfObjectPoints; ++n)
-        {
-            objPtData[j + n] = objpt.ptr<Point3f>()[n];
-            imgPtData1[j + n] = imgpt1.ptr<Point2f>()[n];
-        }
+        objpt.reshape(3, 1).convertTo(objPtMat.colRange(j, j + numberOfObjectPoints), CV_64F);
+        imgpt1.reshape(2, 1).convertTo(imgPt1Mat.colRange(j, j + numberOfObjectPoints), CV_64F);
 
-        if (imgPtData2)
+        if (!imgPt2Mat.empty())
         {
             Mat imgpt2 = imagePoints2.getMat(i);
-            int numberOfImage2Points = imgpt2.checkVector(2, CV_32F);
+            int numberOfImage2Points = std::max(imgpt2.checkVector(2, CV_32F), imgpt2.checkVector(2, CV_64F));
             CV_CheckEQ(numberOfObjectPoints, numberOfImage2Points, "Number of object and image(2) points must be equal");
-            for (int n = 0; n < numberOfImage2Points; ++n)
-            {
-                imgPtData2[j + n] = imgpt2.ptr<Point2f>()[n];
-            }
+            imgpt2.reshape(2, 1).convertTo(imgPt2Mat.colRange(j, j + numberOfImage2Points), CV_64F);
         }
 
         j += numberOfObjectPoints;
@@ -2988,7 +2980,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
     int np = npoints.at<int>( 0 );
     Mat newObjPt;
     if( newobj_needed ) {
-        newObjPoints.create( 1, np, CV_32FC3 );
+        newObjPoints.create( 1, np, CV_MAKETYPE(_objectPoints.depth(0), 3) );
         newObjPt = newObjPoints.getMat();
     }
 
