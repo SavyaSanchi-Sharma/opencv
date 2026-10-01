@@ -338,6 +338,8 @@ public:
         cv::Matx33d intrin(fx, 0, cx, 0, fy, cy, 0, 0, 1);
         cv::Mat dist = param.rowRange(4, 4 + 14);
 
+        const cv::FixedIntrinsics fixed = cv::resolveFixedIntrinsics(flags);
+
         cv::Mat JiBuf(maxPoints * 2, NINTRINSIC, CV_64F);
         cv::Mat JeBuf(maxPoints * 2, 6, CV_64F);
         cv::Mat JoBuf;
@@ -388,9 +390,11 @@ public:
             _dpdt.create(ni * 2, 3, CV_64F);
             _dpdk.create(ni * 2, NINTRINSIC - 4, CV_64F);
 
-            if (!(flags & cv::CALIB_FIX_FOCAL_LENGTH))
+            // A derivative block is skipped only when both of its components are
+            // fixed; if just one of them is, the other still needs its column.
+            if (!(fixed.fx && fixed.fy))
                 _dpdf.create(ni * 2, 2, CV_64F);
-            if (!(flags & cv::CALIB_FIX_PRINCIPAL_POINT))
+            if (!(fixed.cx && fixed.cy))
                 _dpdc.create(ni * 2, 2, CV_64F);
             if (releaseObject)
                 _dpdo.create(ni * 2, ni * 3, CV_64F);
@@ -669,6 +673,8 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     if( imageSize.width <= 0 || imageSize.height <= 0 )
         CV_Error( cv::Error::StsOutOfRange, "image width and height must be positive" );
 
+    checkIntrinsicFixFlags( flags );
+
     if(flags & CALIB_TILTED_MODEL)
     {
         //when the tilted sensor model is used the distortion coefficients matrix must have 14 parameters
@@ -836,12 +842,18 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     param[0] = A(0, 0); param[1] = A(1, 1); param[2] = A(0, 2); param[3] = A(1, 2);
     std::copy(k.begin(), k.end(), param.begin() + 4);
 
+    const FixedIntrinsics fixed = resolveFixedIntrinsics(flags);
+
     if(flags & CALIB_FIX_ASPECT_RATIO)
         mask[0] = 0;
-    if( flags & CALIB_FIX_FOCAL_LENGTH )
-        mask[0] = mask[1] = 0;
-    if( flags & CALIB_FIX_PRINCIPAL_POINT )
-        mask[2] = mask[3] = 0;
+    if( fixed.fx )
+        mask[0] = 0;
+    if( fixed.fy )
+        mask[1] = 0;
+    if( fixed.cx )
+        mask[2] = 0;
+    if( fixed.cy )
+        mask[3] = 0;
     if( flags & CALIB_ZERO_TANGENT_DIST )
     {
         param[6] = param[7] = 0;
@@ -926,7 +938,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     if (releaseObject)
         JoBuf = Mat( maxPoints*2, maxPoints*3, CV_64FC1);
 
-    auto cameraCalcJErr = [&, npoints, nimages, flags, releaseObject, nparams, maxPoints, NINTRINSIC]
+    auto cameraCalcJErr = [&, npoints, nimages, flags, releaseObject, nparams, maxPoints, NINTRINSIC, fixed]
                           (InputOutputArray _param, OutputArray _JtErr, OutputArray _JtJ, double& errnorm) -> bool
     {
         bool optimizeObjPoints = releaseObject;
@@ -989,8 +1001,10 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
             {
                 Mat _dpdr = Je.colRange(0, 3);
                 Mat _dpdt = Je.colRange(3, 6);
-                Mat _dpdf = (flags & CALIB_FIX_FOCAL_LENGTH) ? Mat() : Ji.colRange(0, 2);
-                Mat _dpdc = (flags & CALIB_FIX_PRINCIPAL_POINT) ? Mat() : Ji.colRange(2, 4);
+                // A derivative block is skipped only when both of its components are
+                // fixed; if just one of them is, the other still needs its column.
+                Mat _dpdf = (fixed.fx && fixed.fy) ? Mat() : Ji.colRange(0, 2);
+                Mat _dpdc = (fixed.cx && fixed.cy) ? Mat() : Ji.colRange(2, 4);
                 Mat _dpdk = Ji.colRange(4, NINTRINSIC);
                 Mat _dpdo = Jo.empty() ? Mat() : Jo.colRange(0, ni * 3);
 
@@ -1147,6 +1161,8 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
     {
         CV_Error(cv::Error::StsOutOfRange, "image width and height must be positive");
     }
+
+    checkIntrinsicFixFlags( flags );
 
     if (flags & CALIB_TILTED_MODEL)
     {
@@ -1330,12 +1346,18 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
     for (int i = 0; i < 14; i++)
         param_m(4 + i) = k[i];
 
+    const FixedIntrinsics fixed = resolveFixedIntrinsics(flags);
+
     if (flags & CALIB_FIX_ASPECT_RATIO)
         mask_vec[0] = 0;
-    if (flags & CALIB_FIX_FOCAL_LENGTH)
-        mask_vec[0] = mask_vec[1] = 0;
-    if (flags & CALIB_FIX_PRINCIPAL_POINT)
-        mask_vec[2] = mask_vec[3] = 0;
+    if (fixed.fx)
+        mask_vec[0] = 0;
+    if (fixed.fy)
+        mask_vec[1] = 0;
+    if (fixed.cx)
+        mask_vec[2] = 0;
+    if (fixed.cy)
+        mask_vec[3] = 0;
     if (flags & CALIB_ZERO_TANGENT_DIST)
     {
         param_m(6) = param_m(7) = 0;
@@ -1864,6 +1886,9 @@ static double stereoCalibrateImpl(
     CV_Assert( (_npoints.cols == 1 || _npoints.rows == 1) &&
                 _npoints.type() == CV_32S );
 
+    checkIntrinsicFixFlags( flags );
+    const FixedIntrinsics fixed = resolveFixedIntrinsics( flags );
+
     int nimages = (int)_npoints.total();
     for(int i = 0; i < nimages; i++ )
     {
@@ -1915,8 +1940,11 @@ static double stereoCalibrateImpl(
         points.convertTo(imagePoints[k], CV_64F);
         imagePoints[k] = imagePoints[k].reshape(2, 1);
 
+        // Only the new flags are added; CALIB_FIX_PRINCIPAL_POINT keeps falling back
+        // to the image centre without CALIB_USE_INTRINSIC_GUESS, as documented.
         if( flags & ( CALIB_FIX_INTRINSIC | CALIB_USE_INTRINSIC_GUESS |
-                      CALIB_FIX_ASPECT_RATIO | CALIB_FIX_FOCAL_LENGTH ) )
+                      CALIB_FIX_ASPECT_RATIO | CALIB_FIX_FOCAL_LENGTH |
+                      CALIB_FIX_FX | CALIB_FIX_FY | CALIB_FIX_CX | CALIB_FIX_CY ) )
             cameraMatrix.convertTo(A[k], CV_64F);
 
         if( flags & ( CALIB_FIX_INTRINSIC | CALIB_USE_INTRINSIC_GUESS |
@@ -1983,10 +2011,15 @@ static double stereoCalibrateImpl(
             mask[idx + 0] = mask[idx + NINTRINSIC] = 0;
         if ( flags & CALIB_SAME_FOCAL_LENGTH)
             mask[idx + NINTRINSIC] = mask[idx + NINTRINSIC + 1] = 0;
-        if( flags & CALIB_FIX_FOCAL_LENGTH )
-            mask[idx + 0] = mask[idx + 1] = mask[idx + NINTRINSIC] = mask[idx + NINTRINSIC+1] = 0;
-        if( flags & CALIB_FIX_PRINCIPAL_POINT )
-            mask[idx + 2] = mask[idx + 3] = mask[idx + NINTRINSIC+2] = mask[idx + NINTRINSIC+3] = 0;
+        // The per-component flags apply to both cameras, like the pair flags they generalize.
+        if( fixed.fx )
+            mask[idx + 0] = mask[idx + NINTRINSIC+0] = 0;
+        if( fixed.fy )
+            mask[idx + 1] = mask[idx + NINTRINSIC+1] = 0;
+        if( fixed.cx )
+            mask[idx + 2] = mask[idx + NINTRINSIC+2] = 0;
+        if( fixed.cy )
+            mask[idx + 3] = mask[idx + NINTRINSIC+3] = 0;
         if( flags & (CALIB_ZERO_TANGENT_DIST|CALIB_FIX_TANGENT_DIST) )
             mask[idx + 6] = mask[idx + 7] = mask[idx + NINTRINSIC+6] = mask[idx + NINTRINSIC+7] = 0;
         if( flags & CALIB_FIX_K1 )

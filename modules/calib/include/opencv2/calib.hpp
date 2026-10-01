@@ -495,9 +495,13 @@ enum CameraModel {
 
 enum { CALIB_USE_INTRINSIC_GUESS = (1 << 0), //!< Use user provided intrinsics as initial point for optimization.
        CALIB_FIX_ASPECT_RATIO    = (1 << 1), //!< Use with CALIB_USE_INTRINSIC_GUESS. The ratio fx/fy stays the same as in the input cameraMatrix.
-       CALIB_FIX_PRINCIPAL_POINT = (1 << 2), //!< The principal point (cx, cy) stays the same as in the input camera matrix. Image center is used as principal point, if CALIB_USE_INTRINSIC_GUESS is not set.
+       CALIB_FIX_PRINCIPAL_POINT = (1 << 2), //!< The principal point (cx, cy) stays the same as in the input camera matrix. Image center is used as principal point, if CALIB_USE_INTRINSIC_GUESS is not set. Equivalent to CALIB_FIX_CX | CALIB_FIX_CY.
        CALIB_ZERO_TANGENT_DIST   = (1 << 3), //!< For pinhole model only. Tangential distortion coefficients \f$(p_1, p_2)\f$ are set to zeros and stay zero.
-       CALIB_FIX_FOCAL_LENGTH    = (1 << 4), //!< Use with CALIB_USE_INTRINSIC_GUESS. The focal length (fx, fy) stays the same as in the input cameraMatrix.
+       CALIB_FIX_FOCAL_LENGTH    = (1 << 4), //!< Use with CALIB_USE_INTRINSIC_GUESS. The focal length (fx, fy) stays the same as in the input cameraMatrix. Equivalent to CALIB_FIX_FX | CALIB_FIX_FY.
+       CALIB_FIX_FX              = (1 << 28), //!< Use with CALIB_USE_INTRINSIC_GUESS. Only fx stays the same as in the input cameraMatrix, fy is still estimated. Cannot be combined with CALIB_FIX_ASPECT_RATIO unless CALIB_FIX_FY is also set.
+       CALIB_FIX_FY              = (1 << 29), //!< Use with CALIB_USE_INTRINSIC_GUESS. Only fy stays the same as in the input cameraMatrix, fx is still estimated.
+       CALIB_FIX_CX              = (1 << 30), //!< Use with CALIB_USE_INTRINSIC_GUESS. Only cx stays the same as in the input cameraMatrix, cy is still estimated.
+       CALIB_FIX_CY              = (1 << 31), //!< Use with CALIB_USE_INTRINSIC_GUESS. Only cy stays the same as in the input cameraMatrix, cx is still estimated.
        CALIB_FIX_K1              = (1 << 5), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set.
        CALIB_FIX_K2              = (1 << 6), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set.
        CALIB_FIX_K3              = (1 << 7), //!< The corresponding distortion coefficient is not changed during the optimization. 0 value is used, if CALIB_USE_INTRINSIC_GUESS is not set.
@@ -619,7 +623,16 @@ ignored, only their ratio is computed and used further.
 -   @ref CALIB_ZERO_TANGENT_DIST Tangential distortion coefficients \f$(p_1, p_2)\f$ are set
 to zeros and stay zero.
 -   @ref CALIB_FIX_FOCAL_LENGTH The focal length is not changed during the global optimization if
- @ref CALIB_USE_INTRINSIC_GUESS is set.
+ @ref CALIB_USE_INTRINSIC_GUESS is set. Same as @ref CALIB_FIX_FX | @ref CALIB_FIX_FY.
+-   @ref CALIB_FIX_FX, @ref CALIB_FIX_FY, @ref CALIB_FIX_CX, @ref CALIB_FIX_CY Hold a single
+component of the camera matrix constant while the other three are still estimated. The value is
+taken from the supplied cameraMatrix, so these flags are meant to be used together with
+ @ref CALIB_USE_INTRINSIC_GUESS. They combine freely with each other and with the pair flags:
+ @ref CALIB_FIX_FOCAL_LENGTH behaves as @ref CALIB_FIX_FX | @ref CALIB_FIX_FY and
+ @ref CALIB_FIX_PRINCIPAL_POINT as @ref CALIB_FIX_CX | @ref CALIB_FIX_CY. The one combination
+that is rejected is @ref CALIB_FIX_FX together with @ref CALIB_FIX_ASPECT_RATIO without
+ @ref CALIB_FIX_FY, because a fixed aspect ratio recomputes fx from fy on every iteration and
+cannot hold it constant.
 -   @ref CALIB_FIX_K1,..., @ref CALIB_FIX_K6 The corresponding radial distortion
 coefficient is not changed during the optimization. If @ref CALIB_USE_INTRINSIC_GUESS is
 set, the coefficient from the supplied distCoeffs matrix is used. Otherwise, it is set to 0.
@@ -1469,6 +1482,10 @@ using cv::CALIB_FIX_INTRINSIC;
 using cv::CALIB_FIX_PRINCIPAL_POINT;
 using cv::CALIB_ZERO_DISPARITY;
 using cv::CALIB_FIX_FOCAL_LENGTH;
+using cv::CALIB_FIX_FX;
+using cv::CALIB_FIX_FY;
+using cv::CALIB_FIX_CX;
+using cv::CALIB_FIX_CY;
 
 /** @brief Performs camera calibration
 
