@@ -22,8 +22,8 @@ namespace cv { namespace dnn { namespace cuda4dnn {
     template <class T>
     class ArgOp final : public CUDABackendNode {
     public:
-        ArgOp(csl::Stream stream_, int axis_, bool is_argmax_)
-            : stream(std::move(stream_)), axis(axis_), is_argmax(is_argmax_)
+        ArgOp(csl::Stream stream_, int axis_, bool is_argmax_, bool select_last_index_)
+            : stream(std::move(stream_)), axis(axis_), is_argmax(is_argmax_), select_last_index(select_last_index_)
         {
         }
 
@@ -50,13 +50,14 @@ namespace cv { namespace dnn { namespace cuda4dnn {
             for (int i = ax + 1; i < rank; i++)
                 inner_size *= inShape[i];
 
-            kernels::arg_min_max<T>(stream, output, input, outer_size, axis_size, inner_size, is_argmax);
+            kernels::arg_min_max<T>(stream, output, input, outer_size, axis_size, inner_size, is_argmax, select_last_index);
         }
 
     private:
         csl::Stream stream;
         int axis;
         bool is_argmax;
+        bool select_last_index;
     };
 
 }}} /* namespace cv::dnn::cuda4dnn */
