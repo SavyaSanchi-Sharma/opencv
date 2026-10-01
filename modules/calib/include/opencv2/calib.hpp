@@ -697,6 +697,30 @@ CV_EXPORTS_AS(calibrateCameraExtended) double calibrateCamera( InputArrayOfArray
                                      int flags = 0, TermCriteria criteria = TermCriteria(
                                         TermCriteria::COUNT + TermCriteria::EPS, 500, DBL_EPSILON) );
 
+/** @overload
+@param covariance Output joint covariance of the estimated parameters: a
+\f$(18 + 6M) \times (18 + 6M)\f$ CV_64F matrix, M = number of views. Rows and
+columns follow @p stdDeviationsIntrinsics then @p stdDeviationsExtrinsics, so
+`sqrt(covariance.diag())` reproduces those two outputs. Parameters held fixed by
+@p flags get a zero row and column. Object-point covariance is not returned.
+The off-diagonal terms are the point: corr(\f$f_x\f$, \f$t_z\f$) above 0.9 is
+routine, so a marginal standard deviation understates the uncertainty of any
+quantity depending on several parameters at once.
+
+@note @ref CALIB_FIX_ASPECT_RATIO leaves \f$f_x\f$ unestimated (recovered as
+\f$f_y \cdot \mathrm{aspectRatio}\f$), so its row and column are zero.
+ */
+CV_EXPORTS_AS(calibrateCameraWithCovariance) double calibrateCamera( InputArrayOfArrays objectPoints,
+                                     InputArrayOfArrays imagePoints, Size imageSize,
+                                     InputOutputArray cameraMatrix, InputOutputArray distCoeffs,
+                                     OutputArrayOfArrays rvecs, OutputArrayOfArrays tvecs,
+                                     OutputArray stdDeviationsIntrinsics,
+                                     OutputArray stdDeviationsExtrinsics,
+                                     OutputArray perViewErrors,
+                                     OutputArray covariance,
+                                     int flags = 0, TermCriteria criteria = TermCriteria(
+                                        TermCriteria::COUNT + TermCriteria::EPS, 500, DBL_EPSILON) );
+
 /** @overload */
 CV_EXPORTS_W double calibrateCamera( InputArrayOfArrays objectPoints,
                                      InputArrayOfArrays imagePoints, Size imageSize,
@@ -771,6 +795,24 @@ CV_EXPORTS_AS(calibrateCameraROExtended) double calibrateCameraRO( InputArrayOfA
                                      OutputArray stdDeviationsExtrinsics,
                                      OutputArray stdDeviationsObjPoints,
                                      OutputArray perViewErrors,
+                                     int flags = 0, TermCriteria criteria = TermCriteria(
+                                        TermCriteria::COUNT + TermCriteria::EPS, 500, DBL_EPSILON) );
+
+/** @overload
+@param covariance Output joint covariance of the intrinsic and extrinsic
+parameters. See #calibrateCamera for the layout. Covariance of the released
+object points is not returned.
+ */
+CV_EXPORTS_AS(calibrateCameraROWithCovariance) double calibrateCameraRO( InputArrayOfArrays objectPoints,
+                                     InputArrayOfArrays imagePoints, Size imageSize, int iFixedPoint,
+                                     InputOutputArray cameraMatrix, InputOutputArray distCoeffs,
+                                     OutputArrayOfArrays rvecs, OutputArrayOfArrays tvecs,
+                                     OutputArray newObjPoints,
+                                     OutputArray stdDeviationsIntrinsics,
+                                     OutputArray stdDeviationsExtrinsics,
+                                     OutputArray stdDeviationsObjPoints,
+                                     OutputArray perViewErrors,
+                                     OutputArray covariance,
                                      int flags = 0, TermCriteria criteria = TermCriteria(
                                         TermCriteria::COUNT + TermCriteria::EPS, 500, DBL_EPSILON) );
 

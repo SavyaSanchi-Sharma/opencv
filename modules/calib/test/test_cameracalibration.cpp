@@ -2028,4 +2028,162 @@ TEST(Calib_CalibrateCamera, size4DistortionCoeffs)
     EXPECT_LE(cv::norm(cv::Vec4d(D2), distCoeffs, NORM_INF), 1e-4);
 }
 
+// Shared synthetic capture. The noise is deliberate: with exact projections sigma2
+// collapses to zero and takes every covariance entry with it.
+static void makeNoisyCalibrationViews(Size& imageSize, vector<vector<Point3f> >& objectPoints,
+                                      vector<vector<Point2f> >& imagePoints)
+{
+    imageSize = Size(640, 480);
+    const Mat cameraTruth = Mat(Matx33d(800.0, 0.0, 320.0,
+                                        0.0, 810.0, 240.0,
+                                        0.0, 0.0, 1.0));
+    const Mat distTruth = Mat::zeros(5, 1, CV_64F);
+
+    vector<Point3f> board;
+    for (int y = 0; y < 6; ++y)
+        for (int x = 0; x < 7; ++x)
+            board.push_back(Point3f((x - 3) * 0.04f, (y - 2.5f) * 0.04f, 0.0f));
+
+    const Vec3d rotations[] = {
+        Vec3d(-0.20,  0.10,  0.02), Vec3d( 0.15, -0.12, -0.04),
+        Vec3d(-0.08, -0.18,  0.08), Vec3d( 0.22,  0.05, -0.10),
+        Vec3d(-0.16,  0.20,  0.12), Vec3d( 0.10,  0.16, -0.07)
+    };
+    const Vec3d translations[] = {
+        Vec3d(-0.08, -0.04, 1.10), Vec3d( 0.06, -0.03, 1.25),
+        Vec3d(-0.04,  0.07, 1.35), Vec3d( 0.08,  0.05, 1.20),
+        Vec3d( 0.00, -0.08, 1.40), Vec3d(-0.06,  0.02, 1.15)
+    };
+
+    RNG rng(0x5eed1234);
+    objectPoints.clear();
+    imagePoints.clear();
+    for (size_t i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i)
+    {
+        vector<Point2f> projected;
+        projectPoints(board, rotations[i], translations[i], cameraTruth, distTruth, projected);
+        for (size_t p = 0; p < projected.size(); ++p)
+        {
+            projected[p].x += (float)rng.gaussian(0.1);
+            projected[p].y += (float)rng.gaussian(0.1);
+        }
+        objectPoints.push_back(board);
+        imagePoints.push_back(projected);
+    }
+}
+
+// Parameterised over the solver engine so one assertion covers both paths.
+typedef testing::TestWithParam<int> Calib_CalibrateCameraCovariance;
+
+TEST_P(Calib_CalibrateCameraCovariance, diagonalMatchesStdDeviations)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+    const int nimages = (int)objectPoints.size();
+
+    Mat cameraMatrix, distCoeffs, stdDevI, stdDevE, perViewErrors, covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, stdDevI, stdDevE, perViewErrors, covariance, engineFlag);
+
+    const int n = CALIB_NINTRINSIC + nimages * 6;
+    ASSERT_EQ(n, covariance.rows);
+    ASSERT_EQ(n, covariance.cols);
+    ASSERT_EQ(CV_64F, covariance.type());
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double expected = (i < CALIB_NINTRINSIC)
+            ? stdDevI.at<double>(i)
+            : stdDevE.at<double>(i - CALIB_NINTRINSIC);
+        EXPECT_NEAR(std::sqrt(covariance.at<double>(i, i)), expected, 1e-10)
+            << "parameter index " << i;
+    }
+
+    EXPECT_LT(cvtest::norm(covariance, covariance.t(), NORM_INF), 1e-12);
+}
+
+TEST_P(Calib_CalibrateCameraCovariance, focalLengthCorrelatesWithDepth)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat cameraMatrix, distCoeffs, covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, noArray(), noArray(), noArray(), covariance, engineFlag);
+
+    // The motivation for the whole output: fx and the view depths move together,
+    // which no marginal standard deviation can express.
+    const int FX = 0;
+    const int TZ0 = CALIB_NINTRINSIC + 5;
+    const double corr = covariance.at<double>(FX, TZ0) /
+        std::sqrt(covariance.at<double>(FX, FX) * covariance.at<double>(TZ0, TZ0));
+
+    EXPECT_GT(std::abs(corr), 0.5);
+    EXPECT_LE(std::abs(corr), 1.0 + 1e-9);
+}
+
+TEST_P(Calib_CalibrateCameraCovariance, fixedParametersGetZeroRows)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat cameraMatrix = Mat(Matx33d(800.0, 0.0, 320.0, 0.0, 810.0, 240.0, 0.0, 0.0, 1.0));
+    Mat distCoeffs = Mat::zeros(5, 1, CV_64F);
+    Mat covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, noArray(), noArray(), noArray(), covariance,
+                    engineFlag | CALIB_USE_INTRINSIC_GUESS | CALIB_FIX_PRINCIPAL_POINT);
+
+    const int CX = 2, CY = 3;
+    EXPECT_EQ(0.0, cvtest::norm(covariance.row(CX), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.row(CY), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.col(CX), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.col(CY), NORM_INF));
+}
+
+INSTANTIATE_TEST_CASE_P(Calib, Calib_CalibrateCameraCovariance,
+                        testing::Values(0, CALIB_DISABLE_SCHUR_COMPLEMENT));
+
+// Both engines solve the same normal equations, so their covariances must agree. A
+// divergence means one of DECOMP_SVD / DECOMP_EIG got a rank-deficient JtJ.
+TEST(Calib_CalibrateCameraCovariance, schurMatchesBouguet)
+{
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat camS, distS, covS, camB, distB, covB;
+    vector<Mat> rvecsS, tvecsS, rvecsB, tvecsB;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, camS, distS, rvecsS, tvecsS,
+                    noArray(), noArray(), noArray(), covS, 0);
+    calibrateCamera(objectPoints, imagePoints, imageSize, camB, distB, rvecsB, tvecsB,
+                    noArray(), noArray(), noArray(), covB, CALIB_DISABLE_SCHUR_COMPLEMENT);
+
+    ASSERT_EQ(covS.size(), covB.size());
+
+    const double scale = cvtest::norm(covB, NORM_INF);
+    ASSERT_GT(scale, 0.0);
+    EXPECT_LT(cvtest::norm(covS, covB, NORM_INF) / scale, 1e-3);
+}
+
 }} // namespace
