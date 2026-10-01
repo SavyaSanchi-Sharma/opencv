@@ -109,6 +109,39 @@ template<typename T> inline int compressElems( T* ptr, const uchar* mask, int ms
     return j;
 }
 
+// Which of fx, fy, cx, cy are held constant during the optimization. Resolved in one
+// place so both engines, stereoCalibrate and fisheye::calibrate cannot drift apart.
+// CALIB_FIX_FOCAL_LENGTH and CALIB_FIX_PRINCIPAL_POINT keep their meaning and act as
+// aliases for fixing both components of their pair.
+struct FixedIntrinsics
+{
+    bool fx, fy, cx, cy;
+};
+
+static inline FixedIntrinsics resolveFixedIntrinsics( int flags )
+{
+    FixedIntrinsics fixed;
+    fixed.fx = (flags & (CALIB_FIX_FOCAL_LENGTH    | CALIB_FIX_FX)) != 0;
+    fixed.fy = (flags & (CALIB_FIX_FOCAL_LENGTH    | CALIB_FIX_FY)) != 0;
+    fixed.cx = (flags & (CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_CX)) != 0;
+    fixed.cy = (flags & (CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_CY)) != 0;
+    return fixed;
+}
+
+// Rejects flag combinations that cannot be satisfied. Call once per entry point,
+// never from inside a parallel region.
+static inline void checkIntrinsicFixFlags( int flags )
+{
+    const FixedIntrinsics fixed = resolveFixedIntrinsics(flags);
+
+    // CALIB_FIX_ASPECT_RATIO ties fx to fy, so pinning fx on its own cannot be
+    // honoured: the solver recomputes fx = aspectRatio*fy on every update of fy.
+    if( (flags & CALIB_FIX_ASPECT_RATIO) && fixed.fx && !fixed.fy )
+        CV_Error( Error::StsBadArg,
+                  "CALIB_FIX_FX cannot be combined with CALIB_FIX_ASPECT_RATIO unless "
+                  "CALIB_FIX_FY is set as well, because a fixed aspect ratio makes fx follow fy" );
+}
+
 static inline bool haveCollinearPoints( const Mat& m, int count )
 {
     int j, k, i = count-1;
