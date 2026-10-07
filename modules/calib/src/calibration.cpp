@@ -338,6 +338,8 @@ public:
         cv::Matx33d intrin(fx, 0, cx, 0, fy, cy, 0, 0, 1);
         cv::Mat dist = param.rowRange(4, 4 + 14);
 
+        const cv::FixedIntrinsics fixed = cv::resolveFixedIntrinsics(flags);
+
         cv::Mat JiBuf(maxPoints * 2, NINTRINSIC, CV_64F);
         cv::Mat JeBuf(maxPoints * 2, 6, CV_64F);
         cv::Mat JoBuf;
@@ -388,9 +390,11 @@ public:
             _dpdt.create(ni * 2, 3, CV_64F);
             _dpdk.create(ni * 2, NINTRINSIC - 4, CV_64F);
 
-            if (!(flags & cv::CALIB_FIX_FOCAL_LENGTH))
+            // A derivative block is skipped only when both of its components are
+            // fixed; if just one of them is, the other still needs its column.
+            if (!(fixed.fx && fixed.fy))
                 _dpdf.create(ni * 2, 2, CV_64F);
-            if (!(flags & cv::CALIB_FIX_PRINCIPAL_POINT))
+            if (!(fixed.cx && fixed.cy))
                 _dpdc.create(ni * 2, 2, CV_64F);
             if (releaseObject)
                 _dpdo.create(ni * 2, ni * 3, CV_64F);
@@ -598,6 +602,52 @@ static void subMatrix(const Mat& src, Mat& dst,
     }
 }
 
+// Scatter JtJinv*sigma2 into the full parameter layout, zeroing fixed rows/cols. Same mask
+// walk as stdDevs, so sqrt(diag) matches it; truncating at covar.rows drops the objpoints.
+static void scatterCovariance( const Mat& JtJinv, double sigma2, const uchar* mask,
+                               int nparams, Mat& covar )
+{
+    if( covar.empty() )
+        return;
+
+    CV_Assert( covar.type() == CV_64F );
+    CV_Assert( covar.rows == covar.cols && covar.rows <= nparams );
+
+    const int ncovar = covar.rows;
+    covar.setTo(0);
+
+    // Row in the reduced (masked) system, or -1 if the parameter was fixed.
+    std::vector<int> idx(ncovar, -1);
+    for( int s = 0, j = 0; s < ncovar; s++ )
+    {
+        if( mask[s] )
+            idx[s] = j++;
+    }
+
+    // Each iteration owns one row of covar, so the writes cannot overlap.
+    parallel_for_(Range(0, ncovar), [&](const Range& range)
+    {
+        for( int r = range.start; r < range.end; r++ )
+        {
+            if( idx[r] < 0 )
+                continue;
+            const double* src = JtJinv.ptr<double>(idx[r]);
+            double* dst = covar.ptr<double>(r);
+            for( int c = 0; c < ncovar; c++ )
+            {
+                if( idx[c] >= 0 )
+                    dst[c] = src[idx[c]] * sigma2;
+            }
+        }
+    });
+
+    // A covariance is symmetric by definition, but DECOMP_SVD does not return a
+    // numerically symmetric inverse, so average the two triangles in place.
+    Mat covarT;
+    cv::transpose(covar, covarT);
+    cv::addWeighted(covar, 0.5, covarT, 0.5, 0.0, covar);
+}
+
 /*
  T his is straight-forward port v3 of Matlab calibration engine by Jean-Yves Bouguet                *
  that is (in a large extent) based on the paper:
@@ -609,7 +659,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
                                               const Mat& imagePoints, const Mat& npoints,
                                               Size imageSize, int iFixedPoint, Mat& cameraMatrix, Mat& distCoeffs,
                                               Mat rvecs, Mat tvecs, Mat newObjPoints, Mat stdDevs,
-                                              Mat perViewErr, int flags, const TermCriteria& termCrit )
+                                              Mat covar, Mat perViewErr, int flags, const TermCriteria& termCrit )
 {
     int NINTRINSIC = CALIB_NINTRINSIC;
 
@@ -622,6 +672,8 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     // 0. check the parameters & allocate buffers
     if( imageSize.width <= 0 || imageSize.height <= 0 )
         CV_Error( cv::Error::StsOutOfRange, "image width and height must be positive" );
+
+    checkIntrinsicFixFlags( flags );
 
     if(flags & CALIB_TILTED_MODEL)
     {
@@ -790,12 +842,18 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     param[0] = A(0, 0); param[1] = A(1, 1); param[2] = A(0, 2); param[3] = A(1, 2);
     std::copy(k.begin(), k.end(), param.begin() + 4);
 
+    const FixedIntrinsics fixed = resolveFixedIntrinsics(flags);
+
     if(flags & CALIB_FIX_ASPECT_RATIO)
         mask[0] = 0;
-    if( flags & CALIB_FIX_FOCAL_LENGTH )
-        mask[0] = mask[1] = 0;
-    if( flags & CALIB_FIX_PRINCIPAL_POINT )
-        mask[2] = mask[3] = 0;
+    if( fixed.fx )
+        mask[0] = 0;
+    if( fixed.fy )
+        mask[1] = 0;
+    if( fixed.cx )
+        mask[2] = 0;
+    if( fixed.cy )
+        mask[3] = 0;
     if( flags & CALIB_ZERO_TANGENT_DIST )
     {
         param[6] = param[7] = 0;
@@ -880,7 +938,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
     if (releaseObject)
         JoBuf = Mat( maxPoints*2, maxPoints*3, CV_64FC1);
 
-    auto cameraCalcJErr = [&, npoints, nimages, flags, releaseObject, nparams, maxPoints, NINTRINSIC]
+    auto cameraCalcJErr = [&, npoints, nimages, flags, releaseObject, nparams, maxPoints, NINTRINSIC, fixed]
                           (InputOutputArray _param, OutputArray _JtErr, OutputArray _JtJ, double& errnorm) -> bool
     {
         bool optimizeObjPoints = releaseObject;
@@ -943,8 +1001,10 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
             {
                 Mat _dpdr = Je.colRange(0, 3);
                 Mat _dpdt = Je.colRange(3, 6);
-                Mat _dpdf = (flags & CALIB_FIX_FOCAL_LENGTH) ? Mat() : Ji.colRange(0, 2);
-                Mat _dpdc = (flags & CALIB_FIX_PRINCIPAL_POINT) ? Mat() : Ji.colRange(2, 4);
+                // A derivative block is skipped only when both of its components are
+                // fixed; if just one of them is, the other still needs its column.
+                Mat _dpdf = (fixed.fx && fixed.fy) ? Mat() : Ji.colRange(0, 2);
+                Mat _dpdc = (fixed.cx && fixed.cy) ? Mat() : Ji.colRange(2, 4);
                 Mat _dpdk = Ji.colRange(4, NINTRINSIC);
                 Mat _dpdo = Jo.empty() ? Mat() : Jo.colRange(0, ni * 3);
 
@@ -1028,6 +1088,7 @@ static double calibrateCameraInternalBouguet( const Mat& objectPoints,
         // R. Hartley, A. Zisserman, Multiple View Geometry in Computer Vision, 2004, section 5.1.3, page 134
         // see the discussion for more details: https://github.com/opencv/opencv/pull/22992
         double sigma2 = norm(allErrors, NORM_L2SQR) / (2 * total - nparams_nz);
+        scatterCovariance(JtJinv, sigma2, mask.data(), nparams, covar);
         int j = 0;
         for ( int s = 0; s < nparams; s++ )
         {
@@ -1084,7 +1145,7 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
                                        const Mat& imagePoints, const Mat& npoints,
                                        Size imageSize, int iFixedPoint, Mat& cameraMatrix, Mat& distCoeffs,
                                        Mat rvecs, Mat tvecs, Mat newObjPoints, Mat stdDevs,
-                                       Mat perViewErr, int flags, const TermCriteria& termCrit )
+                                       Mat covar, Mat perViewErr, int flags, const TermCriteria& termCrit )
 {
     int NINTRINSIC = CALIB_NINTRINSIC;
     double reprojErr = 0;
@@ -1100,6 +1161,8 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
     {
         CV_Error(cv::Error::StsOutOfRange, "image width and height must be positive");
     }
+
+    checkIntrinsicFixFlags( flags );
 
     if (flags & CALIB_TILTED_MODEL)
     {
@@ -1283,12 +1346,18 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
     for (int i = 0; i < 14; i++)
         param_m(4 + i) = k[i];
 
+    const FixedIntrinsics fixed = resolveFixedIntrinsics(flags);
+
     if (flags & CALIB_FIX_ASPECT_RATIO)
         mask_vec[0] = 0;
-    if (flags & CALIB_FIX_FOCAL_LENGTH)
-        mask_vec[0] = mask_vec[1] = 0;
-    if (flags & CALIB_FIX_PRINCIPAL_POINT)
-        mask_vec[2] = mask_vec[3] = 0;
+    if (fixed.fx)
+        mask_vec[0] = 0;
+    if (fixed.fy)
+        mask_vec[1] = 0;
+    if (fixed.cx)
+        mask_vec[2] = 0;
+    if (fixed.cy)
+        mask_vec[3] = 0;
     if (flags & CALIB_ZERO_TANGENT_DIST)
     {
         param_m(6) = param_m(7) = 0;
@@ -1667,24 +1736,28 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
             for(int c=0; c<srcU.cols; c++) dptr[c] = sptr[c];
         }
 
-        for (int i = 0; i < nimages; i++)
+        // Image i only writes the blocks keyed on si, so no two iterations overlap.
+        parallel_for_(Range(0, nimages), [&](const Range& range)
         {
-            int si = NINTRINSIC + i * 6;
-            // Manual copy for V[i]
-            Mat srcV = solver.V[i];
-            Mat dstV = JtJ(Rect(si, si, 6, 6));
-            for(int r=0; r<srcV.rows; r++) {
-                const double* sptr = srcV.ptr<double>(r);
-                double* dptr = dstV.ptr<double>(r);
-                for(int c=0; c<srcV.cols; c++) dptr[c] = sptr[c];
+            for (int i = range.start; i < range.end; i++)
+            {
+                int si = NINTRINSIC + i * 6;
+                // Manual copy for V[i]
+                Mat srcV = solver.V[i];
+                Mat dstV = JtJ(Rect(si, si, 6, 6));
+                for(int r=0; r<srcV.rows; r++) {
+                    const double* sptr = srcV.ptr<double>(r);
+                    double* dptr = dstV.ptr<double>(r);
+                    for(int c=0; c<srcV.cols; c++) dptr[c] = sptr[c];
+                }
+
+                Mat srcW = solver.W[i].rowRange(0, NINTRINSIC);
+                Mat dstJ = JtJ(Rect(si, 0, 6, NINTRINSIC));
+
+                // Manual copy for W part
+                srcW.copyTo(dstJ);
             }
-
-            Mat srcW = solver.W[i].rowRange(0, NINTRINSIC);
-            Mat dstJ = JtJ(Rect(si, 0, 6, NINTRINSIC));
-
-            // Manual copy for W part
-            srcW.copyTo(dstJ);
-        }
+        });
 
         if (releaseObject)
         {
@@ -1701,14 +1774,18 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
             Mat dstU_br = JtJ(Rect(obj_start, obj_start, maxPoints * 3, maxPoints * 3));
             srcU_br.copyTo(dstU_br);
 
-            for (int i = 0; i < nimages; i++)
+            // Same here: the destination row band is keyed on si, so the writes are disjoint.
+            parallel_for_(Range(0, nimages), [&](const Range& range)
             {
-                int si = NINTRINSIC + i * 6;
-                // Manual copy for W extended part
-                Mat srcW_ext = solver.W[i].rowRange(NINTRINSIC, solver.W[i].rows);
-                Mat dstJ_ext = JtJ(Rect(obj_start, si, maxPoints * 3, 6));
-                cv::transpose(srcW_ext, dstJ_ext);
-            }
+                for (int i = range.start; i < range.end; i++)
+                {
+                    int si = NINTRINSIC + i * 6;
+                    // Manual copy for W extended part
+                    Mat srcW_ext = solver.W[i].rowRange(NINTRINSIC, solver.W[i].rows);
+                    Mat dstJ_ext = JtJ(Rect(obj_start, si, maxPoints * 3, 6));
+                    cv::transpose(srcW_ext, dstJ_ext);
+                }
+            });
         }
 
         completeSymm(JtJ, false);
@@ -1723,6 +1800,7 @@ static double calibrateCameraInternalSchur( const Mat& objectPoints,
         int nErrors = 2 * total - nparams_nz;
         const Mat& errorsForStats = finalErrorsBuf.empty() ? allErrorsBuf : finalErrorsBuf;
         double sigma2 = norm(errorsForStats, NORM_L2SQR) / nErrors;
+        scatterCovariance(JtJinv, sigma2, mask.ptr<uchar>(), nparams, covar);
 
         int j = 0;
         for (int s = 0; s < nparams; s++)
@@ -1808,6 +1886,9 @@ static double stereoCalibrateImpl(
     CV_Assert( (_npoints.cols == 1 || _npoints.rows == 1) &&
                 _npoints.type() == CV_32S );
 
+    checkIntrinsicFixFlags( flags );
+    const FixedIntrinsics fixed = resolveFixedIntrinsics( flags );
+
     int nimages = (int)_npoints.total();
     for(int i = 0; i < nimages; i++ )
     {
@@ -1859,8 +1940,11 @@ static double stereoCalibrateImpl(
         points.convertTo(imagePoints[k], CV_64F);
         imagePoints[k] = imagePoints[k].reshape(2, 1);
 
+        // Only the new flags are added; CALIB_FIX_PRINCIPAL_POINT keeps falling back
+        // to the image centre without CALIB_USE_INTRINSIC_GUESS, as documented.
         if( flags & ( CALIB_FIX_INTRINSIC | CALIB_USE_INTRINSIC_GUESS |
-                      CALIB_FIX_ASPECT_RATIO | CALIB_FIX_FOCAL_LENGTH ) )
+                      CALIB_FIX_ASPECT_RATIO | CALIB_FIX_FOCAL_LENGTH |
+                      CALIB_FIX_FX | CALIB_FIX_FY | CALIB_FIX_CX | CALIB_FIX_CY ) )
             cameraMatrix.convertTo(A[k], CV_64F);
 
         if( flags & ( CALIB_FIX_INTRINSIC | CALIB_USE_INTRINSIC_GUESS |
@@ -1878,11 +1962,11 @@ static double stereoCalibrateImpl(
             if( flags & CALIB_DISABLE_SCHUR_COMPLEMENT )
                 calibrateCameraInternalBouguet(objectPoints, imagePoints[k],
                                                _npoints, imageSize, 0, mIntr, mDist,
-                                               Mat(), Mat(), Mat(), Mat(), Mat(), flags, termCrit);
+                                               Mat(), Mat(), Mat(), Mat(), Mat(), Mat(), flags, termCrit);
             else
                 calibrateCameraInternalSchur(objectPoints, imagePoints[k],
                                              _npoints, imageSize, 0, mIntr, mDist,
-                                             Mat(), Mat(), Mat(), Mat(), Mat(), flags, termCrit);
+                                             Mat(), Mat(), Mat(), Mat(), Mat(), Mat(), flags, termCrit);
         }
     }
 
@@ -1927,10 +2011,15 @@ static double stereoCalibrateImpl(
             mask[idx + 0] = mask[idx + NINTRINSIC] = 0;
         if ( flags & CALIB_SAME_FOCAL_LENGTH)
             mask[idx + NINTRINSIC] = mask[idx + NINTRINSIC + 1] = 0;
-        if( flags & CALIB_FIX_FOCAL_LENGTH )
-            mask[idx + 0] = mask[idx + 1] = mask[idx + NINTRINSIC] = mask[idx + NINTRINSIC+1] = 0;
-        if( flags & CALIB_FIX_PRINCIPAL_POINT )
-            mask[idx + 2] = mask[idx + 3] = mask[idx + NINTRINSIC+2] = mask[idx + NINTRINSIC+3] = 0;
+        // The per-component flags apply to both cameras, like the pair flags they generalize.
+        if( fixed.fx )
+            mask[idx + 0] = mask[idx + NINTRINSIC+0] = 0;
+        if( fixed.fy )
+            mask[idx + 1] = mask[idx + NINTRINSIC+1] = 0;
+        if( fixed.cx )
+            mask[idx + 2] = mask[idx + NINTRINSIC+2] = 0;
+        if( fixed.cy )
+            mask[idx + 3] = mask[idx + NINTRINSIC+3] = 0;
         if( flags & (CALIB_ZERO_TANGENT_DIST|CALIB_FIX_TANGENT_DIST) )
             mask[idx + 6] = mask[idx + 7] = mask[idx + NINTRINSIC+6] = mask[idx + NINTRINSIC+7] = 0;
         if( flags & CALIB_FIX_K1 )
@@ -2900,7 +2989,23 @@ double calibrateCamera(InputArrayOfArrays _objectPoints,
 
     return calibrateCameraRO(_objectPoints, _imagePoints, imageSize, -1, _cameraMatrix, _distCoeffs,
                              _rvecs, _tvecs, noArray(), stdDeviationsIntrinsics, stdDeviationsExtrinsics,
-                             noArray(), _perViewErrors, flags, criteria);
+                             noArray(), _perViewErrors, noArray(), flags, criteria);
+}
+
+double calibrateCamera(InputArrayOfArrays _objectPoints,
+                       InputArrayOfArrays _imagePoints,
+                       Size imageSize, InputOutputArray _cameraMatrix, InputOutputArray _distCoeffs,
+                       OutputArrayOfArrays _rvecs, OutputArrayOfArrays _tvecs,
+                       OutputArray stdDeviationsIntrinsics,
+                       OutputArray stdDeviationsExtrinsics,
+                       OutputArray _perViewErrors,
+                       OutputArray covariance, int flags, TermCriteria criteria )
+{
+    CV_INSTRUMENT_REGION();
+
+    return calibrateCameraRO(_objectPoints, _imagePoints, imageSize, -1, _cameraMatrix, _distCoeffs,
+                             _rvecs, _tvecs, noArray(), stdDeviationsIntrinsics, stdDeviationsExtrinsics,
+                             noArray(), _perViewErrors, covariance, flags, criteria);
 }
 
 double calibrateCameraRO(InputArrayOfArrays _objectPoints,
@@ -2915,7 +3020,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
 
     return calibrateCameraRO(_objectPoints, _imagePoints, imageSize, iFixedPoint, _cameraMatrix,
                              _distCoeffs, _rvecs, _tvecs, newObjPoints, noArray(), noArray(),
-                             noArray(), noArray(), flags, criteria);
+                             noArray(), noArray(), noArray(), flags, criteria);
 }
 
 double calibrateCameraRO(InputArrayOfArrays _objectPoints,
@@ -2928,6 +3033,26 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
                          OutputArray stdDeviationsExtrinsics,
                          OutputArray stdDeviationsObjPoints,
                          OutputArray _perViewErrors, int flags, TermCriteria criteria )
+{
+    CV_INSTRUMENT_REGION();
+
+    return calibrateCameraRO(_objectPoints, _imagePoints, imageSize, iFixedPoint, _cameraMatrix,
+                             _distCoeffs, _rvecs, _tvecs, newObjPoints, stdDeviationsIntrinsics,
+                             stdDeviationsExtrinsics, stdDeviationsObjPoints, _perViewErrors,
+                             noArray(), flags, criteria);
+}
+
+double calibrateCameraRO(InputArrayOfArrays _objectPoints,
+                         InputArrayOfArrays _imagePoints,
+                         Size imageSize, int iFixedPoint, InputOutputArray _cameraMatrix,
+                         InputOutputArray _distCoeffs,
+                         OutputArrayOfArrays _rvecs, OutputArrayOfArrays _tvecs,
+                         OutputArray newObjPoints,
+                         OutputArray stdDeviationsIntrinsics,
+                         OutputArray stdDeviationsExtrinsics,
+                         OutputArray stdDeviationsObjPoints,
+                         OutputArray _perViewErrors,
+                         OutputArray covariance, int flags, TermCriteria criteria )
 {
     CV_INSTRUMENT_REGION();
 
@@ -2962,6 +3087,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
             stddev_ext_needed = stdDeviationsExtrinsics.needed();
     bool newobj_needed = newObjPoints.needed();
     bool stddev_obj_needed = stdDeviationsObjPoints.needed();
+    bool covar_needed = covariance.needed();
 
     bool rvecs_mat_vec = _rvecs.isMatVector();
     bool tvecs_mat_vec = _tvecs.isMatVector();
@@ -2999,11 +3125,19 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
     }
 
     stddev_obj_needed = stddev_obj_needed && releaseObject;
-    bool stddev_any_needed = stddev_needed || stddev_ext_needed || stddev_obj_needed;
+    // Both engines gate the whole JtJ inverse on a non-empty stdDevs, so covariance needs it too.
+    bool stddev_any_needed = stddev_needed || stddev_ext_needed || stddev_obj_needed || covar_needed;
     if( stddev_any_needed )
     {
         int sz = nimages*6 + CALIB_NINTRINSIC + (releaseObject ? np * 3 : 0);
         stdDeviationsM.create(sz, 1, CV_64F);
+    }
+
+    Mat covarM;
+    if( covar_needed )
+    {
+        int cs = CALIB_NINTRINSIC + nimages*6;
+        covarM.create(cs, cs, CV_64F);
     }
 
     if( errors_needed )
@@ -3021,6 +3155,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
             rvecM, tvecM,
             newObjPt,
             stdDeviationsM,
+            covarM,
             errorsM, flags, criteria);
     }
     else
@@ -3031,6 +3166,7 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
             rvecM, tvecM,
             newObjPt,
             stdDeviationsM,
+            covarM,
             errorsM, flags, criteria);
     }
 
@@ -3049,6 +3185,11 @@ double calibrateCameraRO(InputArrayOfArrays _objectPoints,
     {
         int s = CALIB_NINTRINSIC + nimages*6;
         stdDeviationsM.rowRange(s, s + np*3).copyTo(stdDeviationsObjPoints);
+    }
+
+    if( covar_needed )
+    {
+        covarM.copyTo(covariance);
     }
 
     // overly complicated and inefficient rvec/ tvec handling to support vector<Mat>

@@ -2029,4 +2029,460 @@ TEST(Calib_CalibrateCamera, size4DistortionCoeffs)
     EXPECT_LE(cv::norm(cv::Vec4d(D2), distCoeffs, NORM_INF), 1e-4);
 }
 
+//////////////////////////// Per-component fixing of fx, fy, cx, cy ///////////////////////////
+
+// Non-square pixel and off-centre principal point, so every component of the camera
+// matrix is individually observable.
+static void makeIntrinsicFixingRig( std::vector<std::vector<Point3f> >& objectPoints,
+                                    std::vector<std::vector<Point2f> >& imagePoints,
+                                    const Matx33d& cameraMatrix, const Vec<double, 5>& distCoeffs,
+                                    Size& imageSize )
+{
+    const Size boardSize(9, 6);
+    const int nviews = 9;
+    imageSize = Size(640, 480);
+
+    std::vector<Point3f> board;
+    for( int y = 0; y < boardSize.height; y++ )
+        for( int x = 0; x < boardSize.width; x++ )
+            board.push_back(Point3f((x - (boardSize.width  - 1)*0.5f)*0.03f,
+                                    (y - (boardSize.height - 1)*0.5f)*0.03f, 0.f));
+
+    objectPoints.assign(nviews, board);
+    imagePoints.resize(nviews);
+
+    RNG rng(20251001);
+    for( int i = 0; i < nviews; i++ )
+    {
+        Vec3d rvec(rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5), rng.uniform(-0.2, 0.2));
+        Vec3d tvec(rng.uniform(-0.06, 0.06), rng.uniform(-0.06, 0.06), rng.uniform(0.7, 1.1));
+        projectPoints(objectPoints[i], rvec, tvec, cameraMatrix, distCoeffs, imagePoints[i]);
+    }
+}
+
+// position of fx, fy, cx, cy inside the camera matrix
+static const int intrinsicRow[4] = { 0, 1, 0, 1 };
+static const int intrinsicCol[4] = { 0, 1, 2, 2 };
+
+TEST(Calib_CalibrateCamera, fixIntrinsicComponentsIndividually)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    const int fixFlag[4] = { CALIB_FIX_FX, CALIB_FIX_FY, CALIB_FIX_CX, CALIB_FIX_CY };
+    const char* name[4] = { "fx", "fy", "cx", "cy" };
+    const int engine[2] = { 0, CALIB_DISABLE_SCHUR_COMPLEMENT };
+
+    for( int e = 0; e < 2; e++ )
+    {
+        for( int c = 0; c < 4; c++ )
+        {
+            SCOPED_TRACE(cv::format("%s engine, fixing %s",
+                                    engine[e] ? "Bouguet" : "Schur", name[c]));
+
+            // Every component starts away from truth, so an unpinned one has a
+            // reason to move and the test can tell the two apart.
+            Mat cameraMatrix = Mat(trueCameraMatrix).clone();
+            cameraMatrix.at<double>(0, 0) += 40;
+            cameraMatrix.at<double>(1, 1) -= 40;
+            cameraMatrix.at<double>(0, 2) += 15;
+            cameraMatrix.at<double>(1, 2) -= 15;
+
+            double start[4];
+            for( int i = 0; i < 4; i++ )
+                start[i] = cameraMatrix.at<double>(intrinsicRow[i], intrinsicCol[i]);
+
+            Mat distCoeffs = Mat::zeros(1, 5, CV_64F);
+            std::vector<Mat> rvecs, tvecs;
+            calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                            rvecs, tvecs,
+                            CALIB_USE_INTRINSIC_GUESS | fixFlag[c] | engine[e]);
+
+            EXPECT_DOUBLE_EQ(cameraMatrix.at<double>(intrinsicRow[c], intrinsicCol[c]), start[c])
+                << name[c] << " was supposed to stay fixed";
+
+            for( int o = 0; o < 4; o++ )
+            {
+                if( o == c )
+                    continue;
+                EXPECT_NE(cameraMatrix.at<double>(intrinsicRow[o], intrinsicCol[o]), start[o])
+                    << name[o] << " was supposed to be estimated";
+            }
+        }
+    }
+}
+
+TEST(Calib_CalibrateCamera, fixIntrinsicComponentRecoversOthers)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    const int fixFlag[4] = { CALIB_FIX_FX, CALIB_FIX_FY, CALIB_FIX_CX, CALIB_FIX_CY };
+    const char* name[4] = { "fx", "fy", "cx", "cy" };
+
+    for( int c = 0; c < 4; c++ )
+    {
+        SCOPED_TRACE(cv::format("holding %s at its true value", name[c]));
+
+        // One component is pinned at truth; the other three start off and must converge back.
+        Mat cameraMatrix = Mat(trueCameraMatrix).clone();
+        for( int i = 0; i < 4; i++ )
+        {
+            if( i != c )
+                cameraMatrix.at<double>(intrinsicRow[i], intrinsicCol[i]) += (i % 2 ? -25 : 25);
+        }
+
+        Mat distCoeffs = Mat::zeros(1, 5, CV_64F);
+        std::vector<Mat> rvecs, tvecs;
+        double rms = calibrateCamera(objectPoints, imagePoints, imageSize,
+                                     cameraMatrix, distCoeffs, rvecs, tvecs,
+                                     CALIB_USE_INTRINSIC_GUESS | fixFlag[c]);
+
+        EXPECT_LT(rms, 1e-5);
+        EXPECT_LT(cvtest::norm(cameraMatrix, Mat(trueCameraMatrix), NORM_INF), 1e-3);
+    }
+}
+
+TEST(Calib_CalibrateCamera, pairFlagsMatchComponentFlags)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    const int pairFlag[2] = { CALIB_FIX_FOCAL_LENGTH, CALIB_FIX_PRINCIPAL_POINT };
+    const int componentFlags[2] = { CALIB_FIX_FX | CALIB_FIX_FY, CALIB_FIX_CX | CALIB_FIX_CY };
+    const char* name[2] = { "CALIB_FIX_FOCAL_LENGTH", "CALIB_FIX_PRINCIPAL_POINT" };
+    const int pinnedIdx[2][2] = { { 0, 1 }, { 2, 3 } };
+
+    for( int p = 0; p < 2; p++ )
+    {
+        SCOPED_TRACE(name[p]);
+
+        Mat result[2], dist[2];
+        for( int variant = 0; variant < 2; variant++ )
+        {
+            result[variant] = Mat(trueCameraMatrix).clone();
+            result[variant].at<double>(0, 0) += 40;
+            result[variant].at<double>(1, 1) -= 40;
+            result[variant].at<double>(0, 2) += 15;
+            result[variant].at<double>(1, 2) -= 15;
+            dist[variant] = Mat::zeros(1, 5, CV_64F);
+
+            std::vector<Mat> rvecs, tvecs;
+            calibrateCamera(objectPoints, imagePoints, imageSize, result[variant], dist[variant],
+                            rvecs, tvecs,
+                            CALIB_USE_INTRINSIC_GUESS |
+                            (variant == 0 ? pairFlag[p] : componentFlags[p]));
+        }
+
+        // Pinned components are never touched, so both spellings return them bit-identical.
+        for( int i = 0; i < 2; i++ )
+        {
+            const int idx = pinnedIdx[p][i];
+            EXPECT_DOUBLE_EQ(result[0].at<double>(intrinsicRow[idx], intrinsicCol[idx]),
+                             result[1].at<double>(intrinsicRow[idx], intrinsicCol[idx]));
+        }
+
+        // Estimated components agree only to a tolerance: calibrateCamera is not
+        // bit-reproducible run to run, so two identical calls already differ by ~1e-6.
+        EXPECT_LE(cvtest::norm(result[0], result[1], NORM_INF), 1e-3);
+        EXPECT_LE(cvtest::norm(dist[0], dist[1], NORM_INF), 1e-4);
+    }
+}
+
+TEST(Calib_CalibrateCamera, mixComponentAndPairFlags)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    // Per case: the flags under test, and whether each of fx, fy, cx, cy stays untouched.
+    struct Case { int flags; bool pinned[4]; const char* label; };
+    const Case cases[] = {
+        { CALIB_FIX_FX | CALIB_FIX_CY,
+          { true,  false, false, true  }, "CALIB_FIX_FX | CALIB_FIX_CY" },
+        { CALIB_FIX_FY | CALIB_FIX_CX,
+          { false, true,  true,  false }, "CALIB_FIX_FY | CALIB_FIX_CX" },
+        { CALIB_FIX_FOCAL_LENGTH | CALIB_FIX_CX,
+          { true,  true,  true,  false }, "CALIB_FIX_FOCAL_LENGTH | CALIB_FIX_CX" },
+        { CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_FY,
+          { false, true,  true,  true  }, "CALIB_FIX_PRINCIPAL_POINT | CALIB_FIX_FY" },
+        { CALIB_FIX_FX | CALIB_FIX_FY | CALIB_FIX_CX | CALIB_FIX_CY,
+          { true,  true,  true,  true  }, "all four components" },
+    };
+
+    for( size_t c = 0; c < sizeof(cases)/sizeof(cases[0]); c++ )
+    {
+        SCOPED_TRACE(cases[c].label);
+
+        Mat cameraMatrix = Mat(trueCameraMatrix).clone();
+        cameraMatrix.at<double>(0, 0) += 40;
+        cameraMatrix.at<double>(1, 1) -= 40;
+        cameraMatrix.at<double>(0, 2) += 15;
+        cameraMatrix.at<double>(1, 2) -= 15;
+
+        double start[4];
+        for( int i = 0; i < 4; i++ )
+            start[i] = cameraMatrix.at<double>(intrinsicRow[i], intrinsicCol[i]);
+
+        Mat distCoeffs = Mat::zeros(1, 5, CV_64F);
+        std::vector<Mat> rvecs, tvecs;
+        calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                        rvecs, tvecs, CALIB_USE_INTRINSIC_GUESS | cases[c].flags);
+
+        for( int i = 0; i < 4; i++ )
+        {
+            const double got = cameraMatrix.at<double>(intrinsicRow[i], intrinsicCol[i]);
+            if( cases[c].pinned[i] )
+                EXPECT_DOUBLE_EQ(got, start[i]) << "component " << i << " should have stayed fixed";
+            else
+                EXPECT_NE(got, start[i]) << "component " << i << " should have been estimated";
+        }
+    }
+}
+
+TEST(Calib_CalibrateCamera, fixFxConflictsWithFixedAspectRatio)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    Mat distCoeffs = Mat::zeros(1, 5, CV_64F);
+    std::vector<Mat> rvecs, tvecs;
+
+    // A fixed aspect ratio recomputes fx from fy every iteration, so fx cannot be
+    // held on its own. Asking for both has to be refused, not silently ignored.
+    Mat cameraMatrix = Mat(trueCameraMatrix).clone();
+    EXPECT_THROW(calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                                 rvecs, tvecs,
+                                 CALIB_USE_INTRINSIC_GUESS | CALIB_FIX_ASPECT_RATIO | CALIB_FIX_FX),
+                 cv::Exception);
+
+    // Pinning fy as well makes it consistent: fx = aspectRatio*fy is then constant too.
+    cameraMatrix = Mat(trueCameraMatrix).clone();
+    distCoeffs = Mat::zeros(1, 5, CV_64F);
+    EXPECT_NO_THROW(calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                                    rvecs, tvecs,
+                                    CALIB_USE_INTRINSIC_GUESS | CALIB_FIX_ASPECT_RATIO |
+                                    CALIB_FIX_FX | CALIB_FIX_FY));
+    EXPECT_DOUBLE_EQ(cameraMatrix.at<double>(0, 0), trueCameraMatrix(0, 0));
+    EXPECT_DOUBLE_EQ(cameraMatrix.at<double>(1, 1), trueCameraMatrix(1, 1));
+}
+
+TEST(Calib_StereoCalibrate, fixIntrinsicComponentsIndividually)
+{
+    const Matx33d trueCameraMatrix(800, 0, 332, 0, 820, 228, 0, 0, 1);
+    const Vec<double, 5> trueDist(0.1, -0.05, 0.001, -0.002, 0.01);
+
+    std::vector<std::vector<Point3f> > objectPoints;
+    std::vector<std::vector<Point2f> > imagePoints;
+    Size imageSize;
+    makeIntrinsicFixingRig(objectPoints, imagePoints, trueCameraMatrix, trueDist, imageSize);
+
+    const int fixFlag[4] = { CALIB_FIX_FX, CALIB_FIX_FY, CALIB_FIX_CX, CALIB_FIX_CY };
+    const char* name[4] = { "fx", "fy", "cx", "cy" };
+
+    for( int c = 0; c < 4; c++ )
+    {
+        SCOPED_TRACE(cv::format("fixing %s on both cameras", name[c]));
+
+        Mat K1 = Mat(trueCameraMatrix).clone(), K2 = Mat(trueCameraMatrix).clone();
+        for( int i = 0; i < 4; i++ )
+        {
+            K1.at<double>(intrinsicRow[i], intrinsicCol[i]) += 20;
+            K2.at<double>(intrinsicRow[i], intrinsicCol[i]) += 20;
+        }
+        const double pinned = K1.at<double>(intrinsicRow[c], intrinsicCol[c]);
+
+        Mat D1 = Mat::zeros(1, 5, CV_64F), D2 = Mat::zeros(1, 5, CV_64F);
+        Mat R, T, E, F;
+        stereoCalibrate(objectPoints, imagePoints, imagePoints, K1, D1, K2, D2, imageSize,
+                        R, T, E, F, CALIB_USE_INTRINSIC_GUESS | fixFlag[c]);
+
+        // The per-component flags apply to both cameras, like the pair flags they generalize.
+        EXPECT_DOUBLE_EQ(K1.at<double>(intrinsicRow[c], intrinsicCol[c]), pinned);
+        EXPECT_DOUBLE_EQ(K2.at<double>(intrinsicRow[c], intrinsicCol[c]), pinned);
+    }
+}
+
+// Shared synthetic capture. The noise is deliberate: with exact projections sigma2
+// collapses to zero and takes every covariance entry with it.
+static void makeNoisyCalibrationViews(Size& imageSize, vector<vector<Point3f> >& objectPoints,
+                                      vector<vector<Point2f> >& imagePoints)
+{
+    imageSize = Size(640, 480);
+    const Mat cameraTruth = Mat(Matx33d(800.0, 0.0, 320.0,
+                                        0.0, 810.0, 240.0,
+                                        0.0, 0.0, 1.0));
+    const Mat distTruth = Mat::zeros(5, 1, CV_64F);
+
+    vector<Point3f> board;
+    for (int y = 0; y < 6; ++y)
+        for (int x = 0; x < 7; ++x)
+            board.push_back(Point3f((x - 3) * 0.04f, (y - 2.5f) * 0.04f, 0.0f));
+
+    const Vec3d rotations[] = {
+        Vec3d(-0.20,  0.10,  0.02), Vec3d( 0.15, -0.12, -0.04),
+        Vec3d(-0.08, -0.18,  0.08), Vec3d( 0.22,  0.05, -0.10),
+        Vec3d(-0.16,  0.20,  0.12), Vec3d( 0.10,  0.16, -0.07)
+    };
+    const Vec3d translations[] = {
+        Vec3d(-0.08, -0.04, 1.10), Vec3d( 0.06, -0.03, 1.25),
+        Vec3d(-0.04,  0.07, 1.35), Vec3d( 0.08,  0.05, 1.20),
+        Vec3d( 0.00, -0.08, 1.40), Vec3d(-0.06,  0.02, 1.15)
+    };
+
+    RNG rng(0x5eed1234);
+    objectPoints.clear();
+    imagePoints.clear();
+    for (size_t i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i)
+    {
+        vector<Point2f> projected;
+        projectPoints(board, rotations[i], translations[i], cameraTruth, distTruth, projected);
+        for (size_t p = 0; p < projected.size(); ++p)
+        {
+            projected[p].x += (float)rng.gaussian(0.1);
+            projected[p].y += (float)rng.gaussian(0.1);
+        }
+        objectPoints.push_back(board);
+        imagePoints.push_back(projected);
+    }
+}
+
+// Parameterised over the solver engine so one assertion covers both paths.
+typedef testing::TestWithParam<int> Calib_CalibrateCameraCovariance;
+
+TEST_P(Calib_CalibrateCameraCovariance, diagonalMatchesStdDeviations)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+    const int nimages = (int)objectPoints.size();
+
+    Mat cameraMatrix, distCoeffs, stdDevI, stdDevE, perViewErrors, covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, stdDevI, stdDevE, perViewErrors, covariance, engineFlag);
+
+    const int n = CALIB_NINTRINSIC + nimages * 6;
+    ASSERT_EQ(n, covariance.rows);
+    ASSERT_EQ(n, covariance.cols);
+    ASSERT_EQ(CV_64F, covariance.type());
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double expected = (i < CALIB_NINTRINSIC)
+            ? stdDevI.at<double>(i)
+            : stdDevE.at<double>(i - CALIB_NINTRINSIC);
+        EXPECT_NEAR(std::sqrt(covariance.at<double>(i, i)), expected, 1e-10)
+            << "parameter index " << i;
+    }
+
+    EXPECT_LT(cvtest::norm(covariance, covariance.t(), NORM_INF), 1e-12);
+}
+
+TEST_P(Calib_CalibrateCameraCovariance, focalLengthCorrelatesWithDepth)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat cameraMatrix, distCoeffs, covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, noArray(), noArray(), noArray(), covariance, engineFlag);
+
+    // The motivation for the whole output: fx and the view depths move together,
+    // which no marginal standard deviation can express.
+    const int FX = 0;
+    const int TZ0 = CALIB_NINTRINSIC + 5;
+    const double corr = covariance.at<double>(FX, TZ0) /
+        std::sqrt(covariance.at<double>(FX, FX) * covariance.at<double>(TZ0, TZ0));
+
+    EXPECT_GT(std::abs(corr), 0.5);
+    EXPECT_LE(std::abs(corr), 1.0 + 1e-9);
+}
+
+TEST_P(Calib_CalibrateCameraCovariance, fixedParametersGetZeroRows)
+{
+    const int engineFlag = GetParam();
+
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat cameraMatrix = Mat(Matx33d(800.0, 0.0, 320.0, 0.0, 810.0, 240.0, 0.0, 0.0, 1.0));
+    Mat distCoeffs = Mat::zeros(5, 1, CV_64F);
+    Mat covariance;
+    vector<Mat> rvecs, tvecs;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
+                    rvecs, tvecs, noArray(), noArray(), noArray(), covariance,
+                    engineFlag | CALIB_USE_INTRINSIC_GUESS | CALIB_FIX_PRINCIPAL_POINT);
+
+    const int CX = 2, CY = 3;
+    EXPECT_EQ(0.0, cvtest::norm(covariance.row(CX), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.row(CY), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.col(CX), NORM_INF));
+    EXPECT_EQ(0.0, cvtest::norm(covariance.col(CY), NORM_INF));
+}
+
+INSTANTIATE_TEST_CASE_P(Calib, Calib_CalibrateCameraCovariance,
+                        testing::Values(0, CALIB_DISABLE_SCHUR_COMPLEMENT));
+
+// Both engines solve the same normal equations, so their covariances must agree. A
+// divergence means one of DECOMP_SVD / DECOMP_EIG got a rank-deficient JtJ.
+TEST(Calib_CalibrateCameraCovariance, schurMatchesBouguet)
+{
+    Size imageSize;
+    vector<vector<Point3f> > objectPoints;
+    vector<vector<Point2f> > imagePoints;
+    makeNoisyCalibrationViews(imageSize, objectPoints, imagePoints);
+
+    Mat camS, distS, covS, camB, distB, covB;
+    vector<Mat> rvecsS, tvecsS, rvecsB, tvecsB;
+
+    calibrateCamera(objectPoints, imagePoints, imageSize, camS, distS, rvecsS, tvecsS,
+                    noArray(), noArray(), noArray(), covS, 0);
+    calibrateCamera(objectPoints, imagePoints, imageSize, camB, distB, rvecsB, tvecsB,
+                    noArray(), noArray(), noArray(), covB, CALIB_DISABLE_SCHUR_COMPLEMENT);
+
+    ASSERT_EQ(covS.size(), covB.size());
+
+    const double scale = cvtest::norm(covB, NORM_INF);
+    ASSERT_GT(scale, 0.0);
+    EXPECT_LT(cvtest::norm(covS, covB, NORM_INF) / scale, 1e-3);
+}
+
 }} // namespace
