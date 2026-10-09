@@ -66,7 +66,7 @@ TEST_F(Test_Graph_Simplifier, ResizeSubgraph) {
         - ResizeSubgraph3
     */
     test("upsample_unfused_torch1.2", std::vector<std::string>{"BatchNorm", "Cast", "Concat", "Floor", "Gather", "NaryEltwise", "Resize", "Shape", "Slice", "Unsqueeze"});
-    // In the models below the BatchNorm is folded into the preceding convolution by fuseBN().
+    // In the models below the BatchNorm is folded into the preceding convolution by fuseBackwardAffine().
     test("resize_nearest_unfused_opset11_torch1.3", std::vector<std::string>{"Cast", "Concat", "Conv", "Floor", "Gather", "NaryEltwise", "Resize", "Shape", "Unsqueeze"});
     test("resize_nearest_unfused_opset11_torch1.4", std::vector<std::string>{"Cast", "Concat", "Conv", "Floor", "Gather", "NaryEltwise", "Resize", "Shape", "Slice", "Unsqueeze"});
     test("upsample_unfused_opset9_torch1.4", std::vector<std::string>{"Cast", "Concat", "Conv", "Floor", "Gather", "NaryEltwise", "Resize", "Shape", "Slice", "Unsqueeze"});

@@ -733,4 +733,72 @@ TEST(Fusion, TransformLayoutAddBroadcastResidualMatchesUnfused)
     normAssert(unfusedOut, fusedOut, "fused vs unfused, broadcast residual", 1e-5, 1e-5);
 }
 
+// Sub before Conv isn't a BatchNormalization node, so this needs the new NaryEltwise::asAffine fold.
+TEST(Fusion, NaryEltwiseSubFoldsIntoConv)
+{
+    Net net = readNetFromONNX(_tf("models/sub_into_conv.onnx"), ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+
+    net.setInput(blobFromNPY(_tf("data/input_sub_into_conv.npy")));
+    Mat out = net.forward();
+
+    EXPECT_EQ(0, fusedCount(net, "NaryEltwise")) << "the Sub should have folded into Conv";
+    normAssert(blobFromNPY(_tf("data/output_sub_into_conv.npy")), out, "sub_into_conv");
+}
+
+// (x - mean) / std is the usual way people write this normalization -- two chained
+// NaryEltwise ops, not one. Both must fold, not just the one directly before Conv.
+TEST(Fusion, NaryEltwiseSubDivChainFoldsIntoConv)
+{
+    Net net = readNetFromONNX(_tf("models/sub_div_chain_into_conv.onnx"), ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+
+    net.setInput(blobFromNPY(_tf("data/input_sub_div_chain_into_conv.npy")));
+    Mat out = net.forward();
+
+    EXPECT_EQ(0, fusedCount(net, "NaryEltwise")) << "both Sub and Div should have folded into Conv";
+    normAssert(blobFromNPY(_tf("data/output_sub_div_chain_into_conv.npy")), out, "sub_div_chain_into_conv");
+}
+
+// C == W here, the exact collision the axis check must reject (see nary_eltwise_layers.cpp).
+TEST(Fusion, NaryEltwiseAxisMismatchIsNotFoldedAsChannel)
+{
+    Net net = readNetFromONNX(_tf("models/axis_ambiguous_not_folded.onnx"), ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+
+    net.setInput(blobFromNPY(_tf("data/input_axis_ambiguous_not_folded.npy")));
+    Mat out = net.forward();
+
+    normAssert(blobFromNPY(_tf("data/output_axis_ambiguous_not_folded.npy")), out,
+               "axis_ambiguous_not_folded");
+}
+
+// Div before Softmax needs the new Softmax::foldInputScale fold.
+TEST(Fusion, ScalarDivFoldsIntoSoftmaxScale)
+{
+    Net net = readNetFromONNX(_tf("models/div_into_softmax.onnx"), ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+
+    net.setInput(blobFromNPY(_tf("data/input_div_into_softmax.npy")));
+    Mat out = net.forward();
+
+    EXPECT_EQ(0, fusedCount(net, "NaryEltwise")) << "the Div should have folded into Softmax::scale";
+    normAssert(blobFromNPY(_tf("data/output_div_into_softmax.npy")), out, "div_into_softmax");
+}
+
+// fuseTransposeMatMul, now rewritten on foldSingleUseProducers, must still fold the Transpose.
+TEST(Fusion, TransposeFoldsIntoMatMulTransB)
+{
+    Net net = readNetFromONNX(_tf("models/transpose_into_matmul.onnx"), ENGINE_OPENCV);
+    ASSERT_FALSE(net.empty());
+
+    net.setInput(blobFromNPY(_tf("data/input_transpose_into_matmul_A.npy")), "A");
+    net.setInput(blobFromNPY(_tf("data/input_transpose_into_matmul_B.npy")), "B");
+    Mat out = net.forward();
+
+    EXPECT_EQ(0, fusedCount(net, "Transpose")) << "the Transpose should have folded into MatMul::trans_b";
+    normAssert(blobFromNPY(_tf("data/output_transpose_into_matmul.npy")), out,
+               "transpose_into_matmul");
+}
+
 }} // namespace opencv_test

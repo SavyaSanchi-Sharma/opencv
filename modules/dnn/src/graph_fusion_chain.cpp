@@ -471,14 +471,113 @@ bool fuseChainsInGraph(Net::Impl& net, const Ptr<Graph>& graph,
 
 } // namespace
 
+// See declaration in net_impl.hpp.
+bool foldSingleUseProducers(Net::Impl& net, const Ptr<Graph>& graph,
+                            const vector<int>& usecounts,
+                            const std::function<bool(LayerInfo*, int, LayerInfo*)>& tryFold)
+{
+    if (!graph)
+        return false;
+
+    bool subFused = false;
+    for (const Ptr<LayerInfo>& layer : graph->prog()) {
+        if (!layer) continue;
+        if (vector<Ptr<Graph> >* subs = layer->subgraphs())
+            for (Ptr<Graph>& g : *subs)
+                if (foldSingleUseProducers(net, g, usecounts, tryFold))
+                    subFused = true;
+    }
+
+    const vector<Ptr<LayerInfo> >& prog = graph->prog();
+    vector<int> producer_of;
+    producerOf(prog, (int)net.args.size(), producer_of);
+
+    std::set<int> externalArgs;
+    for (Arg out : graph->outputs())
+        externalArgs.insert(out.idx);
+
+    vector<bool> dropped(prog.size(), false);
+    bool modified = false;
+
+    for (size_t i = 0; i < prog.size(); i++) {
+        const Ptr<LayerInfo>& layer = prog[i];
+        if (!layer || dropped[i])
+            continue;
+        for (size_t slot = 0; slot < layer->inputs.size(); slot++) {
+            // Retry the same slot: a fold only moves the producer's own data input onto
+            // this slot, so a chain like Sub->Div->Conv keeps collapsing one hop at a time.
+            for (;;) {
+                Arg in = layer->inputs[slot];
+                if (in.idx <= 0 || in.idx >= (int)producer_of.size())
+                    break;
+                int prod_idx = producer_of[in.idx];
+                if (prod_idx < 0 || dropped[prod_idx])
+                    break;
+                if (usecounts.at(in.idx) != 1 || externalArgs.count(in.idx))
+                    break;
+                if (!tryFold(layer.get(), (int)slot, prog[prod_idx].get()))
+                    break;
+                dropped[prod_idx] = true;
+                modified = true;
+            }
+        }
+    }
+
+    if (modified) {
+        vector<Ptr<LayerInfo> > compact;
+        compact.reserve(prog.size());
+        for (size_t i = 0; i < prog.size(); i++)
+            if (!dropped[i] && prog[i])
+                compact.push_back(prog[i]);
+        graph->setProg(compact);
+    }
+
+    return modified || subFused;
+}
+
+namespace {
+
+//! Folds a producer's asAffine() into a consumer's foldInputScale() -- replaces the old
+//! separate BatchNorm-before-Conv and Mul/Div-before-Softmax passes.
+bool tryFoldBackwardAffine(LayerInfo* layer, int slot, LayerInfo* producerInfo)
+{
+    if (slot != 0)
+        return false;
+    const FusionOps* ops = fusionOpsFor((Layer*)layer);
+    if (!ops || !ops->foldInputScale)
+        return false;
+
+    Layer* producer = (Layer*)producerInfo;
+    const FusionOps* pops = fusionOpsFor(producer);
+    if (!pops || !pops->asAffine)
+        return false;
+
+    Mat scale, shift;
+    Arg dataInput;
+    if (!pops->asAffine(producer, scale, shift, dataInput))
+        return false;
+    if (!ops->foldInputScale((Layer*)layer, scale, shift))
+        return false;
+
+    layer->inputs[0] = dataInput;
+    return true;
+}
+
+} // namespace
+
+void Net::Impl::fuseBackwardAffine()
+{
+    if (!mainGraph)
+        return;
+    vector<int> usecounts;
+    useCounts(usecounts);
+    foldSingleUseProducers(*this, mainGraph, usecounts, tryFoldBackwardAffine);
+}
+
 void Net::Impl::fuseChains()
 {
     if (!mainGraph)
         return;
-
-    // First: it deletes a layer, and if the chain pass absorbed the BatchNorm backwards into
-    // the preceding conv it would find nothing left.
-    fuseBN();
 
     // Order is load-bearing: each pass matches shapes the one before it leaves.
     fuseAttention();
@@ -486,7 +585,9 @@ void Net::Impl::fuseChains()
     fuseSharedInputGemm();
     fuseReshapeTranspose();
     fuseTransposeMatMul();
-    fuseScaleSoftmax();
+
+    // After fuseAttention (which still needs to see the scalar Div/Mul), before the chain loop.
+    fuseBackwardAffine();
 
     // A sink runs the math it absorbs in its own CPU kernel. setPreferableTarget resolves
     // only CPU and CUDA while mainGraph is set, so nothing reaches here on OpenCL today.

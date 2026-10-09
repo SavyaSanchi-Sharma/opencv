@@ -27,6 +27,7 @@
 
 #include "kv_cache_manager.hpp"
 
+#include <functional>
 #include <unordered_map>
 
 #ifdef HAVE_ONNXRUNTIME
@@ -559,13 +560,11 @@ struct Net::Impl : public detail::NetImplBase
     void fuseReshapeTranspose();
     // absorb a last-two-dims Transpose into the consuming MatMul
     void fuseTransposeMatMul();
-    // fold a scalar Mul/Div before Softmax into Softmax::scale (CPU only)
-    void fuseScaleSoftmax();
-    // replace constant sub-expressions with their results
 
     // widen FP16/BF16 constants to execution precision while the engine lacks half kernels
     void widenHalfConstants();
     void fuseQDQ();
+    // replace constant sub-expressions with their results
     void constFold();
     // make some operations (activation, batch norm, convolution) unary if
     // all their arguments except for the 1st one are constant.
@@ -573,8 +572,9 @@ struct Net::Impl : public detail::NetImplBase
     // insert transformLayout operations where necessary;
     // use block layout for convolution, pooling and some other operations where it matters
     void useBlockLayout();
-    // fuse BN into following Conv2 weights
-    void fuseBN();
+    // fold a backward-foldable producer (BatchNorm, or a const Add/Sub/Mul/Div) into
+    // whatever consumes its single output (Conv2's weights, Softmax's own scale, ...)
+    void fuseBackwardAffine();
 
 };  // Net::Impl
 
@@ -589,6 +589,12 @@ Net readNetFromONNX2(const std::vector<uchar>&);
 #ifdef HAVE_ONNXRUNTIME
 Net readNetFromONNX2_ORT(const String& onnxFile);
 #endif
+
+// Offers every (layer, slot) with a single-use, non-external producer to tryFold; a true
+// return rewires past the producer and drops it. Same bookkeeping as fuseTransposeMatMul.
+bool foldSingleUseProducers(Net::Impl& net, const Ptr<Graph>& graph,
+                            const std::vector<int>& usecounts,
+                            const std::function<bool(LayerInfo*, int, LayerInfo*)>& tryFold);
 
 CV__DNN_INLINE_NS_END
 

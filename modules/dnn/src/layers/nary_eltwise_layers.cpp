@@ -216,9 +216,77 @@ public:
         return true;
     }
 
+    //! Reduces a 2-input Add/Sub/Prod/Div against a const operand to (scale, shift), for a
+    //! backward fold -- covers hand-written normalization that isn't a BatchNormalization node.
+    static bool asAffineOp(const Layer* self, Mat& scale, Mat& shift, Arg& dataInput)
+    {
+        auto* e = static_cast<const NaryEltwiseLayerImpl*>(self);
+        if (e->inputs.size() != 2)
+            return false;
+
+        Net::Impl* netimpl = getNetImpl(const_cast<NaryEltwiseLayerImpl*>(e));
+        bool const0 = netimpl->isConstArg(e->inputs[0]);
+        bool const1 = netimpl->isConstArg(e->inputs[1]);
+        if (const0 == const1)
+            return false;
+        dataInput = const0 ? e->inputs[1] : e->inputs[0];
+
+        Mat c = netimpl->argTensor(const0 ? e->inputs[0] : e->inputs[1]);
+        if (c.empty() || (c.type() != CV_32F && c.type() != CV_64F))
+            return false;
+
+        // Only a scalar or a shape with just the channel axis (3rd from end) non-1 is
+        // unambiguously per-channel -- a bare [C] actually broadcasts along the last axis.
+        if (c.total() != 1) {
+            if (c.dims < 3)
+                return false;
+            int chAxis = c.dims - 3;
+            for (int d = 0; d < c.dims; d++)
+                if (d != chAxis && c.size[d] != 1)
+                    return false;
+        }
+
+        Mat c32;
+        c.convertTo(c32, CV_32F);
+        c32 = c32.reshape(1, 1);
+
+        switch (e->op) {
+        case OPERATION::ADD:
+        case OPERATION::SUM:
+            scale = Mat::ones(c32.size(), CV_32F);
+            shift = c32;
+            return true;
+        case OPERATION::SUB:
+            if (const1) { scale = Mat::ones(c32.size(), CV_32F); shift = -c32; }
+            else        { scale = -Mat::ones(c32.size(), CV_32F); shift = c32; }
+            return true;
+        case OPERATION::PROD:
+            scale = c32;
+            shift = Mat::zeros(c32.size(), CV_32F);
+            return true;
+        case OPERATION::DIV: {
+            if (!const1)
+                return false;
+            const float* cp = c32.ptr<float>();
+            for (int i = 0; i < (int)c32.total(); i++)
+                if (cp[i] == 0.f)
+                    return false;
+            Mat recip;
+            cv::divide(1.0, c32, recip);
+            scale = recip;
+            shift = Mat::zeros(c32.size(), CV_32F);
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+
     NaryEltwiseLayerImpl(const LayerParams& params)
     {
-        registerFusionOpsOnce<NaryEltwiseLayerImpl>({ &NaryEltwiseLayerImpl::unfoldOp, nullptr });
+        registerFusionOpsOnce<NaryEltwiseLayerImpl>(
+            { &NaryEltwiseLayerImpl::unfoldOp, nullptr, false, nullptr, nullptr,
+              &NaryEltwiseLayerImpl::asAffineOp });
         setParamsFrom(params);
         operation = toLowerCase(params.get<String>("operation", "sum"));
 
