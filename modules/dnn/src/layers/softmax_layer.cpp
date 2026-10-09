@@ -47,6 +47,8 @@
 #include "../ie_ngraph.hpp"
 #include "../op_webnn.hpp"
 #include "../op_cann.hpp"
+#include "../net_impl.hpp"
+#include "../adjacency_graph.hpp"
 
 #include <algorithm>
 #include <stdlib.h>
@@ -75,11 +77,33 @@ public:
 
     SoftMaxLayerImpl(const LayerParams& params)
     {
+        registerFusionOpsOnce<SoftMaxLayerImpl>({ nullptr, nullptr, false, &SoftMaxLayerImpl::foldInputScaleOp });
         axisRaw = params.get<int>("axis", -1);
         logSoftMax = params.get<bool>("log_softmax", false);
         scale = params.get<float>("scale", 1.f);
         coerced2d = params.get<bool>("coerced_2d", false);
         setParamsFrom(params);
+    }
+
+    //! A scalar Mul/Div before Softmax bakes into this layer's own scale. CPU only -- the
+    //! OpenCL/CUDA kernels don't read this field.
+    static bool foldInputScaleOp(Layer* self, const Mat& scale, const Mat& shift)
+    {
+        auto* sm = static_cast<SoftMaxLayerImpl*>(self);
+        if (sm->logSoftMax || scale.total() != 1)
+            return false;
+        for (int i = 0; i < (int)shift.total(); i++)
+            if (shift.ptr<float>()[i] != 0.f)
+                return false;
+        Net::Impl* netimpl = getNetImpl(sm);
+        if (netimpl->preferableBackend != DNN_BACKEND_OPENCV ||
+            netimpl->preferableTarget != DNN_TARGET_CPU)
+            return false;
+        float s = scale.ptr<float>()[0];
+        if (!std::isfinite(s))
+            return false;
+        sm->scale *= s;
+        return true;
     }
 
 #ifdef HAVE_OPENCL

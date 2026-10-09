@@ -4,7 +4,6 @@
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
-#include "adjacency_graph.hpp"
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -208,99 +207,6 @@ void Net::Impl::fuseInstanceNormAffine()
 {
     InstanceNormAffineFusion fusion(this);
     fusion.fuse();
-}
-
-// fold BN scale/bias into the weights of the immediately following Conv2 (pre-constArgs only)
-struct FuseBNPass
-{
-    FuseBNPass(Net::Impl* netimpl_) : netimpl(netimpl_) {}
-
-    void run()
-    {
-        netimpl->useCounts(usecounts);
-        fuseGraph(netimpl->mainGraph);
-    }
-
-    void fuseGraph(Ptr<Graph>& graph)
-    {
-        const std::vector<Ptr<LayerInfo> >& prog = graph->prog();
-        size_t nops = prog.size(), nargs = netimpl->args.size();
-        std::vector<Ptr<LayerInfo> > newprog;
-        newprog.reserve(nops);
-        std::vector<int> producer_of((int)nargs, -1);
-        bool modified = false;
-
-        for (size_t i = 0; i < nops; i++) {
-            const Ptr<LayerInfo>& layer = prog[i];
-            Layer* layer_ptr = (Layer*)layer.get();
-
-            std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
-            if (subgraphs)
-                for (Ptr<Graph>& g : *subgraphs) fuseGraph(g);
-
-            const std::vector<Arg>& inputs  = layer->inputs;
-            const std::vector<Arg>& outputs = layer->outputs;
-
-            Conv2Layer* conv = dynamic_cast<Conv2Layer*>(layer_ptr);
-            if (conv && !inputs.empty()) {
-                Arg conv_inp0 = inputs[0];
-                int bn_idx = conv_inp0.idx >= 0 && conv_inp0.idx < (int)producer_of.size()
-                             ? producer_of[conv_inp0.idx] : -1;
-                if (bn_idx >= 0 && usecounts[conv_inp0.idx] == 1) {
-                    BatchNorm2Layer* bn = dynamic_cast<BatchNorm2Layer*>(newprog[bn_idx].get());
-                    if (bn && fuseForward(conv, bn)) {
-                        Arg bn_inp0 = bn->inputs[0];
-                        layer_ptr->inputs[0] = bn_inp0;
-                        usecounts[conv_inp0.idx] = 0;
-                        if (bn_inp0.idx >= 0)
-                            usecounts[bn_inp0.idx]++;
-                        newprog[bn_idx] = Ptr<LayerInfo>();
-                        modified = true;
-                    }
-                }
-            }
-
-            for (Arg out : outputs)
-                if (out.idx >= 0 && out.idx < (int)producer_of.size())
-                    producer_of[out.idx] = (int)newprog.size();
-            newprog.push_back(layer);
-        }
-
-        if (modified) {
-            size_t j = 0;
-            for (size_t i = 0; i < newprog.size(); i++) {
-                if (!newprog[i].empty()) {
-                    if (j < i) newprog[j] = newprog[i];
-                    j++;
-                }
-            }
-            newprog.resize(j);
-            graph->setProg(newprog);
-        }
-    }
-
-    // Ask the conv to take the BatchNorm's scale and shift into its own weights. It owns
-    // the layout, so this works after constArgs() has packed them.
-    bool fuseForward(Conv2Layer* conv, BatchNorm2Layer* bn)
-    {
-        if (bn->inputs.size() != 1)
-            return false;   // constArgs() freezes a const-parameter BN down to one input
-        Mat scale, shift;
-        bn->getScaleBias(scale, shift);
-        if (scale.empty() || shift.empty())
-            return false;
-        const FusionOps* ops = fusionOpsFor(conv);
-        return ops && ops->foldInputScale && ops->foldInputScale(conv, scale, shift);
-    }
-
-    Net::Impl* netimpl;
-    std::vector<int> usecounts;
-};
-
-void Net::Impl::fuseBN()
-{
-    FuseBNPass pass(this);
-    pass.run();
 }
 
 CV__DNN_INLINE_NS_END
