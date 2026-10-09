@@ -314,19 +314,42 @@ bool isHipUMat(InputArray a)
 
 namespace cv { namespace hip {
 
-static bool g_useHip = true;
+// Beyond "is there a device", also launches a real kernel so a GPU arch with no AOT code
+// object for it (e.g. an unsupported gfx target) is caught here instead of on the first
+// user-visible op.
+static bool probeHip()
+{
+    int n = 0;
+    if (hipGetDeviceCount(&n) != hipSuccess || n == 0) {
+        (void)hipGetLastError();  // clear the sticky error before using another backend
+        return false;
+    }
+
+    void* p = nullptr;
+    if (hipMalloc(&p, 4) != hipSuccess) {
+        (void)hipGetLastError();
+        return false;
+    }
+
+    bool ok = true;
+    try {
+        // A non-zero CV_32F value forces setToImpl's kernel launch rather than hipMemset2D.
+        cv::hip::device::setToWithoutMask(p, 4, 1, 1, CV_32FC1, Scalar::all(1.0));
+    } catch (const cv::Exception& e) {
+        CV_LOG_WARNING(NULL, "HIP probe failed, falling back to OpenCL/CPU: " << e.what());
+        ok = false;
+    }
+    (void)hipFree(p);
+    (void)hipGetLastError();
+    return ok;
+}
 
 CV_EXPORTS_W bool useHip()
 {
-    if (!g_useHip) return false;
-    int n = 0;
-    if (hipGetDeviceCount(&n) != hipSuccess || n == 0) {
-        g_useHip = false;
-        return false;
-    }
-    // Mat::copyTo/setTo fire CV_OCL_RUN before the HIP currAllocator check, which would feed a HIP buffer to OpenCL.
-    cv::ocl::setUseOpenCL(false);
-    return true;
+    // Thread-safe one-time probe; also avoids calling hipGetDeviceCount() on every allocation.
+    static const bool probed =
+        !utils::getConfigurationParameterBool("OPENCV_HIP_DISABLE", false) && probeHip();
+    return probed;
 }
 
 CV_EXPORTS MatAllocator* getHipAllocator()

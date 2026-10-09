@@ -1320,18 +1320,24 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
             UMatData* prevu = _dst.getUMat().u;
             _dst.create(size(), type());
             UMat dst = _dst.getUMat();
-            // Zero a freshly allocated dst first (the kernel writes only masked pixels), matching
-            // Mat::copyTo / OpenCL HAVE_DST_UNINIT. Skip when dst is reused, to keep its pixels.
-            // Each handle is the base of its parent allocation; offset selects the ROI.
-            if (prevu != dst.u)
-                cv::hip::device::setToWithoutMask((uchar*)dst.u->handle + dst.offset, dst.step[0],
-                                                  rows, cols, type(), Scalar::all(0));
-            cv::hip::device::copyToWithMask((uchar*)u->handle + offset, step[0],
-                                            (uchar*)dst.u->handle + dst.offset, dst.step[0],
-                                            (uchar*)mask.u->handle + mask.offset, mask.step[0],
-                                            rows, cols, type(), mask.channels());
-            dst.u->markHostCopyObsolete(true);
-            return;
+            // A HIP-resident src and mask don't guarantee a HIP-resident dst: dst's own
+            // allocation may have fallen back to OpenCL/CPU, in which case dst.u->handle is
+            // not a HIP device pointer and must not be handed to a HIP kernel.
+            if (cv::hip::isHipUMat(dst))
+            {
+                // Zero a freshly allocated dst first (the kernel writes only masked pixels), matching
+                // Mat::copyTo / OpenCL HAVE_DST_UNINIT. Skip when dst is reused, to keep its pixels.
+                // Each handle is the base of its parent allocation; offset selects the ROI.
+                if (prevu != dst.u)
+                    cv::hip::device::setToWithoutMask((uchar*)dst.u->handle + dst.offset, dst.step[0],
+                                                      rows, cols, type(), Scalar::all(0));
+                cv::hip::device::copyToWithMask((uchar*)u->handle + offset, step[0],
+                                                (uchar*)dst.u->handle + dst.offset, dst.step[0],
+                                                (uchar*)mask.u->handle + mask.offset, mask.step[0],
+                                                rows, cols, type(), mask.channels());
+                dst.u->markHostCopyObsolete(true);
+                return;
+            }
         }
     }
 #endif
