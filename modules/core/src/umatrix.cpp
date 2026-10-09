@@ -42,8 +42,14 @@
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
 #include "umatrix.hpp"
+#ifdef HAVE_HIP
+#  include "opencv2/core/hip.hpp"
+#endif
 
 #include <opencv2/core/utils/tls.hpp>
+#ifdef HAVE_HIP
+#include <opencv2/core/utils/logger.hpp>
+#endif
 
 ///////////////////////////////// UMat implementation ///////////////////////////////
 
@@ -446,6 +452,10 @@ UMat& UMat::operator=(UMat&& m)
 
 MatAllocator* UMat::getStdAllocator()
 {
+#ifdef HAVE_HIP
+    if (cv::hip::useHip())
+        return cv::hip::getHipAllocator();
+#endif
 #ifdef HAVE_OPENCL
     if (ocl::useOpenCL())
         return ocl::getOpenCLAllocator();
@@ -1295,6 +1305,31 @@ void UMat::copyTo(OutputArray _dst) const
     u->currAllocator->download(u, dst.ptr(), d, sz, srcofs, step.p, dst.step.p);
 }
 
+#ifdef HAVE_HIP
+namespace {
+// Stages a HIP-resident UMat's data into a fresh OpenCL-resident scratch copy. HIP has no
+// zero-copy interop with OpenCL, so this is always a host round-trip. Used only while retrying
+// a failed HIP kernel on OpenCL: ocl::useOpenCL() must already be forced on by the caller for
+// this to actually land on OpenCL rather than CPU.
+UMat hipToOpenCLScratch(const UMat& src)
+{
+    UMat tmp;
+    src.getMat(ACCESS_READ).copyTo(tmp);
+    return tmp;
+}
+
+// Forces ocl::useOpenCL() on for this thread for the lifetime of the guard, then restores
+// whatever it was. RAII so a throw while staging (e.g. hipToOpenCLScratch's own map() hitting
+// a poisoned HIP context) can't leave OpenCL enabled on a thread that still has live HIP UMats.
+struct ScopedForceOpenCL
+{
+    bool prev;
+    ScopedForceOpenCL() : prev(cv::ocl::useOpenCL()) { cv::ocl::setUseOpenCL(true); }
+    ~ScopedForceOpenCL() { cv::ocl::setUseOpenCL(prev); }
+};
+} // namespace
+#endif
+
 void UMat::copyTo(OutputArray _dst, InputArray _mask) const
 {
     CV_INSTRUMENT_REGION();
@@ -1304,6 +1339,73 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
         copyTo(_dst);
         return;
     }
+#ifdef HAVE_HIP
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && _dst.isUMat())
+    {
+        UMat mask = _mask.getUMat();
+        if (cv::hip::isHipUMat(mask))
+        {
+            UMatData* prevu = _dst.getUMat().u;
+            _dst.create(size(), type());
+            UMat dst = _dst.getUMat();
+            // A HIP-resident src and mask don't guarantee a HIP-resident dst: dst's own
+            // allocation may have fallen back to OpenCL/CPU, in which case dst.u->handle is
+            // not a HIP device pointer and must not be handed to a HIP kernel.
+            if (cv::hip::isHipUMat(dst))
+            {
+                try
+                {
+                    // Zero a freshly allocated dst first (the kernel writes only masked pixels), matching
+                    // Mat::copyTo / OpenCL HAVE_DST_UNINIT. Skip when dst is reused, to keep its pixels.
+                    // Each handle is the base of its parent allocation; offset selects the ROI.
+                    if (prevu != dst.u)
+                        cv::hip::device::setToWithoutMask((uchar*)dst.u->handle + dst.offset, dst.step[0],
+                                                          rows, cols, type(), Scalar::all(0));
+                    cv::hip::device::copyToWithMask((uchar*)u->handle + offset, step[0],
+                                                    (uchar*)dst.u->handle + dst.offset, dst.step[0],
+                                                    (uchar*)mask.u->handle + mask.offset, mask.step[0],
+                                                    rows, cols, type(), mask.channels());
+                    dst.u->markHostCopyObsolete(true);
+                    return;
+                }
+                catch (const cv::Exception& e)
+                {
+                    CV_LOG_WARNING(NULL, "HIP copyTo failed, disabling HIP and retrying on OpenCL: " << e.what());
+                    cv::hip::disableHip();
+                    if (cv::ocl::haveOpenCL())
+                    {
+                        UMat tmpDst;
+                        {
+                            ScopedForceOpenCL forceOcl;
+                            UMat tmpSrc = hipToOpenCLScratch(*this);
+                            UMat tmpMask = hipToOpenCLScratch(mask);
+                            // dst reused (not freshly allocated): its existing pixels outside the mask
+                            // must survive, so seed the scratch from it. Freshly allocated: leave tmpDst
+                            // empty and let copyTo's own OpenCL path zero-fill it (HAVE_DST_UNINIT)
+                            // rather than reading the HIP buffer's not-yet-written, possibly garbage
+                            // contents.
+                            if (prevu == dst.u)
+                                tmpDst = hipToOpenCLScratch(dst);
+                            tmpSrc.copyTo(tmpDst, tmpMask);
+                        }
+                        // dst stays HIP-resident (per-call only): push the OpenCL result back with a
+                        // plain host-to-device copy, not a kernel call, so this step can't fail the
+                        // same way.
+                        tmpDst.getMat(ACCESS_READ).copyTo(dst);
+                        return;
+                    }
+                    // src/mask are unaffected by dst's own kernel failure; fall through to CPU below.
+                }
+            }
+            // Reached when dst isn't HIP-resident or the kernel just failed. The CPU path below
+            // re-creates dst at the same size/type it already has, so Mat::copyTo won't see that
+            // as a reallocation and won't zero it for us: do it here if dst was freshly allocated,
+            // same as the HIP kernel path above would have.
+            if (prevu != dst.u)
+                dst.getMat(ACCESS_WRITE).setTo(Scalar::all(0));
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int cn = channels(), mtype = _mask.type(), mdepth = CV_MAT_DEPTH(mtype), mcn = CV_MAT_CN(mtype);
     CV_Assert( (mdepth == CV_8U || mdepth == CV_8S || mdepth == CV_Bool) && (mcn == 1 || mcn == cn) );
@@ -1354,6 +1456,86 @@ UMat& UMat::setTo(InputArray _value, InputArray _mask)
     CV_INSTRUMENT_REGION();
 
     bool haveMask = !_mask.empty();
+#ifdef HAVE_HIP
+    // HIP kernel tables cover CV_8U..CV_64F only; newer 5.x depths fall through to OpenCL/CPU.
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && CV_MAT_CN(type()) <= 4 &&
+        CV_MAT_DEPTH(type()) <= CV_64F)
+    {
+        Mat value = _value.getMat();
+        CV_Assert(checkScalar(value, type(), _value.kind(), _InputArray::UMAT));
+        Scalar s;
+        {
+            Mat tmp;
+            value.convertTo(tmp, CV_64F);
+            tmp = tmp.reshape(1, 1);
+            int n = (int)std::min(tmp.total(), (size_t)4);
+            for (int i = 0; i < n; i++)
+                s.val[i] = tmp.at<double>(i);
+        }
+        if (haveMask)
+        {
+            UMat mask = _mask.getUMat();
+            if (cv::hip::isHipUMat(mask))
+            {
+                try
+                {
+                    cv::hip::device::setToWithMask((uchar*)u->handle + offset, step[0], rows, cols, type(),
+                                                   (uchar*)mask.u->handle + mask.offset, mask.step[0],
+                                                   s);
+                    u->markHostCopyObsolete(true);
+                    return *this;
+                }
+                catch (const cv::Exception& e)
+                {
+                    CV_LOG_WARNING(NULL, "HIP setTo failed, disabling HIP and retrying on OpenCL: " << e.what());
+                    cv::hip::disableHip();
+                    if (cv::ocl::haveOpenCL())
+                    {
+                        UMat tmp;
+                        {
+                            ScopedForceOpenCL forceOcl;
+                            tmp = hipToOpenCLScratch(*this);
+                            UMat tmpMask = hipToOpenCLScratch(mask);
+                            tmp.setTo(_value, tmpMask);
+                        }
+                        // *this stays HIP-resident (per-call only): push the OpenCL result back with
+                        // a plain host-to-device copy, not a kernel call, so this can't fail the same way.
+                        tmp.getMat(ACCESS_READ).copyTo(*this);
+                        return *this;
+                    }
+                    // setTo has no separate dst buffer, so *this is unaffected; fall through to CPU below.
+                }
+            }
+            // mask not on HIP device, fall through to CPU
+        }
+        else
+        {
+            try
+            {
+                cv::hip::device::setToWithoutMask((uchar*)u->handle + offset, step[0], rows, cols, type(),
+                                                  s);
+                u->markHostCopyObsolete(true);
+                return *this;
+            }
+            catch (const cv::Exception& e)
+            {
+                CV_LOG_WARNING(NULL, "HIP setTo failed, disabling HIP and retrying on OpenCL: " << e.what());
+                cv::hip::disableHip();
+                if (cv::ocl::haveOpenCL())
+                {
+                    UMat tmp;
+                    {
+                        ScopedForceOpenCL forceOcl;
+                        tmp = hipToOpenCLScratch(*this);
+                        tmp.setTo(_value);
+                    }
+                    tmp.getMat(ACCESS_READ).copyTo(*this);
+                    return *this;
+                }
+            }
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int tp = type(), cn = CV_MAT_CN(tp), d = CV_MAT_DEPTH(tp);
 
