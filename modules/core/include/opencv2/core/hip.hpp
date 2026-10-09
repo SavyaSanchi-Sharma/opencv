@@ -20,6 +20,12 @@ namespace cv{
     CV_EXPORTS_W bool useHip();
     CV_EXPORTS MatAllocator* getHipAllocator();
 
+    //! @brief Disables HIP for all UMat allocations and ops made after this call; UMats already
+    //! resident on a HIP device are unaffected. Called automatically after a HIP runtime failure
+    //! in UMat::setTo/copyTo/convertTo. OpenCL is not re-enabled: on a thread that has already
+    //! used HIP it stays off there, so later allocations on that thread land on CPU.
+    CV_EXPORTS void disableHip();
+
     //! True if @p a is a UMat residing on a HIP device (preferred over a raw currAllocator check).
     CV_EXPORTS bool isHipUMat(InputArray a);
 

@@ -6,7 +6,9 @@
 
 #define OPENCV_CORE_HIP_IMPL
 #include "precomp.hpp"
+#include <atomic>
 #include "opencv2/core/utils/logger.hpp"
+#include "opencv2/core/utils/configuration.private.hpp"
 #include "opencv2/core/hip.hpp"
 #include "opencv2/core/private/hip_stubs.hpp"
 #include "umatrix.hpp"
@@ -344,12 +346,32 @@ static bool probeHip()
     return ok;
 }
 
+static std::atomic<bool> g_hipDisabled{false};
+
 CV_EXPORTS_W bool useHip()
 {
     // Thread-safe one-time probe; also avoids calling hipGetDeviceCount() on every allocation.
     static const bool probed =
         !utils::getConfigurationParameterBool("OPENCV_HIP_DISABLE", false) && probeHip();
-    return probed;
+    if (!probed || g_hipDisabled.load(std::memory_order_relaxed))
+        return false;
+    // ocl::useOpenCL() defaults to enabled per-thread. Only setTo/copyTo/convertTo check
+    // isHipUMat() before touching a buffer; every other OpenCL-dispatched op (reduce,
+    // warpAffine, ...) would otherwise receive a HIP-resident UMat with no such check.
+    // Kernel::set rejects it (see ocl.cpp), but by then some of these ops have already
+    // reallocated their output via create() and dropped the last reference to the original
+    // buffer, freeing it before the CPU fallback can read it. Forcing OpenCL off for this
+    // thread keeps CV_OCL_RUN from ever reaching that code while a HIP UMat is in play.
+    cv::ocl::setUseOpenCL(false);
+    return true;
+}
+
+void disableHip()
+{
+    // Does not re-enable OpenCL. On a thread that has already called useHip() successfully,
+    // OpenCL is already off for that thread (see above), so future allocations there fall to
+    // CPU. A thread that never called useHip() still has OpenCL on by default and is unaffected.
+    g_hipDisabled.store(true, std::memory_order_relaxed);
 }
 
 CV_EXPORTS MatAllocator* getHipAllocator()
@@ -364,6 +386,7 @@ CV_EXPORTS MatAllocator* getHipAllocator()
 namespace cv { namespace hip {
 bool isHipUMat(InputArray) { return false; }
 bool useHip() { return false; }
+void disableHip() {}
 MatAllocator* getHipAllocator() { return nullptr; }
 }} // cv::hip
 #endif
