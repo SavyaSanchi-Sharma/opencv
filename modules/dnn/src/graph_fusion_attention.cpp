@@ -99,7 +99,7 @@ struct ModelFusionAttention
         for (int k = 0; k < 2; k++) {
             Arg inp = inputs[k];
             if (netimpl->isConstArg(inp)) {
-                Mat t = netimpl->argTensor(inp).getMat(ACCESS_READ);
+                Mat t = netimpl->hostTensor(inp);
                 if (t.total() == 1 && t.type() == CV_32F) {
                     *val = t.at<float>(0);
                     return true;
@@ -143,7 +143,7 @@ struct ModelFusionAttention
                 bool runtime_seen = false;
                 for (Arg in : l->inputs) {
                     if (netimpl->isConstArg(in)) {
-                        Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
+                        Mat t = netimpl->hostTensor(in);
                         if (t.total() != 1) return false;
                         float v = 0.f;
                         if      (t.type() == CV_32F) v = t.at<float>(0);
@@ -190,7 +190,7 @@ struct ModelFusionAttention
     {
         auto readScalar = [&](Arg x) -> int {
             if (!netimpl->isConstArg(x)) return -1;
-            Mat t = netimpl->argTensor(x).getMat(ACCESS_READ);
+            Mat t = netimpl->hostTensor(x);
             if (t.total() != 1) return -1;
             if (t.type() == CV_64S) return (int)t.at<int64_t>(0);
             if (t.type() == CV_32S) return (int)t.at<int32_t>(0);
@@ -278,7 +278,7 @@ struct ModelFusionAttention
 
         int num_heads = -1;
         if (netimpl->isConstArg(shape_arg)) {
-            Mat shape_mat = netimpl->argTensor(shape_arg).getMat(ACCESS_READ);
+            Mat shape_mat = netimpl->hostTensor(shape_arg);
             if (shape_mat.total() != 4) return -1;
             num_heads = shape_mat.at<int64_t>(2);
         } else {
@@ -345,7 +345,7 @@ struct ModelFusionAttention
                 Mat b_candidate;
                 for (Arg in : prog[next]->inputs) {
                     if (netimpl->isConstArg(in)) {
-                        Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
+                        Mat t = netimpl->hostTensor(in);
                         if (t.type() == CV_32F && (int)t.total() == total_hidden)
                             b_candidate = t;
                     }
@@ -369,7 +369,7 @@ struct ModelFusionAttention
         int num_heads = -1, head_dim = -1;
         Arg shape_arg = rinputs[1];
         if (netimpl->isConstArg(shape_arg)) {
-            Mat sh = netimpl->argTensor(shape_arg).getMat(ACCESS_READ);
+            Mat sh = netimpl->hostTensor(shape_arg);
             if (sh.total() != 5) return false;
             const int64_t* sd = sh.ptr<int64_t>();
             if ((int)sd[2] != 3) return false;
@@ -410,7 +410,7 @@ struct ModelFusionAttention
             if (!g || g->axis != 0 || prog[c]->inputs.size() < 2) return false;
             Arg idx_arg = prog[c]->inputs[1];
             if (!netimpl->isConstArg(idx_arg)) return false;
-            Mat t = netimpl->argTensor(idx_arg).getMat(ACCESS_READ);
+            Mat t = netimpl->hostTensor(idx_arg);
             if (t.total() != 1) return false;
             int v;
             if      (t.type() == CV_64S) v = (int)t.at<int64_t>(0);
@@ -571,7 +571,7 @@ struct ModelFusionAttention
         Arg shape_arg_r4d = prog[r4d_idx]->inputs[1];
         int num_heads = -1;
         if (netimpl->isConstArg(shape_arg_r4d)) {
-            Mat shape_mat = netimpl->argTensor(shape_arg_r4d).getMat(ACCESS_READ);
+            Mat shape_mat = netimpl->hostTensor(shape_arg_r4d);
             if (shape_mat.total() != 4) return -1;
             if (shape_mat.type() == CV_64S)
                 num_heads = static_cast<int>(shape_mat.ptr<int64_t>()[2]);
@@ -605,7 +605,7 @@ struct ModelFusionAttention
             bool got_scale = false, got_runtime = false;
             for (Arg in : prog[mul_idx]->inputs) {
                 if (netimpl->isConstArg(in)) {
-                    Mat t = netimpl->argTensor(in).getMat(ACCESS_READ);
+                    Mat t = netimpl->hostTensor(in);
                     if (t.total() != 1) return -1;
                     if      (t.type() == CV_32F) out_q_scale = t.at<float>(0);
                     else if (t.type() == CV_64F) out_q_scale = (float)t.at<double>(0);
@@ -644,7 +644,7 @@ struct ModelFusionAttention
                 }
             }
             if (!got_bias || !got_runtime2) return -1;
-            out_bias = netimpl->argTensor(bias_arg).getMat(ACCESS_READ).clone();
+            out_bias = netimpl->hostTensor(bias_arg).clone();
             ops_consumed.insert(next_idx);
             mm_idx = stepProducer(matmul_out_arg);
         } else {
