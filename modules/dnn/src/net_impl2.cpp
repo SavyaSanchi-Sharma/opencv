@@ -625,6 +625,8 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
                                          "running the whole graph on CPU", graph->name().c_str()));
         }
     }
+    if (graph == mainGraph)
+        cudaPoolTemps = graphOnCuda;
 #endif
 
     for (i = 0; i < nops; i++) {
@@ -732,6 +734,8 @@ void Net::Impl::finalize()
     cudaArgBuffers.clear();
     cudaArgHostDirty.clear();
     cudaArgDeviceDirty.clear();
+    cudaTempBuffers.clear();
+    cudaPoolTemps = false;
     if (preferableBackend == DNN_BACKEND_CUDA && haveCUDA()) {
         useCUDA = true;
         if (!cudaInfo) {
@@ -1459,20 +1463,32 @@ int Net::Impl::cudaDeviceType(const Mat& hostMat) const
     return hostMat.type();
 }
 
+UMat& Net::Impl::cudaDeviceBuffer(Arg arg)
+{
+    if (cudaPoolTemps && argKind(arg) == DNN_ARG_TEMP) {
+        int bufidx = bufidxs.at(arg.idx);
+        CV_Assert(bufidx >= 0);
+        if (cudaTempBuffers.size() != buffers.size())
+            cudaTempBuffers.resize(buffers.size());
+        return cudaTempBuffers[bufidx];
+    }
+    return cudaArgBuffers[arg.idx];
+}
+
 UMat& Net::Impl::getCudaArgBuffer(Arg arg, const Mat& hostMat)
 {
-    int idx = arg.idx;
     if ((int)cudaArgBuffers.size() != (int)args.size()) {
         cudaArgBuffers.assign(args.size(), UMat());
         cudaArgHostDirty.assign(args.size(), 1);
         cudaArgDeviceDirty.assign(args.size(), 0);
+        cudaTempBuffers.clear();
     }
     // cuda4dnn tensors require at least one dimension; represent a rank-0 scalar
     // tensor as a 1-element 1D tensor so element-wise ops still see the single value.
     MatShape shape = hostMat.shape();
     if (shape.dims == 0)
         shape = MatShape({1});
-    UMat& g = cudaArgBuffers[idx];
+    UMat& g = cudaDeviceBuffer(arg);
     g.allocator = cuda::getCudaAllocator();
     g.fit(shape, cudaDeviceType(hostMat));
     if (g.u && g.u->currAllocator != g.allocator)
@@ -1516,7 +1532,7 @@ void Net::Impl::cudaDownloadArg(Arg arg, Mat& hostMat)
     if (idx < 0 || idx >= (int)cudaArgDeviceDirty.size())
         return;
     if (cudaArgDeviceDirty[idx]) {
-        const UMat& g = cudaArgBuffers[idx];
+        const UMat& g = cudaDeviceBuffer(arg);
         Mat dst = asAtLeast1D(hostMat);   // fill the scalar's storage through a 1D header
         cudaInfo->context.stream.synchronize();
         if (g.type() == dst.type()) {
@@ -1550,7 +1566,7 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
         if (inpMats[i].empty())
             continue;
         netimpl->cudaUploadArg(inputs[i], inpMats[i]);   // H2D only if host-authoritative
-        inpG[i] = netimpl->cudaArgBuffers[inputs[i].idx];
+        inpG[i] = netimpl->cudaDeviceBuffer(inputs[i]);
     }
     for (size_t i = 0; i < outputs.size(); i++) {
         outG[i] = netimpl->getCudaArgBuffer(outputs[i], outMats[i]);

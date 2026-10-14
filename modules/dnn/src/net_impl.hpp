@@ -310,11 +310,14 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<UMat> cudaArgBuffers;
     std::vector<uchar> cudaArgHostDirty;    // 1: host copy is authoritative -> needs H2D before device read
     std::vector<uchar> cudaArgDeviceDirty;  // 1: device copy is authoritative -> needs D2H before host read
+    std::vector<UMat> cudaTempBuffers;
+    bool cudaPoolTemps = false;
 
     // Device element type for a host tensor (half for float tensors under the FP16 target).
     int cudaDeviceType(const Mat& hostMat) const;
     // Returns the device buffer for @p arg, fit() to the host Mat's shape and device type.
     UMat& getCudaArgBuffer(Arg arg, const Mat& hostMat);
+    UMat& cudaDeviceBuffer(Arg arg);
     void cudaSetHostDirty(Arg arg);       // mark host authoritative (e.g. after a CPU op wrote it)
     void cudaUploadArg(Arg arg, const Mat& hostMat);   // H2D if host dirty
     void cudaDownloadArg(Arg arg, Mat& hostMat);       // D2H if device dirty
