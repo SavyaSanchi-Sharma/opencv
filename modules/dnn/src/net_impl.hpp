@@ -18,7 +18,6 @@
 #include <opencv2/dnn/layer_reg.private.hpp>
 
 #include <opencv2/core/utils/fp_control_utils.hpp>
-#include <opencv2/core/utils/host_device_buffer.private.hpp>
 
 #include <opencv2/core/utils/logger.hpp>
 
@@ -44,7 +43,6 @@ CV__DNN_INLINE_NS_BEGIN
 
 using std::make_pair;
 using std::string;
-using cv::utils::HostDeviceBuffer;
 
 typedef std::unordered_map<std::string, int64_t> NamesHash;
 
@@ -99,19 +97,6 @@ struct Net::Impl : public detail::NetImplBase
     // Inheritance support
     Ptr<Net::Impl> basePtr_;
 
-#ifdef HAVE_CUDA
-    struct CudaInfo_t
-    {
-        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt)
-            : context(std::move(ctxt))
-        {}
-        cuda4dnn::csl::CSLContext context;
-        cuda4dnn::csl::Workspace workspace;
-    };
-
-    std::unique_ptr<CudaInfo_t> cudaInfo;
-#endif
-
     Ptr<DataLayer> netInputLayer;
     std::vector<LayerPin> blobsToKeep;
     MapIdToLayerData layers;
@@ -146,10 +131,9 @@ struct Net::Impl : public detail::NetImplBase
     size_t totalLayers;
     std::vector<std::string> dimnames_vec;
     std::vector<ArgData> args;
-    std::vector<HostDeviceBuffer> __tensors__;
+    std::vector<Mat> __tensors__;
     std::vector<int> bufidxs;
-    std::unordered_map<int, int> declaredOutputTypes;
-    std::vector<HostDeviceBuffer> buffers;
+    std::vector<Mat> buffers;
     std::vector<Mat> scratchBufs;
     // interior tensors kept alive for forward-to-layer
     // See https://github.com/opencv/opencv/issues/26349
@@ -306,7 +290,34 @@ struct Net::Impl : public detail::NetImplBase
 #endif
 
 #ifdef HAVE_CUDA
+    struct CudaInfo_t
+    {
+        CudaInfo_t(cuda4dnn::csl::CSLContext ctxt)
+            : context(std::move(ctxt))
+        {}
+        cuda4dnn::csl::CSLContext context;
+        cuda4dnn::csl::Workspace workspace;
+    };
+
+    std::unique_ptr<CudaInfo_t> cudaInfo;
+
     void initCUDABackend(const std::vector<LayerPin>& blobsToKeep_);
+
+    // New graph engine: per-Arg device-resident tensors owned directly by the net (no backend
+    // wrappers). Sized lazily via UMat::fit() and reused across forwards. Dirty flags track
+    // which copy (host cv::Mat vs device UMat) is authoritative so transfers happen only at
+    // CPU<->CUDA boundaries; intermediates stay device-resident across consecutive CUDA ops.
+    std::vector<UMat> cudaArgBuffers;
+    std::vector<uchar> cudaArgHostDirty;    // 1: host copy is authoritative -> needs H2D before device read
+    std::vector<uchar> cudaArgDeviceDirty;  // 1: device copy is authoritative -> needs D2H before host read
+
+    // Device element type for a host tensor (half for float tensors under the FP16 target).
+    int cudaDeviceType(const Mat& hostMat) const;
+    // Returns the device buffer for @p arg, fit() to the host Mat's shape and device type.
+    UMat& getCudaArgBuffer(Arg arg, const Mat& hostMat);
+    void cudaSetHostDirty(Arg arg);       // mark host authoritative (e.g. after a CPU op wrote it)
+    void cudaUploadArg(Arg arg, const Mat& hostMat);   // H2D if host dirty
+    void cudaDownloadArg(Arg arg, Mat& hostMat);       // D2H if device dirty
 #endif
 
     #ifdef HAVE_ONNXRUNTIME
@@ -439,9 +450,7 @@ struct Net::Impl : public detail::NetImplBase
     Arg newConstScalarArg(const std::string& name, int type, const void* value);
     Arg newArg(const std::string& name, ArgKind kind, bool allowEmptyName=false);
     bool isConstArg(Arg arg) const;
-    HostDeviceBuffer& argTensor(Arg arg) const;
-    Mat hostTensor(Arg arg) const;
-    void setArgTensor(Arg arg, const Mat& m);
+    Mat& argTensor(Arg arg) const;
     int argType(Arg arg) const;
     void checkArg(Arg arg) const;
     void checkArgs(const std::vector<Arg>& args) const;
@@ -455,6 +464,7 @@ struct Net::Impl : public detail::NetImplBase
     // Save/restore the fused graph so finalize() is re-entrant across backend changes.
     void saveFusedSnapshot();
     void restoreFusedSnapshot();
+
     // pre-allocates memory for output tensors.
     // if useBufferPool==true, the method uses 'buffers'
     // for outputs (according to bufidxs)
@@ -470,8 +480,7 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<MatShape>& tempShapes,
                               std::vector<Mat>& temps, // [TODO] ditto
                               std::vector<Mat>& globalTemps,
-                              bool useBufferPool,
-                              int opBackend
+                              bool useBufferPool
                               );
 
     // set input of the model before running it
