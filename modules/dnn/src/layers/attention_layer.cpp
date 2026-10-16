@@ -26,6 +26,38 @@ static void packWeight(size_t num_heads, size_t head_size, size_t input_hidden_s
 }
 
 
+// Rotates one row of d values in place with its interleaved sin/cos table row.
+static void rotateRow(float* out_ptr, const float* table_ptr, size_t d)
+{
+    const size_t d_half = d / 2;
+    size_t i = 0;
+
+#if (CV_SIMD || CV_SIMD_SCALABLE)
+    const size_t w = VTraits<v_float32>::vlanes();
+    for (; i + w <= d_half; i += w)
+    {
+        v_float32 sin_v, cos_v, x_even, x_odd;
+        v_load_deinterleave(table_ptr + 2*i, sin_v, cos_v);
+        v_load_deinterleave(out_ptr    + 2*i, x_even, x_odd);
+
+        v_float32 out_even = v_sub(v_mul(cos_v, x_even), v_mul(sin_v, x_odd));
+        v_float32 out_odd  = v_add(v_mul(sin_v, x_even), v_mul(cos_v, x_odd));
+
+        v_store_interleave(out_ptr + 2*i, out_even, out_odd);
+    }
+#endif
+    // scalar tail
+    for (; i < d_half; ++i)
+    {
+        float s  = table_ptr[2*i  ];
+        float c  = table_ptr[2*i+1];
+        float xe = out_ptr[2*i];
+        float xo = out_ptr[2*i+1];
+        out_ptr[2*i]   = xe * c - xo * s;
+        out_ptr[2*i+1] = xo * c + xe * s;
+    }
+}
+
 static void rotationKernel(
     float* data, const float* rotation_table,
     size_t seq_len, size_t d
@@ -39,36 +71,7 @@ static void rotationKernel(
     auto fn = [&](const cv::Range& range)
     {
         for (int t = range.start; t < range.end; ++t)
-        {
-            float* out_ptr = data + size_t(t) * d;
-            const float* table_ptr = rotation_table + size_t(t) * d;
-            size_t i = 0;
-
-#if (CV_SIMD || CV_SIMD_SCALABLE)
-            const size_t w = VTraits<v_float32>::vlanes();
-            for (; i + w <= d_half; i += w)
-            {
-                v_float32 sin_v, cos_v, x_even, x_odd;
-                v_load_deinterleave(table_ptr + 2*i, sin_v, cos_v);
-                v_load_deinterleave(out_ptr    + 2*i, x_even, x_odd);
-
-                v_float32 out_even = v_sub(v_mul(cos_v, x_even), v_mul(sin_v, x_odd));
-                v_float32 out_odd  = v_add(v_mul(sin_v, x_even), v_mul(cos_v, x_odd));
-
-                v_store_interleave(out_ptr + 2*i, out_even, out_odd);
-            }
-#endif
-            // scalar tail
-            for (; i < d_half; ++i)
-            {
-                float s  = table_ptr[2*i  ];
-                float c  = table_ptr[2*i+1];
-                float xe = out_ptr[2*i];
-                float xo = out_ptr[2*i+1];
-                out_ptr[2*i]   = xe * c - xo * s;
-                out_ptr[2*i+1] = xo * c + xe * s;
-            }
-        }
+            rotateRow(data + size_t(t) * d, rotation_table + size_t(t) * d, d);
     };
     // This will spin up threads and run fn over [0, seq_len)
     parallel_for_(cv::Range(0, int(seq_len)), fn, nstripes);
@@ -249,11 +252,33 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
         qkv_hidden_sizes[2] = hidden_size - qkv_hidden_sizes[0] - qkv_hidden_sizes[1];
         qkv_head_sizes[2] = static_cast<size_t>(qkv_hidden_sizes[2] / num_heads);
 
+#ifdef HAVE_MLAS
+        // Constant weights run as one MLAS GEMM over all heads; the per-head packs are built only if packing fails.
+        if (!blobs.empty() && packQKVMlas(weight))
+            return;
+#endif
         const auto *weight_data = weight.ptr<const float>();
         packWeight(num_heads, qkv_head_sizes[0], input_hidden_size, weight_data,                                             hidden_size, packed_weight_q, opt);
         packWeight(num_heads, qkv_head_sizes[1], input_hidden_size, weight_data + qkv_hidden_sizes[0],                       hidden_size, packed_weight_k, opt);
         packWeight(num_heads, qkv_head_sizes[2], input_hidden_size, weight_data + qkv_hidden_sizes[0] + qkv_hidden_sizes[1], hidden_size, packed_weight_v, opt);
     }
+
+#ifdef HAVE_MLAS
+    // Packs the whole [input_hidden, hidden] weight for mlasSgemmPacked, as the Gemm layer does.
+    bool packQKVMlas(const Mat& weight) {
+        packed_qkv_mlas.release();
+        if (opt.use_rvv || weight.type() != CV_32F || !weight.isContinuous()) return false;
+        const int N = static_cast<int>(hidden_size), K = static_cast<int>(input_hidden_size);
+        const size_t packed_bytes = mlasSgemmPackBSize(false, false, N, K);
+        if (packed_bytes == 0 || packed_bytes > static_cast<size_t>(INT_MAX)) return false;
+        packed_qkv_mlas.create(1, static_cast<int>(packed_bytes), CV_8U);
+        if (!mlasSgemmPackB(false, false, N, K, weight.ptr<const float>(), N, packed_qkv_mlas.data)) {
+            packed_qkv_mlas.release();
+            return false;
+        }
+        return true;
+    }
+#endif
 
     // Dynamic weights (blobs empty) aren't available yet; forward() packs those.
     void prepackWeights() CV_OVERRIDE {
@@ -278,6 +303,44 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
         qkv_head_sizes[2] = static_cast<size_t>(qkv_hidden_sizes[2] / num_heads);
     }
 
+#ifdef HAVE_MLAS
+    // QKV = input * W in one GEMM over all heads, then bias add and head split in one pass.
+    void projectQKVMlas(const Mat& input, float* const (&QKV)[3], const float* bias_data, const Mat& rope_table) {
+        const int M = static_cast<int>(batch_size * seq_len);
+        const int N = static_cast<int>(hidden_size), K = static_cast<int>(input_hidden_size);
+        if (M == 0)
+            return;
+        qkv_rows.resize((size_t)M * N);
+        // Packing succeeded, so MLAS is available and N, K > 0; the GEMM cannot refuse.
+        const bool ok = mlasSgemmPacked(false, false, M, N, K, 1.f, input.ptr<const float>(), K,
+                                        packed_qkv_mlas.data, 0.f, qkv_rows.data(), N);
+        CV_Assert(ok);
+
+        const size_t seg_off[3] = {0, qkv_hidden_sizes[0], qkv_hidden_sizes[0] + qkv_hidden_sizes[1]};
+        const float* rows = qkv_rows.data();
+        const float* table = do_rotary ? rope_table.ptr<const float>() : nullptr;
+        parallel_for_(Range(0, M), [&](const Range& r) {
+            for (int m = r.start; m < r.end; m++) {
+                const size_t b = (size_t)m / seq_len, s = (size_t)m % seq_len;
+                const float* row = rows + (size_t)m * N;
+                for (int t = 0; t < 3; t++) {
+                    const size_t hd = qkv_head_sizes[t];
+                    for (size_t h = 0; h < num_heads; h++) {
+                        const float* src = row + seg_off[t] + h * hd;
+                        const float* bsrc = bias_data + seg_off[t] + h * hd;
+                        float* dst = QKV[t] + ((b * num_heads + h) * seq_len + s) * hd;
+                        for (size_t d = 0; d < hd; d++)
+                            dst[d] = src[d] + bsrc[d];
+                        // RoPE on Q/K while the row is hot; V is left untouched.
+                        if (table && t < 2)
+                            rotateRow(dst, table + s * hd, hd);
+                    }
+                }
+            }
+        }, (double)M * N * (1 / 1024.0));
+    }
+#endif
+
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
@@ -297,11 +360,9 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
         if (blobs.empty())
             packQKV(inputs[1]);
         // Const weight: pack once as fallback when prepackWeights() wasn't called.
-        else if (packed_weight_q.empty())
+        else if (packed_weight_q.empty() && packed_qkv_mlas.empty())
             packQKV(blobs.front());
 
-        float *packed_weights[3] = {packed_weight_q.data(), packed_weight_k.data(), packed_weight_v.data()};
-        size_t packed_weights_size[3] = {packed_weight_q.size() / num_heads, packed_weight_k.size() / num_heads, packed_weight_v.size() / num_heads};
         CV_Assert(internals.size() == 3 + (do_rotary ? 1 : 0));
 
         if (do_rotary)
@@ -318,14 +379,23 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
         auto *K = Q + batch_size * seq_len * qkv_hidden_sizes[0];
         auto *V = K + batch_size * seq_len * qkv_hidden_sizes[1];
         float *QKV[3] = {Q, K, V}; // [B, N, S, H] per tensor
-        {
+        const auto &bias = blobs.empty() ? inputs[2] : blobs.back();
+        // When do_rotary is false, internals.back() aliases output_buffer; harmless because rope_table is then unused.
+        const auto &rope_table = internals.back();
+        bool projected = false;
+#ifdef HAVE_MLAS
+        if (!packed_qkv_mlas.empty()) {
+            projectQKVMlas(inputs[0], QKV, bias.ptr<const float>(), rope_table);
+            projected = true;
+        }
+#endif
+        if (!projected) {
+            float *packed_weights[3] = {packed_weight_q.data(), packed_weight_k.data(), packed_weight_v.data()};
+            size_t packed_weights_size[3] = {packed_weight_q.size() / num_heads, packed_weight_k.size() / num_heads, packed_weight_v.size() / num_heads};
+
             const auto &input = inputs[0];
-            const auto &bias = blobs.empty() ? inputs[2] : blobs.back();
             const auto *input_data = input.ptr<const float>();
             const auto *bias_data = bias.ptr<const float>();
-
-            // When do_rotary is false, internals.back() aliases output_buffer; harmless because rope_table is then unused.
-            const auto &rope_table = internals.back();
 
             opt.multi_thread = false;
             auto fn = [&](const Range &r) {
@@ -564,6 +634,8 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
     std::vector<float> packed_weight_q;
     std::vector<float> packed_weight_k;
     std::vector<float> packed_weight_v;
+    Mat packed_qkv_mlas;            // whole QKV weight packed by mlasSgemmPackB; empty when unused
+    std::vector<float> qkv_rows;    // [B*S, hidden] GEMM output before the head split
     std::vector<unsigned char> flash_scratch;
 
     FastGemmOpt opt;
