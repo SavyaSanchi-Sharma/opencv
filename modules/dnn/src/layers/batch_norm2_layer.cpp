@@ -372,9 +372,21 @@ public:
     BatchNorm2LayerImpl(const LayerParams& params) {
         registerFusionOpsOnce<BatchNorm2LayerImpl>(
             { &BatchNorm2LayerImpl::unfoldOp, nullptr, false, nullptr,
-              &BatchNorm2LayerImpl::ownedBuffersOp });
+              &BatchNorm2LayerImpl::ownedBuffersOp, &BatchNorm2LayerImpl::asAffineOp });
         setParamsFrom(params);
         epsilon = params.get<float>("epsilon", 1e-5);
+    }
+
+    static bool asAffineOp(const Layer* self, Mat& scale, Mat& shift, Arg& dataInput)
+    {
+        auto* bn = const_cast<BatchNorm2LayerImpl*>(static_cast<const BatchNorm2LayerImpl*>(self));
+        if (bn->inputs.size() != 1 && !bn->freezeScaleBias())
+            return false;
+        bn->getScaleBias(scale, shift);
+        if (scale.empty() || shift.empty())
+            return false;
+        dataInput = bn->inputs[0];
+        return true;
     }
 
     //! Only once freezeScaleBias() has run; before it the members are empty.
