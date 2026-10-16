@@ -1339,13 +1339,24 @@ CV_EXPORTS_W void printShortCudaDeviceInfo(int device);
 @note
   Assign it to @ref cv::UMat::allocator "UMat::allocator" before the data is allocated. Host
   and device copies are kept in sync with synchronous cudaMemcpy calls and the buffers are
-  always packed and continuous. The allocator provides device storage only: no cv:: function
-  dispatches to CUDA for UMat input, and because the T-API branch tests only whether OpenCL
-  is active it would hand the CUDA pointer to the OpenCL driver, so
-  cv::ocl::setUseOpenCL(false) is required. UMatUsageFlags are ignored.
+  always packed and continuous. Where a cv:: function has a non-CPU HAL backend built in, the
+  call is dispatched to CUDA ahead of the OpenCL branch, so a CUDA pointer is never handed to
+  the OpenCL driver; functions without such a backend map the data back to the host and run
+  the CPU implementation. UMatUsageFlags are ignored.
 @return the allocator, or NULL when OpenCV is built without CUDA support
 */
 CV_EXPORTS MatAllocator* getCudaAllocator();
+
+/** @brief Reports whether an array is a 2D UMat whose storage is currently owned by
+cv::cuda::getCudaAllocator() and whose device copy is up to date.
+
+True only when the buffer can be handed to a CUDA kernel as-is: continuous, zero offset,
+not mapped to the host, device copy not stale. This is the residency test the non-CPU HAL
+dispatch uses to decide whether a cv:: call can stay on the device.
+@param arr array to test
+@return true when the array is CUDA-resident and directly usable, false otherwise
+*/
+CV_EXPORTS bool isCudaUMat(InputArray arr);
 
 //! @} cudacore_init
 
