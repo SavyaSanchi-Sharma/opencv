@@ -3760,6 +3760,17 @@ int Kernel::set(int i, const KernelArg& arg)
             CV_OCL_DBG_CHECK_RESULT(status, cv::format("clSetKernelArg('%s', arg_index=%d, cl_mem=NULL)", p->name.c_str(), (int)i).c_str());
             return i + 1;
         }
+        // A UMat owned by another backend (HIP, CUDA) does not hold a cl_mem; only ops that
+        // explicitly check isHipUMat() etc. are allowed to feed it to a non-OpenCL kernel.
+        if (arg.m->u && arg.m->u->currAllocator != getOpenCLAllocator())
+        {
+            CV_LOG_ERROR(NULL, cv::format("OpenCL: Kernel(%s)::set(arg_index=%d, flags=%d): UMat buffer belongs to a non-OpenCL allocator (addr=%p)",
+                    p->name.c_str(), (int)i, (int)arg.flags, arg.m));
+            p->release();
+            p = 0;
+            return -1;
+        }
+
         cl_mem h = (cl_mem)arg.m->handle(accessFlags);
 
         if (!h)

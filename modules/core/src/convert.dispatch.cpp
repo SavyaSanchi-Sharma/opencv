@@ -4,9 +4,28 @@
 
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
+#ifdef HAVE_HIP
+#  include "opencv2/core/hip.hpp"
+#  include "opencv2/core/utils/logger.hpp"
+#endif
 
 #include "convert.simd.hpp"
 #include "convert.simd_declarations.hpp" // defines CV_CPU_DISPATCH_MODES_ALL=AVX2,...,BASELINE based on CMakeLists.txt content
+
+#ifdef HAVE_HIP
+namespace {
+// Forces ocl::useOpenCL() on for this thread for the lifetime of the guard, then restores
+// whatever it was. RAII so a throw while staging onto OpenCL (e.g. mapping a HIP buffer whose
+// context is poisoned by a prior sticky error) can't leave OpenCL enabled on a thread that
+// still has live HIP UMats.
+struct ScopedForceOpenCL
+{
+    bool prev;
+    ScopedForceOpenCL() : prev(cv::ocl::useOpenCL()) { cv::ocl::setUseOpenCL(true); }
+    ~ScopedForceOpenCL() { cv::ocl::setUseOpenCL(prev); }
+};
+} // namespace
+#endif
 
 namespace cv {
 
@@ -222,6 +241,73 @@ void UMat::convertTo(OutputArray dst, int type_, double alpha, double beta) cons
         return;
     }
 
+#ifdef HAVE_HIP
+    if (dims <= 2 && cv::hip::isHipUMat(*this) && dst.isUMat() && CV_MAT_CN(type()) <= 4)
+    {
+        int stype = type();
+        int sdepth = CV_MAT_DEPTH(stype);
+        int ddepth = type_ >= 0 ? CV_MAT_DEPTH(type_) : (dst.fixedType() ? dst.depth() : sdepth);
+        bool noScale = std::fabs(alpha - 1) < DBL_EPSILON && std::fabs(beta) < DBL_EPSILON;
+        if (sdepth == ddepth && noScale)
+        {
+            copyTo(dst);
+            return;
+        }
+        // HIP kernel tables cover CV_8U..CV_64F only; newer 5.x depths fall through to OpenCL/CPU.
+        if (sdepth <= CV_64F && ddepth <= CV_64F)
+        {
+            int dtype = CV_MAKE_TYPE(ddepth, CV_MAT_CN(stype));
+            // Reference-counted copy of the source, taken before dst.create(): when dst aliases
+            // *this (u.convertTo(u, otherType)) and the type actually changes, create() reallocates
+            // *this, so reading u->handle afterwards would hit the new, uninitialized buffer.
+            UMat src = *this;
+            dst.create(size(), dtype);
+            UMat dstUMat = dst.getUMat();
+            if (cv::hip::isHipUMat(dstUMat))
+            {
+                try
+                {
+                    // Apply alpha*x + beta on the device (the no-scale case returned above).
+                    // Each handle is the base of its parent allocation; offset selects the ROI.
+                    cv::hip::device::convertToScale((uchar*)src.u->handle + src.offset, src.step[0], stype,
+                                                    (uchar*)dstUMat.u->handle + dstUMat.offset,
+                                                    dstUMat.step[0], dtype,
+                                                    rows, cols, alpha, beta);
+                    dstUMat.u->markHostCopyObsolete(true);
+                    return;
+                }
+                catch (const cv::Exception& e)
+                {
+                    CV_LOG_WARNING(NULL, "HIP convertTo failed, disabling HIP and retrying on OpenCL: " << e.what());
+                    cv::hip::disableHip();
+                    if (cv::ocl::haveOpenCL())
+                    {
+                        // HIP has no zero-copy interop with OpenCL, so stage src through a temporary
+                        // OpenCL-resident scratch copy (host round-trip) and run the conversion there.
+                        // dst stays HIP-resident (per-call only): push the result back with a plain
+                        // host-to-device copy, not a kernel call, so this step can't fail the same way.
+                        UMat tmpDst;
+                        {
+                            ScopedForceOpenCL forceOcl;
+                            UMat tmpSrc;
+                            src.getMat(ACCESS_READ).copyTo(tmpSrc);
+                            tmpSrc.convertTo(tmpDst, dtype, alpha, beta);
+                        }
+                        tmpDst.getMat(ACCESS_READ).copyTo(dstUMat);
+                        return;
+                    }
+                }
+            }
+            // Either dst isn't HIP-resident, OpenCL isn't available, or the kernel just failed:
+            // *this may already be the reallocated (uninitialized) buffer from dst.create() above,
+            // so convert from src, the reference-counted copy taken before that call, not from
+            // *this. Does not fall through to the generic path below, which reads *this and would
+            // hit the same hazard.
+            src.getMat(ACCESS_READ).convertTo(dst, dtype, alpha, beta);
+            return;
+        }
+    }
+#endif
 #ifdef HAVE_OPENCL
     int stype = type();
     int sdepth = CV_MAT_DEPTH(stype);
