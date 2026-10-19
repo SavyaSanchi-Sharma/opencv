@@ -42,6 +42,9 @@ bool getParam_DNN_CHECK_NAN_INF();
 bool getParam_DNN_CHECK_NAN_INF_DUMP();
 bool getParam_DNN_CHECK_NAN_INF_RAISE_ERROR();
 
+bool getParam_DNN_CUDA_FMA_MATH();
+bool getParam_DNN_CUDA_COST_MODEL();
+
 
 inline namespace detail {
 
