@@ -112,6 +112,7 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace csl { namespace cu
         return stride;
     }
 
+<<<<<<< HEAD
     /** wraps one finalized op in an op graph and keeps the first heuristic engine config whose plan compiles
      *
      * With \p strictFP32 set, engines that run FP32 on tensor cores (TF32) are skipped; the fallback heuristic
