@@ -316,6 +316,43 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 /* cuDNN's runtime-compiled kernels give wrong results on NCHW strides once a differently
                  * shaped one has run (FP32 and FP16), so every conv convolves NHWC copies and a KRSC filter */
                 jit_params.channels_last = true;
+<<<<<<< HEAD
+||||||| parent of 8f1aa793b3 (fixed the failing jit tests)
+                /* cuDNN's runtime-compiled FP16 grouped kernels give wrong results on NCHW strides once a
+                 * differently shaped one has run, so those convolve NHWC copies and a KRSC filter instead */
+                jit_params.channels_last = std::is_same<T, half>::value && groups > 1;
+                if (jit_params.channels_last)
+                {
+                    /* [N, C, spatial...] -> [N, spatial..., C] */
+                    auto toChannelLast = [](const std::vector<std::size_t>& v) {
+                        std::vector<std::size_t> out;
+                        out.push_back(v[0]);
+                        out.insert(out.end(), v.begin() + 2, v.end());
+                        out.push_back(v[1]);
+                        return out;
+                    };
+                    jitNchwToNhwcOrder = { 0 };
+                    for (std::size_t k = 2; k < rank; k++) jitNchwToNhwcOrder.push_back(k);
+                    jitNchwToNhwcOrder.push_back(1);
+                    jitNhwcToNchwOrder = { 0, rank - 1 };
+                    for (std::size_t k = 1; k < rank - 1; k++) jitNhwcToNchwOrder.push_back(k);
+=======
+                if (jit_params.channels_last)
+                {
+                    /* [N, C, spatial...] -> [N, spatial..., C] */
+                    auto toChannelLast = [](const std::vector<std::size_t>& v) {
+                        std::vector<std::size_t> out;
+                        out.push_back(v[0]);
+                        out.insert(out.end(), v.begin() + 2, v.end());
+                        out.push_back(v[1]);
+                        return out;
+                    };
+                    jitNchwToNhwcOrder = { 0 };
+                    for (std::size_t k = 2; k < rank; k++) jitNchwToNhwcOrder.push_back(k);
+                    jitNchwToNhwcOrder.push_back(1);
+                    jitNhwcToNchwOrder = { 0, rank - 1 };
+                    for (std::size_t k = 1; k < rank - 1; k++) jitNhwcToNchwOrder.push_back(k);
+>>>>>>> 8f1aa793b3 (fixed the failing jit tests)
 
                 /* [N, C, spatial...] -> [N, spatial..., C] */
                 auto toChannelLast = [](const std::vector<std::size_t>& v) {
