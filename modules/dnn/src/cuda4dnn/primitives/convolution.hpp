@@ -342,7 +342,6 @@ namespace cv { namespace dnn { namespace cuda4dnn {
                 else
                     kernels::permute<T>(stream, jitFilterKRSC, filter_oihw, jitNchwToNhwcOrder);
 
-
                 jitConvoluter = csl::cudnn::ConvolutionGraph<T>(cudnnHandle, jit_params);
             }
 #endif
