@@ -2286,8 +2286,8 @@ TEST_P(Test_ONNX_conformance, Layer_Test)
         return true;
     };
 
-    // CUDA FP16 rounds float inputs to half on upload; when that alone puts the reference out of
-    // reach (e.g. 10001 -> 10000), FP32 math on the half-rounded inputs is an accepted fallback
+    // CUDA FP16 rounds float inputs and outputs to half; when that alone puts the reference out of
+    // reach (e.g. 10001 -> 10000), FP32 math on half-rounded inputs, output rounded too, is accepted
     std::vector<Mat> halfRefOutputs;
     if (target == DNN_TARGET_CUDA_FP16 && checkAccuracy)
     {
@@ -2318,6 +2318,13 @@ TEST_P(Test_ONNX_conformance, Layer_Test)
             // the CPU result is trusted as a fallback only if it reproduces the reference first
             if (anyFloat && matches(cpuForward(inputs), ref_outputs)) {
                 std::vector<Mat> halfRef = cpuForward(halfInputs);
+                for (Mat& m : halfRef) {
+                    if (m.depth() != CV_32F)
+                        continue;
+                    Mat h;
+                    m.convertTo(h, CV_16F);
+                    h.convertTo(m, CV_32F);
+                }
                 if (!matches(halfRef, ref_outputs))
                     halfRefOutputs = halfRef;
             }

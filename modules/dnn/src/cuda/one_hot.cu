@@ -36,7 +36,8 @@ namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
                 const std::int64_t outer = i / inner;
                 const std::int64_t d = outer % depth;
                 const std::int64_t hi = outer / depth;
-                std::int64_t v = static_cast<std::int64_t>(indices.data().get()[hi * inner + lo]) % depth;
+                // only [-depth, depth-1] is valid; anything else matches no d and stays all off_value
+                std::int64_t v = static_cast<std::int64_t>(indices.data().get()[hi * inner + lo]);
                 if (v < 0)
                     v += depth;
                 output[id] = (v == d) ? on_value : off_value;
