@@ -9,6 +9,8 @@
 
 #include "math.hpp"
 
+#include <type_traits>
+
 #include "../cuda4dnn/csl/nvcc_defs.hpp"
 
 namespace cv { namespace dnn { namespace cuda4dnn { namespace kernels {
@@ -604,6 +606,24 @@ struct GeluFunctor {
 };
 
 template <class T>
+struct GeluApproximationFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() { }
+    };
+
+    CUDA4DNN_DEVICE GeluApproximationFunctor() { }
+    CUDA4DNN_DEVICE GeluApproximationFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T value) {
+        using csl::device::tanh;
+        constexpr float GELU_TANH_COEF = 0.044715f;  // cubic term of the tanh approximation
+        const T sqrt_2_pi = static_cast<T>(M_2_SQRTPI * M_SQRT1_2);
+        const T inner = sqrt_2_pi * (value + static_cast<T>(GELU_TANH_COEF) * value * value * value);
+        return static_cast<T>(0.5f) * value * (static_cast<T>(1.f) + tanh(inner));
+    }
+};
+
+template <class T>
 struct ThresholdedReluFunctor {
     struct Params {
         CUDA4DNN_HOST_DEVICE Params() : alpha(1) { }
@@ -833,6 +853,62 @@ struct FModFunctor {
     }
 };
 
+// ONNX PRelu with a broadcast slope: y is the slope
+template <class T>
+struct PReluFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() {}
+    };
+
+    CUDA4DNN_DEVICE PReluFunctor() { }
+    CUDA4DNN_DEVICE PReluFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T x, T y) {
+        // an unsigned value is never negative, so PRelu passes it through
+        if constexpr (std::is_unsigned<T>::value)
+            return x;
+        else
+            return x >= T(0) ? x : T(x * y);
+    }
+};
+
+// bitwise functors are instantiated for integer types only
+template <class T>
+struct BitAndFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() {}
+    };
+
+    CUDA4DNN_DEVICE BitAndFunctor() { }
+    CUDA4DNN_DEVICE BitAndFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T x, T y) { return x & y; }
+};
+
+template <class T>
+struct BitOrFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() {}
+    };
+
+    CUDA4DNN_DEVICE BitOrFunctor() { }
+    CUDA4DNN_DEVICE BitOrFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T x, T y) { return x | y; }
+};
+
+template <class T>
+struct BitXorFunctor {
+    struct Params {
+        CUDA4DNN_HOST_DEVICE Params() {}
+    };
+
+    CUDA4DNN_DEVICE BitXorFunctor() { }
+    CUDA4DNN_DEVICE BitXorFunctor(const Params& params) { }
+
+    CUDA4DNN_DEVICE T operator()(T x, T y) { return x ^ y; }
+};
+
 template <class T>
 struct PowFunctor {
     struct Params {
@@ -847,6 +923,12 @@ struct PowFunctor {
         return pow(x, y);
     }
 };
+
+// powf is not correctly rounded and its last bit differs across CUDA versions; double rounds back to the CPU result
+template <>
+inline CUDA4DNN_DEVICE float PowFunctor<float>::operator()(float x, float y) {
+    return static_cast<float>(::pow(static_cast<double>(x), static_cast<double>(y)));
+}
 
 }}}} /* namespace cv::dnn::cuda4dnn::kernels */
 

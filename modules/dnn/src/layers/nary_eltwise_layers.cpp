@@ -21,6 +21,7 @@
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/eltwise.hpp"
+#include "../cuda4dnn/primitives/logical.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -330,6 +331,64 @@ public:
 #endif
 
         if (backendId == DNN_BACKEND_CUDA) {
+            if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL ||
+                op == OPERATION::LESS || op == OPERATION::LESS_EQUAL || op == OPERATION::AND ||
+                op == OPERATION::OR || op == OPERATION::XOR || op == OPERATION::WHERE) {
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_)
+                    return false;
+                std::vector<int> types;
+                for (const Arg& a : inputs)
+                    types.push_back(netimpl_->argData(a).type);
+                // an intermediate arg has no type until the first forward; refuse only known mismatches
+                auto isCudaType = [](int t) {
+                    return t < 0 || t == CV_Bool || t == CV_32F || t == CV_16F || t == CV_8S ||
+                           t == CV_8U || t == CV_32S || t == CV_64S;
+                };
+                auto isBool = [](int t) { return t < 0 || t == CV_Bool; };
+                auto sameType = [](int a, int b) { return a < 0 || b < 0 || a == b; };
+                if (op == OPERATION::WHERE)
+                    return types.size() == 3 && isBool(types[0]) && sameType(types[1], types[2]) &&
+                           isCudaType(types[1]) && isCudaType(types[2]);
+                if (types.size() != 2 || !sameType(types[0], types[1]))
+                    return false;
+                if (op == OPERATION::AND || op == OPERATION::OR || op == OPERATION::XOR)
+                    return isBool(types[0]) && isBool(types[1]);
+                return isCudaType(types[0]) && isCudaType(types[1]);
+            }
+            if (op == OPERATION::BITWISE_AND || op == OPERATION::BITWISE_OR || op == OPERATION::BITWISE_XOR ||
+                op == OPERATION::PRELU || op == OPERATION::MEAN) {
+                // EltwiseOp reads every input as one element type
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_ || inputs.size() < 2 || (op != OPERATION::MEAN && inputs.size() != 2))
+                    return false;
+                int t0 = -1;
+                for (const Arg& a : inputs) {
+                    const int t = netimpl_->argData(a).type;
+                    if (t < 0)
+                        continue;
+                    if (t0 >= 0 && t != t0)
+                        return false;
+                    t0 = t;
+                }
+                if (t0 < 0)
+                    return true;
+                if (op == OPERATION::MEAN)
+                    return t0 == CV_32F || t0 == CV_16F;  // integer 1/n weights would truncate to 0
+                const bool isInt = t0 == CV_8S || t0 == CV_8U || t0 == CV_32S || t0 == CV_64S;
+                if (op == OPERATION::PRELU)
+                    return isInt || t0 == CV_32F || t0 == CV_16F;
+                return isInt;
+            }
+            if (op == OPERATION::POW) {
+                // EltwiseOp reads base and exponent as one float type
+                Net::Impl* netimpl_ = getNetImpl(this);
+                if (!netimpl_ || inputs.size() != 2)
+                    return false;
+                const int tb = netimpl_->argData(inputs[0]).type, te = netimpl_->argData(inputs[1]).type;
+                auto isFloat = [](int t) { return t < 0 || t == CV_32F || t == CV_16F; };
+                return isFloat(tb) && isFloat(te) && (tb < 0 || te < 0 || tb == te);
+            }
             return op == OPERATION::MAX  || op == OPERATION::MIN  || op == OPERATION::SUM ||
                    op == OPERATION::PROD || op == OPERATION::DIV  || op == OPERATION::ADD ||
                    op == OPERATION::SUB  || op == OPERATION::MOD || op == OPERATION::FMOD;
@@ -1533,6 +1592,30 @@ public:
         std::vector<UMat> inputs;
         inputs_.getUMatVector(inputs);
 
+        if (op == OPERATION::WHERE) {
+            if (inputs[1].depth() == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::WhereOp>(std::move(context->stream));
+            return make_cuda_node_with_type<cuda4dnn::WhereOp>(preferableTarget, inputs[1].type(), std::move(context->stream));
+        }
+        if (op == OPERATION::AND || op == OPERATION::OR || op == OPERATION::XOR) {
+            const cuda4dnn::LogicalOpType logicalOp = op == OPERATION::AND ? cuda4dnn::LogicalOpType::AND :
+                                                      op == OPERATION::OR  ? cuda4dnn::LogicalOpType::OR :
+                                                                             cuda4dnn::LogicalOpType::XOR;
+            return make_cuda_node_bool<cuda4dnn::LogicalOp>(std::move(context->stream), logicalOp);
+        }
+        if (op == OPERATION::EQUAL || op == OPERATION::GREATER || op == OPERATION::GREATER_EQUAL ||
+            op == OPERATION::LESS || op == OPERATION::LESS_EQUAL) {
+            const cuda4dnn::CompareOpType compareOp =
+                op == OPERATION::EQUAL         ? cuda4dnn::CompareOpType::EQUAL :
+                op == OPERATION::GREATER       ? cuda4dnn::CompareOpType::GREATER :
+                op == OPERATION::GREATER_EQUAL ? cuda4dnn::CompareOpType::GREATER_EQUAL :
+                op == OPERATION::LESS          ? cuda4dnn::CompareOpType::LESS :
+                                                 cuda4dnn::CompareOpType::LESS_EQUAL;
+            if (inputs[0].depth() == CV_Bool)
+                return make_cuda_node_bool<cuda4dnn::CompareOp>(std::move(context->stream), compareOp);
+            return make_cuda_node_with_type<cuda4dnn::CompareOp>(preferableTarget, inputs[0].type(), std::move(context->stream), compareOp);
+        }
+
         cuda4dnn::EltwiseOpType op_ = cuda4dnn::EltwiseOpType::SUM;
         switch (op) {
             case OPERATION::MAX:
@@ -1565,10 +1648,29 @@ public:
             case OPERATION::POW:
                 op_ = cuda4dnn::EltwiseOpType::POW;
                 break;
+            case OPERATION::PRELU:
+                op_ = cuda4dnn::EltwiseOpType::PRELU;
+                break;
+            case OPERATION::BITWISE_AND:
+                op_ = cuda4dnn::EltwiseOpType::BIT_AND;
+                break;
+            case OPERATION::BITWISE_OR:
+                op_ = cuda4dnn::EltwiseOpType::BIT_OR;
+                break;
+            case OPERATION::BITWISE_XOR:
+                op_ = cuda4dnn::EltwiseOpType::BIT_XOR;
+                break;
+            case OPERATION::MEAN:
+                op_ = cuda4dnn::EltwiseOpType::SUM;
+                break;
             default: return Ptr<BackendNode>(); // return empty cuda_node if the EltwiseOpType is unsupported type.
         };
 
-        return make_cuda_node_with_type<cuda4dnn::EltwiseOp>(preferableTarget, CV_MAT_DEPTH(inputs[0].type()), std::move(context->stream), op_, std::vector<float>());
+        // Mean is a sum weighted by 1/n
+        std::vector<float> coeffs;
+        if (op == OPERATION::MEAN)
+            coeffs.assign(inputs.size(), 1.f / (float)inputs.size());
+        return make_cuda_node_with_type<cuda4dnn::EltwiseOp>(preferableTarget, CV_MAT_DEPTH(inputs[0].type()), std::move(context->stream), op_, coeffs);
     }
 #endif
 

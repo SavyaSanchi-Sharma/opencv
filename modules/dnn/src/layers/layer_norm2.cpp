@@ -6,7 +6,13 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "cpu_kernels/fast_norm.hpp"
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/layer_norm.hpp"
+#endif
 
 namespace cv {
 namespace dnn {
@@ -29,8 +35,59 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // LayerNormOp copies its float Mean/InvStdDev scratch to the optional outputs
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || inputs.empty() || outputs.empty() || outputs.size() > 3)
+                return false;
+            if (outputs.size() > 1) {
+                if (netimpl_->preferableTarget == DNN_TARGET_CUDA_FP16)
+                    return false;
+                for (size_t k = 1; k < outputs.size(); k++) {
+                    const int ot = outputs[k].empty() ? -1 : netimpl_->argData(outputs[k]).type;
+                    if (ot >= 0 && ot != CV_32F)
+                        return false;
+                }
+            }
+            // weights are either all constant blobs or all runtime inputs
+            const bool constWeights = inputs.size() == 1 && (blobs.size() == 1 || blobs.size() == 2);
+            const bool inputWeights = blobs.empty() && (inputs.size() == 2 || inputs.size() == 3);
+            if (!constWeights && !inputWeights)
+                return false;
+            // an intermediate arg has no type until the first forward; refuse only a known non-float one
+            for (const Arg& a : inputs) {
+                const int t = netimpl_->argData(a).type;
+                if (t >= 0 && t != CV_32F)
+                    return false;
+            }
+            for (const Mat& b : blobs)
+                if (b.type() != CV_32F)
+                    return false;
+            return true;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays inputs_arr,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+        const MatShape inpShape = inputs_arr.shape(0);
+        const int axis_ = normalize_axis(axis0, inpShape.dims);
+        const size_t loops = static_cast<size_t>(total(inpShape, 0, axis_));
+
+        // a single blob is the scale only; do not reuse it as the bias
+        const Mat scale = blobs.empty() ? Mat() : blobs.front();
+        const Mat bias = blobs.size() >= 2 ? blobs.back() : Mat();
+
+        return make_cuda_node<cuda4dnn::LayerNormOp>(preferableTarget, std::move(context->stream),
+                                                     scale, bias, axis_, epsilon, loops);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,
