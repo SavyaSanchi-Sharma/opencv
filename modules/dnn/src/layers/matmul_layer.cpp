@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../net_impl.hpp"
 #include "cpu_kernels/fusion_apply.hpp"
 
 #include <type_traits>
@@ -20,6 +21,7 @@
 // CUDA backend
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/matmul_broadcast.hpp"
+#include "fusion_cuda.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -65,12 +67,54 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.expr)
+#ifdef HAVE_CUDA
+        // CUDA runs a fused activation or scale/shift after the MatMul; N is known for a constant B
+        const int N = (blobs.empty() || blobs[0].dims < 2) ? -1
+                      : blobs[0].size[blobs[0].dims - (trans_b ? 2 : 1)];
+        const bool cudaFusion = backendId == DNN_BACKEND_CUDA && cudaSupportsFusion(fusion, N);
+#else
+        const bool cudaFusion = false;
+#endif
+        if (fusion.expr && !cudaFusion)
             return backendId == DNN_BACKEND_OPENCV;
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // classic-engine nets carry no graph args to inspect; keep their previous answer
+            if (inputs.empty())
+                return true;
+            // MatMulBroadcastOp applies neither alpha nor a scaled bias, and adds the bias without broadcasting
+            if (alpha != 1.f || beta != 1.f)
+                return false;
+            const bool constB = inputs.size() == 1 && (blobs.size() == 1 || blobs.size() == 2);
+            const bool inputB = blobs.empty() && inputs.size() == 2;
+            if (!constB && !inputB)
+                return false;
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_)
+                return false;
+            // an intermediate arg has no type until the first forward; refuse only a known non-float one
+            for (const Arg& a : inputs) {
+                const int t = netimpl_->argData(a).type;
+                if (t >= 0 && t != CV_32F)
+                    return false;
+            }
+            for (const Mat& b : blobs)
+                if (b.type() != CV_32F)
+                    return false;
+            // gemmBatched reads the last two axes of A, B and Y; 1-D operands stay on CPU
+            for (const Arg& a : inputs) {
+                const int dims = netimpl_->argData(a).shape.dims;
+                if (dims >= 0 && dims < 2)
+                    return false;
+            }
+            if (!blobs.empty() && blobs[0].dims < 2)
+                return false;
+            return true;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !trans_a && !trans_b) ||
-               backendId == DNN_BACKEND_CUDA ||
                backendId == DNN_BACKEND_CANN;
     }
 
@@ -234,7 +278,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
             B_mat = &promoted_B;
         }
 
-        if (B_mat && B_mat->data != last_packed_input_B_data) {
+        if (B_mat && helper.N > 0 && helper.K > 0 && B_mat->data != last_packed_input_B_data) {
             packed_input_B.clear();
             packed_input_B.shrink_to_fit();
             thin_packed_B.clear();
@@ -264,8 +308,10 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 auto *broadcast_bias_ptr = broadcast_bias.ptr<float>();
 
                 const auto *bias = bias_mat.ptr<const float>();
+                // Stored unscaled: forward() applies beta once (gemm beta or explicitly), and the
+                // OpenCL/nGraph/CUDA paths add scaledBroadcastBias() instead.
                 if (bias_mat.total() == 1) { // [], [1], [1, ...]
-                    float b = (*bias) * beta;
+                    float b = *bias;
                     for (size_t i = 0; i < broadcast_bias.total(); i++) {
                         broadcast_bias_ptr[i] = b;
                     }
@@ -275,7 +321,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                     for (size_t i = 0; i < loops; i++) {
                         size_t step = i * inner_size;
                         for (size_t j = 0; j < inner_size; j++) {
-                            broadcast_bias_ptr[step + j] = beta * bias[j];
+                            broadcast_bias_ptr[step + j] = bias[j];
                         }
                     }
                 } else {
@@ -340,14 +386,19 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
         const auto *a = A.ptr<const float>();
         auto *y = Y.ptr<float>();
+        // Without a bias the gemm overwrites Y (beta = 0), so Y needs no zero-fill.
+        const bool has_bias = (inputs.size() + blobs.size()) >= 3;
+        const float gemm_beta = has_bias ? beta : 0.f;
         // add bias if existed
-        if ((inputs.size() + blobs.size()) >= 3) {
+        if (has_bias) {
             const auto &shape_Y = shape(Y);
+            // Stored unscaled here; beta is applied exactly once below, either by the gemm's
+            // own beta (M, N, K all > 0) or explicitly when the gemm is skipped.
             if (blobs.empty()) { // bias from input
                 const auto &bias_mat = inputs.back();
                 const auto *bias = bias_mat.ptr<const float>();
                 if (bias_mat.total() == 1) { // [], [1], [1, ...]
-                    float b = (*bias) * beta;
+                    float b = *bias;
                     for (size_t i = 0; i < Y.total(); i++) {
                         y[i] = b;
                     }
@@ -358,7 +409,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                         for (int i = r.start; i < r.end; i++) {
                             const size_t output_offset = i * inner_size;
                             for (size_t j = 0; j < inner_size; j++) {
-                                y[output_offset + j] = beta * bias[j];
+                                y[output_offset + j] = bias[j];
                             }
                         }
                     }, double(batches * inner_size * (1 / 1024.0)));
@@ -369,8 +420,18 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 const auto *bias = broadcast_bias.ptr<const float>();
                 std::memcpy(y, bias, total(shape_Y) * sizeof(float));
             }
-        } else {
-            std::memset(y, 0, Y.total() * sizeof(float));
+        }
+        // Any of M, N, K == 0 means the product contributes nothing, and finalize()
+        // skips packing B whenever N or K is 0 - never reach the gemm dispatch (and its own
+        // beta) below, so apply beta to the bias prefill here instead.
+        if (helper.M == 0 || helper.N == 0 || helper.K == 0) {
+            if (!has_bias)
+                std::memset(y, 0, Y.total() * sizeof(float));
+            else if (beta != 1.f)
+                for (size_t i = 0; i < Y.total(); i++)
+                    y[i] *= beta;
+            fusion.run(Y);
+            return;
         }
 
         if (blobs.empty()) {
@@ -385,29 +446,29 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 done = mlasSgemmBatch(helper.batch,
                                       helper.A_offsets.data(), helper.B_offsets.data(), helper.C_offsets.data(),
                                       trans_a, trans_b, helper.M, helper.N, helper.K,
-                                      alpha, a, lda_mem, b, ldb_mem, beta, y, helper.ldc);
+                                      alpha, a, lda_mem, b, ldb_mem, gemm_beta, y, helper.ldc);
             }
             if (!done) {
                 fastGemmBatch(helper.batch, helper.A_offsets.data(), helper.B_offsets.data(), helper.C_offsets.data(),
                               helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
-                              b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
+                              b, helper.ldb0, helper.ldb1, gemm_beta, y, helper.ldc, opt);
             }
         } else if (!thin_packed_B.empty()) {
             fastGemmThin(helper.M, helper.N, helper.K, alpha,
                          a, helper.lda0, helper.lda1,
-                         thin_packed_B.data(), beta,
+                         thin_packed_B.data(), gemm_beta,
                          y, helper.ldc, opt.multi_thread);
         } else if (!packed_input_B.empty()) {
             fastGemmBatch(helper.batch, helper.A_offsets.data(), helper.packed_B_offsets.data(), helper.C_offsets.data(),
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
-                          packed_input_B.data(), beta, y, helper.ldc, opt);
+                          packed_input_B.data(), gemm_beta, y, helper.ldc, opt);
         } else {
             // truly dynamic B (changes every call — no packing cache available)
             const auto &B = inputs[1];
             const auto *b = B.ptr<const float>();
             fastGemmBatch(helper.batch, helper.A_offsets.data(), helper.B_offsets.data(), helper.C_offsets.data(),
                           helper.M, helper.N, helper.K, alpha, a, helper.lda0, helper.lda1,
-                          b, helper.ldb0, helper.ldb1, beta, y, helper.ldc, opt);
+                          b, helper.ldb0, helper.ldb1, gemm_beta, y, helper.ldc, opt);
         }
         fusion.run(Y);
     }
@@ -540,6 +601,10 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
         if (inputs.size() >= 3) {
             return false;
         }
+        // batch_A/batch_B below divide by M*K and N*K; the CPU path handles empty dims
+        if (helper.M == 0 || helper.N == 0 || helper.K == 0) {
+            return false;
+        }
 
         const auto &input_A = inputs[0];
         auto &output = outputs[0];
@@ -556,7 +621,7 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
             }
             if ((inputs.size() + blobs.size() >= 3)) {
                 if (bias_umat.empty()) {
-                    broadcast_bias.copyTo(bias_umat);
+                    scaledBroadcastBias().copyTo(bias_umat);
                 }
             } else {
                 if (bias_umat.empty()) {
@@ -629,6 +694,10 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
             result = std::make_shared<ov::op::v0::MatMul>(input_A_node, input_B_node, trans_a, trans_b);
             if (nodes.size() >= 3) {
                 bias = nodes[2].dynamicCast<InfEngineNgraphNode>()->node;
+                if (beta != 1.f) {
+                    auto coeff = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{}, &beta);
+                    bias = std::make_shared<ov::op::v1::Multiply>(bias, coeff, ov::op::AutoBroadcastType::NUMPY);
+                }
                 result = std::make_shared<ov::op::v1::Add>(result, bias);
             }
         } else {
@@ -636,8 +705,9 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
             auto input_B_node = std::make_shared<ov::op::v0::Constant>(ov::element::f32, input_B_shape, blobs[0].data);
             result = std::make_shared<ov::op::v0::MatMul>(input_A_node, input_B_node, trans_a, trans_b);
             if ((nodes.size() + blobs.size()) >= 3) {
-                const auto bias_shape = shape(broadcast_bias);
-                bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, std::vector<size_t>(bias_shape.begin(), bias_shape.end()), broadcast_bias.data);
+                const Mat bias_mat = scaledBroadcastBias();
+                const auto bias_shape = shape(bias_mat);
+                bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, std::vector<size_t>(bias_shape.begin(), bias_shape.end()), bias_mat.data);
                 result = std::make_shared<ov::op::v1::Add>(result, bias);
             }
         }
@@ -671,20 +741,23 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(void *context_,
-                              const std::vector<Ptr<BackendWrapper>>& inputs,
-                              const std::vector<Ptr<BackendWrapper>>& outputs) override {
+                              InputArrayOfArrays,
+                              InputArrayOfArrays outputs) override {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         auto input_B = Mat(), bias = Mat();
         if (!blobs.empty()) {
             input_B = blobs.front();
             if (blobs.size() >= 2) {
-                bias = broadcast_bias;
+                bias = scaledBroadcastBias();
             }
         }
 
         CV_CheckFalse(helper.empty(), "DNN/MatMul/CUDA: MatMulHelper is not initialized");
 
-        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+        // the fused math runs on the same stream, right after the MatMul
+        csl::Stream stream = context->stream;
+        Ptr<BackendNode> matmulNode = make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, beta, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+        return makeFusedCudaNode(fusion, matmulNode, preferableTarget, stream, outputs.shape(0));
     }
 #endif // HAVE_CUDA
 
@@ -717,6 +790,20 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
                 auto input_bias_wrapper = inputs[2].dynamicCast<CannBackendWrapper>();
                 auto input_bias_desc = input_bias_wrapper->getTensorDesc();
                 auto input_bias_node = nodes[2].dynamicCast<CannBackendNode>()->getOp();
+                if (beta != 1.f) { // BatchMatMulV2 adds the bias unscaled
+                    Mat beta_mat(1, 1, CV_32F, Scalar(beta));
+                    auto const_beta_node = std::make_shared<CannConstOp>(
+                        beta_mat.data, beta_mat.type(), std::vector<int>{1},
+                        cv::format("%s_beta", name.c_str()));
+                    auto mul = std::make_shared<ge::op::Mul>(
+                        cv::format("%s_bias_beta", name.c_str()));
+                    mul->set_input_x1_by_name(*input_bias_node, "y");
+                    mul->update_input_desc_x1(*input_bias_desc);
+                    mul->set_input_x2_by_name(*(const_beta_node->getOp()), "y");
+                    mul->update_input_desc_x2(*(const_beta_node->getTensorDesc()));
+                    mul->update_output_desc_y(*input_bias_desc);
+                    input_bias_node = mul;
+                }
                 op->set_input_bias_by_name(*input_bias_node, "y");
                 op->update_input_desc_bias(*input_bias_desc);
             }
@@ -726,7 +813,8 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
             op->set_input_x2_by_name(*(const_B_node->getOp()), "y");
             op->update_input_desc_x2(*(const_B_node->getTensorDesc()));
             if ((inputs.size() + blobs.size()) >= 3) { // does not support broadcast bias
-                auto bias_mat = blobs.back();
+                Mat bias_mat;
+                blobs.back().convertTo(bias_mat, -1, beta);  // BatchMatMulV2 adds the bias unscaled
                 auto bias_shape = shape(bias_mat);
 
                 // reshape if 1d
@@ -748,6 +836,14 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 #endif // HAVE_CANN
 
  private:
+    Mat scaledBroadcastBias() const {
+        if (beta == 1.f)
+            return broadcast_bias;
+        Mat scaled;
+        broadcast_bias.convertTo(scaled, -1, beta);
+        return scaled;
+    }
+
     int real_ndims_C;
 
     std::vector<float> packed_input_B;

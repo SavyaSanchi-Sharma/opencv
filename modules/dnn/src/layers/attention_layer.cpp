@@ -3,11 +3,17 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../net_impl.hpp"
+#include "../op_cuda.hpp"
 #include "cpu_kernels/fast_gemm.hpp"
 #include "cpu_kernels/softmax.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
 
 #include <opencv2/dnn/shape_utils.hpp>
+
+#ifdef HAVE_CUDA
+#include "../cuda4dnn/primitives/attention.hpp"
+#endif
 
 namespace cv { namespace dnn {
 
@@ -170,8 +176,48 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // AttentionOp takes const float weight/bias blobs, the input and an optional additive
+            // float mask; rotary stays on CPU
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_ || do_rotary || blobs.size() < 2 ||
+                (this->inputs.size() != 1 && this->inputs.size() != 2))
+                return false;
+            // an intermediate arg has no type until the first forward; refuse only a known non-float one
+            for (const Arg& a : this->inputs) {
+                const int t = netimpl_->argData(a).type;
+                if (t >= 0 && t != CV_32F)
+                    return false;
+            }
+            return blobs.front().type() == CV_32F && blobs.back().type() == CV_32F &&
+                   qkv_head_sizes[0] == qkv_head_sizes[1];
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV;
     }
+
+#ifdef HAVE_CUDA
+    Ptr<BackendNode> initCUDA(void* context_,
+                              InputArrayOfArrays,
+                              InputArrayOfArrays) CV_OVERRIDE
+    {
+        auto context = reinterpret_cast<cuda4dnn::csl::CSLContext*>(context_);
+
+        // finalize() has grouped the tokens and filled qkv_hidden_sizes[2]
+        cuda4dnn::AttentionConfiguration cfg;
+        cfg.num_heads = num_heads;
+        cfg.qkv_hidden_sizes = qkv_hidden_sizes;
+        cfg.input_hidden_size = input_hidden_size;
+        cfg.batch_size = batch_size;
+        cfg.seq_len = seq_len;
+        cfg.scale = scale;
+
+        return make_cuda_node<cuda4dnn::AttentionOp>(preferableTarget, std::move(context->stream),
+                                                     std::move(context->cublas_handle),
+                                                     blobs.front(), blobs.back(), cfg);
+    }
+#endif
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
                                  const int requiredOutputs,
@@ -218,6 +264,13 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
         MatShape gemm_buffer_shape{batch_size_, seq_len_, hidden_size_},
                  attention_prob_shape{batch_size_ * num_heads_, seq_len_, seq_len_},
                  output_buffer_shape{batch_size_ * num_heads_, seq_len_, v_head_size_};
+        if (useFlashAttention(inputs.size(), batch_size_, seq_len_, v_head_size_))
+        {
+            // FlashAttention writes directly to the output and never uses either
+            // dense workspace. Keep their slots so the RoPE table index is stable.
+            attention_prob_shape = MatShape{1};
+            output_buffer_shape = MatShape{1};
+        }
         internals.assign(1, gemm_buffer_shape);
         internals.push_back(attention_prob_shape);
         internals.push_back(output_buffer_shape);
@@ -499,13 +552,7 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
             }
         }
 
-        const int num_non_blob_inputs = (int)inputs.size();
-        const bool has_mask = (!blobs.empty() && num_non_blob_inputs >= 2) ||
-                                ( blobs.empty() && num_non_blob_inputs >= 4);
-
-        if (mlasAvailable() && !has_mask &&
-            batch_size > 0 && num_heads > 0 && seq_len > 0 &&
-            qkv_head_sizes[0] > 0 && qkv_head_sizes[2] > 0)
+        if (useFlashAttention(inputs.size(), (int)batch_size, (int)seq_len, (int)qkv_head_sizes[2]))
         {
             const int B   = (int)batch_size;
             const int H   = (int)num_heads;
@@ -533,6 +580,8 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
 
         // Compute Softmax(scale * MatMul(Q, K))
         auto &attention_prob = internals[1];
+        // getMemoryShapes() plans dense buffers whenever FlashAttention is not used
+        CV_CheckEQ(attention_prob.total(), (size_t)(batch_size * num_heads * seq_len * seq_len), "");
         {
             auto *output = attention_prob.ptr<float>();
 
@@ -631,6 +680,7 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
 
         // output = attention_prob @ V, then transpose back to [B, S, H*D]
         auto &output_buffer = internals[2];
+        CV_CheckEQ(output_buffer.total(), (size_t)(batch_size * num_heads * seq_len * qkv_head_sizes[2]), "");
         {
             auto *output = outputs[0].ptr<float>();
             auto *output_buff = output_buffer.ptr<float>();
@@ -674,6 +724,14 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
     }
 
  private:
+    bool useFlashAttention(size_t inputCount, int batch, int sequence, int valueHeadSize) const
+    {
+        const bool hasMask = (!blobs.empty() && inputCount >= 2) ||
+                             (blobs.empty() && inputCount >= 4);
+        return mlasAvailable() && !hasMask && batch > 0 && num_heads > 0 && sequence > 0 &&
+               qkv_head_sizes[0] > 0 && valueHeadSize > 0;
+    }
+
     size_t num_heads;
     std::vector<size_t> qkv_hidden_sizes; // order: {qk_hidden_size, qk_hidden_size, v_hidden_size}
     float scale;
