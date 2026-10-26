@@ -7,7 +7,7 @@ the function, and on the CPU otherwise. Either way its output is created on the 
 pipeline stays where its data is. User code does not change: it is the T-API, extended beyond
 OpenCL.
 
-The model is kept small on purpose: two kinds of device memory, fixed rules for where a call
+The model is kept small on purpose: a memory kind per buffer, fixed rules for where a call
 runs, and a C++ interface for backends.
 
 Using it
@@ -40,10 +40,21 @@ cv::Mat result = rotated.getMat(cv::ACCESS_READ);   // waits for the GPU, then d
 Memory
 ------
 
-OpenCV knows two kinds of memory, host and device, as the T-API does. Each device decides how
-the CPU reaches its memory:
+Every buffer has a **memory kind**, chosen when it is created from the kinds its device
+provides (`Device::memoryKinds()`, a bitmask; `cv::accel::getMemoryKind(m)` reports a buffer's
+own). A discrete GPU typically provides `MEMORY_DEVICE` alone; an integrated one provides
+several, and then different buffers on the same device can differ.
 
-| | copy (discrete GPUs) | shared (NPUs, integrated GPUs, Jetson, 2D engines) |
+| Kind | The CPU reaches it | Notes |
+|---|---|---|
+| `MEMORY_DEVICE` | through a copy | the only kind a discrete GPU has |
+| `MEMORY_SHARED_COHERENT` | directly, no cache maintenance | |
+| `MEMORY_SHARED_NONCOHERENT` | directly, cached | maintained around CPU access |
+| `MEMORY_MANAGED` | directly, migrated by the runtime | |
+
+`isSharedKind()` is true for the three the CPU addresses. What a kind costs:
+
+| | `MEMORY_DEVICE` | a shared kind |
 |---|---|---|
 | allocation | device memory | memory the CPU can address |
 | `UMat::getMat()` | waits for device work, downloads into a host copy when it is stale | waits for device work, refreshes the CPU cache, returns the same bytes |
@@ -51,7 +62,37 @@ the CPU reaches its memory:
 | a call that falls back to the CPU | one copy down per input, one up per output | no copy |
 
 Cache maintenance for non-coherent memory is the backend's business
-(`Backend::beginCpuAccess`, `Backend::endCpuAccess`); core only calls it at the right moments.
+(`Backend::beginCpuAccess`, `Backend::endCpuAccess`), which receive the buffer's kind; core
+only calls them at the right moments.
+
+### Choosing the kind
+
+A new buffer gets, in this order: the kind `OPENCV_ACCEL_FORCE_MEMORY_KIND` names, else the
+one its `UMatUsageFlags` ask for (`USAGE_ALLOCATE_DEVICE_MEMORY` for `MEMORY_DEVICE`,
+`USAGE_ALLOCATE_SHARED_MEMORY` or `USAGE_ALLOCATE_HOST_MEMORY` for a shared kind), else the
+device's default (`Device::defaultMemoryKind()`). A kind the device does not provide is never
+used. Memory the CPU addresses is usually pinned, so a shared choice becomes `MEMORY_DEVICE`
+when it would take the device past `OPENCV_ACCEL_PINNED_LIMIT_MB`.
+
+A buffer that was never asked for a particular kind can change kind once, the first time the
+CPU asks for it (`UMat::getMat()`): a `MEMORY_DEVICE` buffer no larger than
+`OPENCV_ACCEL_ZERO_COPY_MAX_BYTES`, on a device that provides a shared kind, is moved there
+with one copy on the device, and every CPU access after that is free. This is off by default.
+It never happens to a buffer whose kind was asked for, nor to one that is imported, aliased on
+another device, currently mapped, or whose device pointer or dma-buf someone else holds.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OPENCV_ACCEL_FORCE_MEMORY_KIND` | unset | `device`, `shared`, `shared_nc` or `managed` for every new buffer; ignored, with a warning, where the device cannot provide it |
+| `OPENCV_ACCEL_PINNED_LIMIT_MB` | 0 (no limit) | budget for memory the CPU addresses, per device, counting host copies |
+| `OPENCV_ACCEL_ZERO_COPY_MAX_BYTES` | 0 (off) | largest buffer moved to shared memory on first CPU access |
+
+Two things the counters cannot tell you. The budget is per device though pinned memory is a
+property of the machine, and its check is not atomic with the allocation that follows, so
+concurrent allocations can overshoot it slightly. And `getTransferStats()` counts the copies
+OpenCV makes, not pages a driver migrates on its own: `MEMORY_MANAGED` on a discrete GPU
+reports no copies at all while the driver moves data across the bus on every access, which is
+far slower than the copies it appears to avoid. Measure a kind before choosing it.
 
 A read stays a read: `getMat(ACCESS_READ)` on device memory does not mark the device copy
 stale, so a CPU fallback reads its inputs without uploading them back. (Other UMats keep the
@@ -174,6 +215,12 @@ public:
 
 The rules:
 
+* `memoryKinds()` reports what the device can provide, as a bitmask of at least one bit, and
+  `allocate()`, `deallocate()`, `hostAddress()`, `beginCpuAccess()`, `endCpuAccess()` and
+  `exportDmaBuf()` are told the kind of the buffer they are given. `importDmaBuf()` reports
+  the kind of what it imported, which the exporter decides, not the importing device.
+  `defaultMemoryKind()` picks the kind for a new buffer when nothing else does; by default the
+  most CPU-accessible kind on offer.
 * An operation returns false before it queues anything when the device cannot run that call.
   Errors are thrown.
 * Arguments are already in memory the device addresses, ordered on the stream, and outputs have
@@ -195,14 +242,24 @@ explicitly.
 ### Backends in OpenCV
 
 * CUDA (`src/accel/backend_cuda.cpp`), built in when OpenCV is built with CUDA
-  (`OPENCV_ACCEL_CUDA=0` disables it). Discrete GPUs get memory from the stream-ordered pool and
-  pinned host copies; integrated GPUs from Xavier on get pinned memory mapped into the GPU,
-  which is shared. It implements `flip` and `transpose` (`src/cuda/accel_kernels.cu`). It does
-  not import or export dma-bufs.
-* HIP (`src/accel/backend_hip.cpp`, `src/accel/hip/accel_kernels.hip`), built as a plugin with
-  `modules/core/misc/plugins/accel_hip`, as OpenCV's CMake does not know HIP yet. Discrete AMD
-  GPUs get pool memory and pinned host copies, APUs pinned memory mapped into the GPU. It
-  implements `flip` and `transpose`.
+  (`OPENCV_ACCEL_CUDA=0` disables it). One kind per device: `MEMORY_DEVICE` on a discrete GPU,
+  from the stream-ordered pool and with pinned host copies, and `MEMORY_SHARED_COHERENT` on
+  integrated GPUs from Xavier on, which get pinned memory mapped into the GPU. It implements
+  `flip` and `transpose` (`src/cuda/accel_kernels.cu`). It does not import or export dma-bufs.
+* HIP (`src/accel/backend_hip.cpp`, `src/accel/hip/accel_kernels.hip`), built into core when
+  OpenCV is built with `WITH_HIP=ON` (`OPENCV_ACCEL_HIP=0` disables it), and also buildable as
+  a standalone plugin with `modules/core/misc/plugins/accel_hip`. A discrete GPU provides
+  `MEMORY_DEVICE`, from the pool, and `MEMORY_MANAGED` where the runtime reports it; an APU
+  provides those and both shared kinds. The default stays the shared kind on an APU and device
+  memory on a discrete card; `OPENCV_ACCEL_APU_DEVICE_DEFAULT=1` makes an APU default to
+  `MEMORY_DEVICE`, which is worth pairing with `OPENCV_ACCEL_ZERO_COPY_MAX_BYTES` so buffers
+  the CPU reads become shared again. It implements `flip` and `transpose`.
+
+  Measured on a gfx1036 APU, 4096x4096 BGR: the kind makes no difference to `flip`, which is
+  bandwidth-bound, but `transpose`, whose writes are scattered, runs 5.6x faster in device
+  memory than in coherent shared memory, and pinning costs about 0.2 ms per MB. Which kind
+  suits a buffer depends on how the device reads it and on how often the CPU comes back for
+  it, so these are knobs rather than a fixed policy.
 
 Adding an operation
 -------------------
