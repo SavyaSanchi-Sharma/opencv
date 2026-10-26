@@ -78,11 +78,15 @@ imports, so one set of events covers every device touching those bytes.
 struct BufferState
 {
     explicit BufferState(Device::Impl* d)
-        : dev(d), kind(d->defaultKind), initialized(false), mapped(false), mappedWrite(false),
-          imported(false), externallyReferenced(false), aliasOf(0) {}
+        : dev(d), kind(d->defaultKind), kindRequested(false), initialized(false), mapped(false),
+          mappedWrite(false), imported(false), externallyReferenced(false), aliasOf(0) {}
 
     Device::Impl* dev;
     MemoryKind kind;        // the kind this buffer's memory was allocated with
+    /* The kind was asked for, by UMatUsageFlags, by the debug override, or by the pinned
+       budget turning a shared choice down. Such a buffer is never moved to another kind
+       later: the caller said what it wanted, and the budget means it cannot be afforded. */
+    bool kindRequested;
     bool initialized;       // something was written into it; until then there is nothing to download
     bool mapped;            // Mat views exist (UMat::getMat)
     bool mappedWrite;       // ... and one of them may write
@@ -136,6 +140,11 @@ public:
 private:
     Device::Impl* dev_;
 };
+
+/** @brief The kind a new buffer on @p dev will get, before its size or its UMatUsageFlags are
+known: the debug override when it applies, otherwise the device's default. For predicting what
+a buffer that does not exist yet will cost. */
+MemoryKind newBufferKind(Device::Impl* dev);
 
 //! the state of device memory; NULL for host memory, OpenCL buffers and other UMats
 BufferState* stateOf(const UMatData* u);

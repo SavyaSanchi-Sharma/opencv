@@ -207,27 +207,27 @@ size_t pinnedLimit()
    the caller asked for through UMatUsageFlags, then the device's default; a shared choice is
    turned down to device memory when it would go past the pinned budget. A kind the device
    does not provide is never returned. */
-MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
+MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage, bool& requested)
 {
     const char* why = "device default";
-    MemoryKind kind = dev->defaultKind;
+    requested = false;      // set once something other than the device default decides
+    MemoryKind kind = newBufferKind(dev);
+    const int forced = forcedKind();
+    const bool overridden = forced && (dev->kinds & forced);
 
-    if (const int forced = forcedKind())
+    if (overridden)
     {
-        if (dev->kinds & forced)
+        why = "OPENCV_ACCEL_FORCE_MEMORY_KIND";
+        requested = true;
+    }
+    else if (forced)
+    {
+        static bool warned = false;     // once: this is the same for every buffer
+        if (!warned)
         {
-            kind = (MemoryKind)forced;
-            why = "OPENCV_ACCEL_FORCE_MEMORY_KIND";
-        }
-        else
-        {
-            static bool warned = false;     // once: this is the same for every buffer
-            if (!warned)
-            {
-                warned = true;
-                CV_LOG_WARNING(NULL, "accel: " << dev->name << " does not provide "
-                               << kindName((MemoryKind)forced) << " memory; OPENCV_ACCEL_FORCE_MEMORY_KIND ignored");
-            }
+            warned = true;
+            CV_LOG_WARNING(NULL, "accel: " << dev->name << " does not provide "
+                           << kindName((MemoryKind)forced) << " memory; OPENCV_ACCEL_FORCE_MEMORY_KIND ignored");
         }
     }
     else if (usage & USAGE_ALLOCATE_DEVICE_MEMORY)
@@ -236,6 +236,7 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
         {
             kind = MEMORY_DEVICE;
             why = "USAGE_ALLOCATE_DEVICE_MEMORY";
+            requested = true;
         }
     }
     else if (usage & (USAGE_ALLOCATE_SHARED_MEMORY | USAGE_ALLOCATE_HOST_MEMORY))
@@ -244,14 +245,21 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
         {
             kind = MEMORY_SHARED_COHERENT;
             why = "USAGE_ALLOCATE_SHARED_MEMORY";
+            requested = true;
         }
         else if (dev->kinds & MEMORY_SHARED_NONCOHERENT)
         {
             kind = MEMORY_SHARED_NONCOHERENT;
             why = "USAGE_ALLOCATE_SHARED_MEMORY";
+            requested = true;
         }
     }
 
+    /* The budget is per device, though pinned memory is a property of the system: two devices
+       each get the whole limit. Good enough while one accelerator is the normal case; say so
+       rather than pretend otherwise. The test and the increment in allocateDevice are not one
+       atomic step either, so concurrent allocations can overshoot by what they allocate. Both
+       are deliberate: a lock here would sit on every allocation to defend a soft limit. */
     const size_t limit = pinnedLimit();
     if (limit && isSharedKind(kind) && (dev->kinds & MEMORY_DEVICE)
         && dev->pinnedBytes.load() + size > limit)
@@ -261,6 +269,7 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
                      << " bytes); " << kindName(kind) << " becomes device memory");
         kind = MEMORY_DEVICE;
         why = "OPENCV_ACCEL_PINNED_LIMIT_MB";
+        requested = true;   // promotion must not undo the budget on the first CPU access
     }
 
     CV_LOG_DEBUG(NULL, "accel: " << dev->name << " " << size << " bytes as "
@@ -286,14 +295,35 @@ void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind);
    Only for a buffer nobody else can be holding: not imported, not aliased on another device,
    no device pointer or dma-buf handed out, and no Mat view alive. The caller has waited for
    the device work. Returns true when the buffer is now of a shared kind. */
-bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
+bool canPromote(Device::Impl* dev, const UMatData* u, const BufferState* st)
 {
     const size_t limit = zeroCopyMaxBytes();
     if (!limit || u->size == 0 || u->size > limit)
         return false;
     if (isSharedKind(st->kind) || !dev->canShare())
         return false;
+    // the caller asked for this kind, or the pinned budget could not afford another one
+    if (st->kindRequested)
+        return false;
     if (st->imported || st->externallyReferenced || st->mapped || !st->aliases.empty())
+        return false;
+    // the newest bytes are in the host copy, which this would not carry over
+    if (u->deviceCopyObsolete())
+        return false;
+    // shared memory is what the budget counts, so promotion has to respect it as well
+    const size_t pinLimit = pinnedLimit();
+    if (pinLimit && dev->pinnedBytes.load() + u->size > pinLimit)
+    {
+        CV_LOG_DEBUG(NULL, "accel: " << dev->name << " is at its pinned budget; "
+                     << u->size << " bytes stay in device memory");
+        return false;
+    }
+    return true;
+}
+
+bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
+{
+    if (!canPromote(dev, u, st))
         return false;
 
     const MemoryKind to = (dev->kinds & MEMORY_SHARED_COHERENT) ? MEMORY_SHARED_COHERENT
@@ -350,6 +380,9 @@ void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
         collectRetired(true);
         p = dev->backend->allocate(dev->index, size, kind);
     }
+    /* isSharedKind() counts MEMORY_MANAGED too, though managed memory is not pinned up front
+       where the runtime can migrate it on a page fault (XNACK). Counting it overstates the
+       pressure rather than understating it, which is the safe direction for a budget. */
     if (p && isSharedKind(kind))
         dev->pinnedBytes += size;
     return p;
@@ -375,6 +408,15 @@ private:
 };
 
 } // namespace
+
+MemoryKind newBufferKind(Device::Impl* dev)
+{
+    // What chooseKind() settles on before it knows the size or what the caller asked for.
+    // dispatch.cpp predicts the cost of outputs it has not created yet, and has to predict
+    // the kind they will actually get, not the device's default.
+    const int forced = forcedKind();
+    return (forced && (dev->kinds & forced)) ? (MemoryKind)forced : dev->defaultKind;
+}
 
 void collectRetired(bool wait)
 {
@@ -546,7 +588,7 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
     UMatData* u = new UMatData(this);
     u->size = total;
     BufferState* st = new BufferState(dev_);
-    st->kind = chooseKind(dev_, total, usageFlags);
+    st->kind = chooseKind(dev_, total, usageFlags, st->kindRequested);
     u->allocatorContext = std::shared_ptr<void>(st, [](void* p) { delete static_cast<BufferState*>(p); });
     if (total > 0)
     {
@@ -651,10 +693,13 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
     if (st->mapped && (st->mappedWrite || !write))
         return;     // already mapped as needed (UMat::getMat calls map for every view)
 
-    waitOnCpu(st, true);    // promotion frees the memory, so every reader has to be done too
-    // the delayed decision: the CPU is asking for this buffer for the first time, which is
-    // the first moment we know it is not device-only
-    promoteToShared(dev_, u, st);
+    /* The delayed decision: the CPU asking for this buffer is the first moment we know it is
+       not device-only. Promotion frees the old memory, so it has to wait for the readers too,
+       but only then: a plain read still waits for writers alone, as it always did. */
+    const bool promoting = canPromote(dev_, u, st);
+    waitOnCpu(st, write || promoting);
+    if (promoting)
+        promoteToShared(dev_, u, st);
 
     Backend& b = *dev_->backend;
     const int i = dev_->index;
@@ -674,7 +719,11 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
             u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
             if (!u->data)
                 CV_Error_(Error::StsNoMem, ("accel: no host memory for a copy of %llu bytes", (unsigned long long)u->size));
-            // a backend allocates this pinned where it can, so it counts against the budget
+            /* Counted against the budget because a backend pins this where it can, which is
+               what makes copies to and from it asynchronous. The default allocateHost is
+               fastMalloc though, and that is pageable, so on such a backend the budget also
+               limits memory nobody pinned. Conservative on purpose; the alternative is for
+               the backend to say whether it pinned, which is a change to the interface. */
             dev_->pinnedBytes += u->size;
         }
         if (u->hostCopyObsolete() && !st->initialized)

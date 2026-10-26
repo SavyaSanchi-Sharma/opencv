@@ -132,7 +132,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
     bool mapped = false;            // a device argument has a Mat view: the CPU has to run the call
     bool copies = false;            // running on the device copies between host and device memory
     // the CPU would copy: outputs are created on the device, with the kind new buffers get there
-    bool fallbackCopies = !isSharedKind(dev->defaultKind);
+    bool fallbackCopies = !isSharedKind(newBufferKind(dev));
     for (size_t i = 0; i < n; i++)
     {
         const Arg& a = args_[i];
@@ -154,10 +154,10 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
                     continue;
                 }
                 // m is copied into a new buffer on dev: the kind that buffer will get
-                copies = copies || !isSharedKind(dev->defaultKind) || copyOnlyMemory(m);
+                copies = copies || !isSharedKind(newBufferKind(dev)) || copyOnlyMemory(m);
             }
             else
-                copies = copies || !isSharedKind(dev->defaultKind);
+                copies = copies || !isSharedKind(newBufferKind(dev));
             plan[i] = PLAN_UPLOAD;
             continue;
         }
@@ -180,12 +180,12 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
             }
             plan[i] = PLAN_TEMP;
             if (!onDevice(m, dev))
-                copies = copies || !isSharedKind(dev->defaultKind) || copyOnlyMemory(m);
+                copies = copies || !isSharedKind(newBufferKind(dev)) || copyOnlyMemory(m);
         }
         else
         {
             plan[i] = PLAN_TEMP;
-            copies = copies || !isSharedKind(dev->defaultKind);
+            copies = copies || !isSharedKind(newBufferKind(dev));
         }
     }
 
@@ -219,7 +219,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
     // Another device reaches an argument by importing a dma-buf of it, which only memory of a
     // shared kind can export. That is a property of each buffer, not of dev: ask the ones that
     // already exist there, and for those still to be created, the kind they will get.
-    bool shareable = isSharedKind(dev->defaultKind);
+    bool shareable = isSharedKind(newBufferKind(dev));
     for (size_t i = 0; i < n && shareable; i++)
     {
         if (plan[i] != PLAN_USE)

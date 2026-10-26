@@ -195,13 +195,11 @@ public:
     String name() const CV_OVERRIDE { return "cuda"; }
     int deviceCount() const CV_OVERRIDE { return (int)devs_.size(); }
     String deviceDescription(int device) const CV_OVERRIDE { return devs_[device]->prop.name; }
+    /* One kind per device, as before: its own memory, or memory shared with the CPU on an
+       integrated part (Jetson). The default follows from it, so defaultMemoryKind() is left
+       to the base class. Offering a choice here, as the HIP backend does, wants measurements
+       on CUDA hardware first. */
     int memoryKinds(int device) const CV_OVERRIDE
-    {
-        return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
-    }
-
-    //! stated rather than inferred, so adding a kind above cannot change it by accident
-    MemoryKind defaultMemoryKind(int device) const CV_OVERRIDE
     {
         return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
     }
