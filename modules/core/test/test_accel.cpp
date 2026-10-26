@@ -204,9 +204,14 @@ public:
                                        "emulated non-coherent memory", "emulated 2D engine" };
         return names[d];
     }
-    bool sharesHostMemory(int d) const CV_OVERRIDE { return d != EMU_DISCRETE; }
+    int memoryKinds(int d) const CV_OVERRIDE
+    {
+        if (d == EMU_DISCRETE)
+            return accel::MEMORY_DEVICE;
+        return d == EMU_NONCOHERENT ? accel::MEMORY_SHARED_NONCOHERENT : accel::MEMORY_SHARED_COHERENT;
+    }
 
-    void* allocate(int d, size_t size) CV_OVERRIDE
+    void* allocate(int d, size_t size, accel::MemoryKind) CV_OVERRIDE
     {
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = new Block();
@@ -249,7 +254,7 @@ public:
         return (void*)b->addr;
     }
 
-    void deallocate(int d, void* ptr) CV_OVERRIDE
+    void deallocate(int d, void* ptr, accel::MemoryKind) CV_OVERRIDE
     {
         std::lock_guard<std::mutex> lock(mem_);
         std::map<uintptr_t, Block*>::iterator it = blocks_.find((uintptr_t)ptr);
@@ -263,7 +268,7 @@ public:
         blocks_.erase(it);
     }
 
-    void* importDmaBuf(int d, int fd, size_t size) CV_OVERRIDE
+    void* importDmaBuf(int d, int fd, size_t size, accel::MemoryKind& kind) CV_OVERRIDE
     {
 #ifdef __linux__
         if (d != EMU_SHARED && d != EMU_ENGINE)
@@ -271,6 +276,7 @@ public:
         void* p = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (p == MAP_FAILED)
             return 0;
+        kind = accel::MEMORY_SHARED_COHERENT;   // a mapped memfd, whatever this device's default is
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = new Block();
         b->device = d;
@@ -283,12 +289,12 @@ public:
         imports_++;
         return p;
 #else
-        CV_UNUSED(d); CV_UNUSED(fd); CV_UNUSED(size);
+        CV_UNUSED(d); CV_UNUSED(fd); CV_UNUSED(size); CV_UNUSED(kind);
         return 0;
 #endif
     }
 
-    int exportDmaBuf(int d, void* ptr, size_t) CV_OVERRIDE
+    int exportDmaBuf(int d, void* ptr, size_t, accel::MemoryKind) CV_OVERRIDE
     {
 #ifdef __linux__
         std::lock_guard<std::mutex> lock(mem_);
@@ -302,9 +308,10 @@ public:
 #endif
     }
 
-    void* hostAddress(int d, void* ptr) CV_OVERRIDE
+    void* hostAddress(int d, void* ptr, accel::MemoryKind kind) CV_OVERRIDE
     {
-        if (d != EMU_NONCOHERENT)
+        CV_UNUSED(d);
+        if (kind != accel::MEMORY_SHARED_NONCOHERENT)
             return ptr;
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = find((uintptr_t)ptr, 1);
@@ -316,10 +323,11 @@ public:
         return b->cache.data() + ((uintptr_t)ptr - b->addr);
     }
 
-    void beginCpuAccess(int d, void* ptr, size_t size, bool) CV_OVERRIDE
+    void beginCpuAccess(int d, void* ptr, size_t size, accel::MemoryKind kind, bool) CV_OVERRIDE
     {
+        CV_UNUSED(d);
         begins_++;
-        if (d != EMU_NONCOHERENT)
+        if (kind != accel::MEMORY_SHARED_NONCOHERENT)
             return;
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = find((uintptr_t)ptr, size);
@@ -332,10 +340,11 @@ public:
         memcpy(b->cache.data() + off, b->base + off, size);     // the CPU now sees the device's bytes
     }
 
-    void endCpuAccess(int d, void* ptr, size_t size, bool written) CV_OVERRIDE
+    void endCpuAccess(int d, void* ptr, size_t size, accel::MemoryKind kind, bool written) CV_OVERRIDE
     {
+        CV_UNUSED(d);
         ends_++;
-        if (d != EMU_NONCOHERENT || !written)
+        if (kind != accel::MEMORY_SHARED_NONCOHERENT || !written)
             return;
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = find((uintptr_t)ptr, size);
@@ -621,10 +630,14 @@ TEST_F(Core_Accel, devices)
     EXPECT_EQ(d0, accel::Device::find("emu"));
     EXPECT_TRUE(accel::Device::find("emu:7").empty());
     EXPECT_TRUE(accel::Device::find("nonexistent").empty());
-    EXPECT_FALSE(d0.sharesHostMemory());
-    EXPECT_TRUE(d1.sharesHostMemory());
-    EXPECT_TRUE(d2.sharesHostMemory());
+    EXPECT_EQ(accel::MEMORY_DEVICE, d0.memoryKinds());
+    EXPECT_EQ(accel::MEMORY_SHARED_COHERENT, d1.memoryKinds());
+    EXPECT_EQ(accel::MEMORY_SHARED_NONCOHERENT, d2.memoryKinds());
+    EXPECT_EQ(accel::MEMORY_DEVICE, d0.defaultMemoryKind());
+    EXPECT_EQ(accel::MEMORY_SHARED_COHERENT, d1.defaultMemoryKind());
+    EXPECT_EQ(accel::MEMORY_SHARED_NONCOHERENT, d2.defaultMemoryKind());
     EXPECT_EQ("cpu", accel::Device().name());
+    EXPECT_EQ(accel::MEMORY_SHARED_COHERENT, accel::Device().memoryKinds());
     EXPECT_EQ(Mat::getDefaultAllocator(), accel::Device().allocator());
 
     int found = 0;

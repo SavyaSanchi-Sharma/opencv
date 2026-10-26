@@ -33,8 +33,13 @@ struct Device::Impl
     Ptr<Backend> backend;
     int index;
     String name;                        // "cuda:0"
-    bool shared;                        // backend->sharesHostMemory(index)
+    int kinds;                          // backend->memoryKinds(index)
+    MemoryKind defaultKind;             // backend->defaultMemoryKind(index)
+    std::atomic<size_t> pinnedBytes;    // allocated with a shared kind, against the budget
     detail::DeviceAllocator* allocator; // lives as long as the process
+
+    //! true when the device has a kind the CPU addresses, whatever a given buffer uses
+    bool canShare() const { return (kinds & ~(int)MEMORY_DEVICE) != 0; }
 
     //! the stream cv:: calls use on this device outside an ExecutionScope with a stream of its own
     const Ptr<Stream>& defaultStream();
@@ -66,13 +71,19 @@ imports, so one set of events covers every device touching those bytes.
 struct BufferState
 {
     explicit BufferState(Device::Impl* d)
-        : dev(d), initialized(false), mapped(false), mappedWrite(false), imported(false), aliasOf(0) {}
+        : dev(d), kind(d->defaultKind), initialized(false), mapped(false), mappedWrite(false),
+          imported(false), externallyReferenced(false), aliasOf(0) {}
 
     Device::Impl* dev;
+    MemoryKind kind;        // the kind this buffer's memory was allocated with
     bool initialized;       // something was written into it; until then there is nothing to download
     bool mapped;            // Mat views exist (UMat::getMat)
     bool mappedWrite;       // ... and one of them may write
     bool imported;          // memory of someone else (wrapDmaBuf)
+    /* Someone outside OpenCV holds a reference to these exact bytes: a device pointer from
+       UMat::handle(), or a dma-buf exported with exportDmaBuf(). Both are handed out without a
+       way to learn when they are done with, so this is never cleared and the memory never moves. */
+    bool externallyReferenced;
     Ptr<Event> write;       // the last device work writing the buffer
     Ptr<Stream> writeStream;
     std::vector<std::pair<Ptr<Stream>, Ptr<Event> > > reads;   // last read per stream since that write

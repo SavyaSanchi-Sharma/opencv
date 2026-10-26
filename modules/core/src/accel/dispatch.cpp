@@ -49,7 +49,7 @@ bool copyOnlyMemory(const UMat& m)
         return false;
     BufferState* st = stateOf(m.u);
     if (st)
-        return !st->dev->shared;
+        return !isSharedKind(st->kind);     // this buffer's kind, whatever else the device offers
     return m.u->currAllocator != Mat::getDefaultAllocator();
 }
 
@@ -131,7 +131,8 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
     std::vector<int> plan(n, PLAN_USE);
     bool mapped = false;            // a device argument has a Mat view: the CPU has to run the call
     bool copies = false;            // running on the device copies between host and device memory
-    bool fallbackCopies = !dev->shared;   // the CPU would copy: outputs are created on the device
+    // the CPU would copy: outputs are created on the device, with the kind new buffers get there
+    bool fallbackCopies = !isSharedKind(dev->defaultKind);
     for (size_t i = 0; i < n; i++)
     {
         const Arg& a = args_[i];
@@ -152,10 +153,11 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
                     mapped = mapped || m.u->refcount > 0;
                     continue;
                 }
-                copies = copies || !dev->shared || copyOnlyMemory(m);
+                // m is copied into a new buffer on dev: the kind that buffer will get
+                copies = copies || !isSharedKind(dev->defaultKind) || copyOnlyMemory(m);
             }
             else
-                copies = copies || !dev->shared;
+                copies = copies || !isSharedKind(dev->defaultKind);
             plan[i] = PLAN_UPLOAD;
             continue;
         }
@@ -178,12 +180,12 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
             }
             plan[i] = PLAN_TEMP;
             if (!onDevice(m, dev))
-                copies = copies || !dev->shared || copyOnlyMemory(m);
+                copies = copies || !isSharedKind(dev->defaultKind) || copyOnlyMemory(m);
         }
         else
         {
             plan[i] = PLAN_TEMP;
-            copies = copies || !dev->shared;
+            copies = copies || !isSharedKind(dev->defaultKind);
         }
     }
 
@@ -214,10 +216,24 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         CV_Error_(Error::StsError, ("accel: %s on %s would copy data between host and device memory "
                                     "(TRANSFER_FORBID)", name_, dev->name.c_str()));
 
+    // Another device reaches an argument by importing a dma-buf of it, which only memory of a
+    // shared kind can export. That is a property of each buffer, not of dev: ask the ones that
+    // already exist there, and for those still to be created, the kind they will get.
+    bool shareable = isSharedKind(dev->defaultKind);
+    for (size_t i = 0; i < n && shareable; i++)
+    {
+        if (plan[i] != PLAN_USE)
+            continue;   // created or uploaded below, so it gets dev's default kind
+        const UMat& m = args_[i].isOutput ? args_[i].out->getUMatRef() : umatOf(*args_[i].in);
+        BufferState* st = m.u ? stateOf(m.u) : 0;
+        if (st && !isSharedKind(st->kind))
+            shareable = false;
+    }
+
     // the devices that may run it: for memory shared with the CPU, the preferred devices first
     // (they reach it through an alias, the data stays where it is), then the device holding it
     std::vector<Device::Impl*> candidates;
-    if (!scoped && dev->shared)
+    if (!scoped && shareable)
         candidates = preferredDevices();
     if (std::find(candidates.begin(), candidates.end(), dev) == candidates.end())
         candidates.push_back(dev);
@@ -315,7 +331,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
             if (args_[i].isOutput)
             {
                 st->initialized = true;
-                if (!st->dev->shared)
+                if (!isSharedKind(st->kind))
                 {
                     od->markHostCopyObsolete(true);
                     od->markDeviceCopyObsolete(false);

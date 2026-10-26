@@ -17,11 +17,14 @@ functions called on such UMats run on the device that holds their first input, w
 backend implements them, and on the CPU otherwise. Their outputs are created on that device
 either way, so a pipeline stays where its data is.
 
-Two kinds of device memory exist, decided by the device:
-- memory the CPU reaches only through a copy (discrete GPUs): UMat::getMat() downloads,
-  releasing the Mat uploads what the CPU wrote;
+Each buffer has a memory kind, chosen among those its device offers:
+- device memory (MEMORY_DEVICE), which the CPU reaches only through a copy: UMat::getMat()
+  downloads, releasing the Mat uploads what the CPU wrote;
 - memory shared with the CPU (NPUs, integrated GPUs, Jetson): UMat::getMat() returns the same
   bytes, after the device has finished with them. Nothing is copied.
+
+A discrete GPU offers device memory only. A device with shared memory offers both, and uses
+its shared memory unless a UMatUsageFlags hint asks for something else.
 
 Device work is queued and runs asynchronously. The CPU waits where it needs the data.
 */
@@ -32,6 +35,20 @@ class Stream;   // accel_backend.hpp
 
 //! @addtogroup core_accel
 //! @{
+
+/** @brief How the memory of a buffer relates to the CPU.
+
+One kind is chosen per buffer, among those its device offers (Device::memoryKinds). */
+enum MemoryKind
+{
+    MEMORY_DEVICE             = 1 << 0, //!< device memory; the CPU works on a copy of it
+    MEMORY_SHARED_COHERENT    = 1 << 1, //!< the CPU addresses it; coherent, so no cache maintenance
+    MEMORY_SHARED_NONCOHERENT = 1 << 2, //!< the CPU addresses it; cached, maintained around CPU access
+    MEMORY_MANAGED            = 1 << 3  //!< the CPU addresses it; the runtime migrates it
+};
+
+//! true for the kinds the CPU addresses directly, whose access needs no copy
+static inline bool isSharedKind(int kind) { return kind != 0 && kind != MEMORY_DEVICE; }
 
 /** @brief A device of an accelerator backend, or the CPU (an empty Device). */
 class CV_EXPORTS Device
@@ -53,9 +70,12 @@ public:
     String name() const;        //!< "cuda:0", or "cpu"
     String description() const; //!< what the backend reports, for example the GPU model
 
-    /** @brief true when the CPU reaches this device's memory directly (NPUs, integrated GPUs),
-    false when it works on a copy (discrete GPUs). */
-    bool sharesHostMemory() const;
+    /** @brief The MemoryKind values this device can provide, as a bitmask.
+    MEMORY_SHARED_COHERENT for the CPU (an empty Device). */
+    int memoryKinds() const;
+
+    //! the kind a new buffer on this device gets when nothing asks for another one
+    MemoryKind defaultMemoryKind() const;
 
     /** @brief Allocator that places UMat data on this device.
     Use it as `UMat u; u.allocator = device.allocator();` before creating the data.
@@ -77,6 +97,11 @@ private:
 
 //! the device that holds @p m: empty for host memory, OpenCL buffers and other UMats
 CV_EXPORTS Device getDevice(const UMat& m);
+
+/** @brief The memory kind of @p m's buffer.
+MEMORY_SHARED_COHERENT for host memory, OpenCL buffers and other UMats, which the CPU
+addresses directly. */
+CV_EXPORTS MemoryKind getMemoryKind(const UMat& m);
 
 /** @brief A new in-order queue of work on @p device (see accel_backend.hpp), for ExecutionScope.
 Work on different streams may run concurrently. OpenCV orders the work of all streams that
@@ -111,10 +136,10 @@ CV_EXPORTS void synchronize(const Device& device);
 /** @brief Devices to try first for calls on memory shared with the CPU.
 
 Memory that NPUs, integrated GPUs and 2D engines share with the CPU can be reached by several
-of them. A call on such memory is offered to these devices in order (each reaches the memory
-through a dma-buf import, without copies), then to the device that holds it, then it runs on
-the CPU. The data stays where it is. Has no effect on memory the CPU reaches only through a copy
-(discrete GPUs). Empty by default. */
+of them. A call on a buffer of a shared kind is offered to these devices in order (each reaches
+the memory through a dma-buf import, without copies), then to the device that holds it, then it
+runs on the CPU. The data stays where it is. Has no effect on MEMORY_DEVICE buffers, which the
+CPU reaches only through a copy. Empty by default. */
 CV_EXPORTS void setPreferredDevices(const std::vector<Device>& devices);
 CV_EXPORTS std::vector<Device> getPreferredDevices();
 

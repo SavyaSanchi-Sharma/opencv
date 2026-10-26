@@ -96,23 +96,30 @@ public:
     virtual int deviceCount() const = 0;
     virtual String deviceDescription(int device) const = 0;
 
-    /** @brief true when the CPU can address this device's memory (hostAddress()), so CPU
-    access needs no copy; false when the CPU works on a copy of it. */
-    virtual bool sharesHostMemory(int device) const = 0;
+    /** @brief The MemoryKind values this device can provide, as a bitmask. At least one bit
+    must be set. A device whose memory the CPU cannot address offers MEMORY_DEVICE alone. */
+    virtual int memoryKinds(int device) const = 0;
+    /** @brief The kind of a new buffer when nothing asks for another one.
 
-    //! @p size bytes of device memory, or NULL when the device is out of memory
-    virtual void* allocate(int device, size_t size) = 0;
-    //! frees allocate()'d memory. OpenCV calls it only after all work using the memory has finished.
-    virtual void deallocate(int device, void* ptr) = 0;
+    By default the most CPU-accessible kind the device offers, so a device with shared memory
+    uses it and the CPU reaches its buffers without copies. Override to choose another one. */
+    virtual MemoryKind defaultMemoryKind(int device) const;
 
-    //! the CPU address of shared memory (sharesHostMemory()); returns @p ptr by default
-    virtual void* hostAddress(int device, void* ptr);
-    /** @brief Called before the CPU accesses shared memory, after the device work on it has
-    finished: makes the device's writes visible to the CPU (cache invalidation on non-coherent
-    memory). Does nothing by default, as coherent memory needs nothing. */
-    virtual void beginCpuAccess(int device, void* ptr, size_t size, bool write);
+    /** @brief @p size bytes of memory of @p kind, one of memoryKinds(), or NULL when the
+    device is out of memory. */
+    virtual void* allocate(int device, size_t size, MemoryKind kind) = 0;
+    /** @brief Frees memory from allocate(), of the @p kind it was allocated with. OpenCV calls
+    it only after all work using the memory has finished. */
+    virtual void deallocate(int device, void* ptr, MemoryKind kind) = 0;
+
+    //! the CPU address of memory of a shared @p kind; returns @p ptr by default
+    virtual void* hostAddress(int device, void* ptr, MemoryKind kind);
+    /** @brief Called before the CPU accesses memory of a shared @p kind, after the device work
+    on it has finished: makes the device's writes visible to the CPU (cache invalidation on
+    MEMORY_SHARED_NONCOHERENT). Does nothing by default, as coherent memory needs nothing. */
+    virtual void beginCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool write);
     //! called when the CPU is done: makes its writes visible to the device (cache clean). Does nothing by default.
-    virtual void endCpuAccess(int device, void* ptr, size_t size, bool written);
+    virtual void endCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool written);
 
     /** @brief Host memory for the CPU's copy of device memory, preferably pinned so copies to
     and from it run asynchronously. fastMalloc by default. NULL when out of memory. */
@@ -132,12 +139,14 @@ public:
     virtual Ptr<Stream> createStream(int device) = 0;
 
     /** @brief Imports a Linux dma-buf of @p size bytes as device memory, without copying.
-    @p fd stays the caller's (dup() it to keep it). deallocate() releases the import. Returns
-    NULL when the device cannot import it, which is the default. */
-    virtual void* importDmaBuf(int device, int fd, size_t size);
-    /** @brief Exports allocate()'d or imported memory as a dma-buf: a new file descriptor that
-    the caller closes, or -1 when that is not possible, which is the default. */
-    virtual int exportDmaBuf(int device, void* ptr, size_t size);
+
+    @p fd stays the caller's (dup() it to keep it). Sets @p kind to the kind of the imported
+    memory, which the exporter decides, not defaultMemoryKind(). deallocate() releases the
+    import. Returns NULL when the device cannot import it, which is the default. */
+    virtual void* importDmaBuf(int device, int fd, size_t size, MemoryKind& kind);
+    /** @brief Exports allocate()'d or imported memory of @p kind as a dma-buf: a new file
+    descriptor that the caller closes, or -1 when that is not possible, which is the default. */
+    virtual int exportDmaBuf(int device, void* ptr, size_t size, MemoryKind kind);
 
     //! operations for @p module ("core", ...), or NULL when the backend has none
     virtual Ops* ops(const String& module);

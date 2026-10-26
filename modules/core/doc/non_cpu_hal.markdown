@@ -140,18 +140,22 @@ public:
     cv::String name() const override { return "mynpu"; }
     int deviceCount() const override;
     cv::String deviceDescription(int device) const override;
-    bool sharesHostMemory(int device) const override { return true; }
+    int memoryKinds(int device) const override { return cv::accel::MEMORY_SHARED_COHERENT; }
 
-    void* allocate(int device, size_t size) override;      // NULL when out of memory
-    void deallocate(int device, void* ptr) override;       // called once the work using it is done
-    void beginCpuAccess(int device, void* ptr, size_t size, bool write) override;   // cache invalidate
-    void endCpuAccess(int device, void* ptr, size_t size, bool written) override;   // cache clean
+    void* allocate(int device, size_t size, cv::accel::MemoryKind kind) override;   // NULL when out of memory
+    void deallocate(int device, void* ptr, cv::accel::MemoryKind kind) override;    // once the work using it is done
+    void beginCpuAccess(int device, void* ptr, size_t size,
+                        cv::accel::MemoryKind kind, bool write) override;           // cache invalidate
+    void endCpuAccess(int device, void* ptr, size_t size,
+                      cv::accel::MemoryKind kind, bool written) override;           // cache clean
     void copy(int device, cv::accel::CopyKind kind, void* dst, size_t dstStep,
               const void* src, size_t srcStep, size_t widthBytes, size_t rows,
               cv::accel::Stream& stream, bool hostStable) override;
     cv::Ptr<cv::accel::Stream> createStream(int device) override;
-    void* importDmaBuf(int device, int fd, size_t size) override;    // optional
-    int exportDmaBuf(int device, void* ptr, size_t size) override;   // optional
+    void* importDmaBuf(int device, int fd, size_t size,
+                       cv::accel::MemoryKind& kind) override;        // optional
+    int exportDmaBuf(int device, void* ptr, size_t size,
+                     cv::accel::MemoryKind kind) override;           // optional
     cv::accel::Ops* ops(const cv::String& module) override;   // &myCoreOps for "core"
 };
 

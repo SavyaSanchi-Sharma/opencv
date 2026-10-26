@@ -195,11 +195,15 @@ public:
     String name() const CV_OVERRIDE { return "hip"; }
     int deviceCount() const CV_OVERRIDE { return (int)devs_.size(); }
     String deviceDescription(int device) const CV_OVERRIDE { return devs_[device]->prop.name; }
-    bool sharesHostMemory(int device) const CV_OVERRIDE { return devs_[device]->shared; }
+    int memoryKinds(int device) const CV_OVERRIDE
+    {
+        return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
+    }
 
-    void* allocate(int device, size_t size) CV_OVERRIDE
+    void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE
     {
         Dev& d = *devs_[device];
+        CV_Assert(kind == (d.shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE));
         DeviceGuard g(device);
         void* p = 0;
         hipError_t r;
@@ -223,7 +227,7 @@ public:
         return p;
     }
 
-    void deallocate(int device, void* ptr) CV_OVERRIDE
+    void deallocate(int device, void* ptr, MemoryKind) CV_OVERRIDE
     {
         // called while UMats are released: report failures, never throw
         try

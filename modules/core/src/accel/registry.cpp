@@ -30,12 +30,25 @@ Backend::~Backend() {}
 bool CoreOps::flip(const UMat&, UMat&, int, Stream&) { return false; }
 bool CoreOps::transpose(const UMat&, UMat&, Stream&) { return false; }
 
-void* Backend::hostAddress(int, void* ptr) { return ptr; }
-void Backend::beginCpuAccess(int, void*, size_t, bool) {}
-void Backend::endCpuAccess(int, void*, size_t, bool) {}
-void* Backend::importDmaBuf(int, int, size_t) { return 0; }
-int Backend::exportDmaBuf(int, void*, size_t) { return -1; }
+void* Backend::hostAddress(int, void* ptr, MemoryKind) { return ptr; }
+void Backend::beginCpuAccess(int, void*, size_t, MemoryKind, bool) {}
+void Backend::endCpuAccess(int, void*, size_t, MemoryKind, bool) {}
+void* Backend::importDmaBuf(int, int, size_t, MemoryKind&) { return 0; }
+int Backend::exportDmaBuf(int, void*, size_t, MemoryKind) { return -1; }
 Ops* Backend::ops(const String&) { return 0; }
+
+MemoryKind Backend::defaultMemoryKind(int device) const
+{
+    // the most CPU-accessible kind on offer, so shared memory is used where there is some
+    const int kinds = memoryKinds(device);
+    if (kinds & MEMORY_SHARED_COHERENT)
+        return MEMORY_SHARED_COHERENT;
+    if (kinds & MEMORY_SHARED_NONCOHERENT)
+        return MEMORY_SHARED_NONCOHERENT;
+    if (kinds & MEMORY_MANAGED)
+        return MEMORY_MANAGED;
+    return MEMORY_DEVICE;
+}
 
 void* Backend::allocateHost(int, size_t size)
 {
@@ -56,8 +69,10 @@ void Backend::deallocateHost(int, void* ptr)
 
 Device::Impl::Impl(const Ptr<Backend>& b, int i)
     : backend(b), index(i), name(cv::format("%s:%d", b->name().c_str(), i)),
-      shared(b->sharesHostMemory(i)), allocator(0)
+      kinds(b->memoryKinds(i)), defaultKind(b->defaultMemoryKind(i)), pinnedBytes(0), allocator(0)
 {
+    CV_Assert(kinds != 0 && "accel: a device must provide at least one memory kind");
+    CV_Assert((kinds & (int)defaultKind) != 0 && "accel: the default memory kind is not provided");
     allocator = new detail::DeviceAllocator(this);
 }
 
@@ -331,7 +346,8 @@ String Device::backend() const { return impl_ ? impl_->backend->name() : String(
 int Device::index() const { return impl_ ? impl_->index : -1; }
 String Device::name() const { return impl_ ? impl_->name : String("cpu"); }
 String Device::description() const { return impl_ ? impl_->backend->deviceDescription(impl_->index) : String("CPU"); }
-bool Device::sharesHostMemory() const { return impl_ ? impl_->shared : true; }
+int Device::memoryKinds() const { return impl_ ? impl_->kinds : (int)MEMORY_SHARED_COHERENT; }
+MemoryKind Device::defaultMemoryKind() const { return impl_ ? impl_->defaultKind : MEMORY_SHARED_COHERENT; }
 
 MatAllocator* Device::allocator() const
 {
@@ -342,6 +358,12 @@ Device getDevice(const UMat& m)
 {
     detail::BufferState* st = detail::stateOf(m.u);
     return st ? Device(st->dev) : Device();
+}
+
+MemoryKind getMemoryKind(const UMat& m)
+{
+    detail::BufferState* st = detail::stateOf(m.u);
+    return st ? st->kind : MEMORY_SHARED_COHERENT;
 }
 
 Ptr<Stream> createStream(const Device& device)
