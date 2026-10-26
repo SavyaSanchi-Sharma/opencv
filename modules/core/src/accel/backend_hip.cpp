@@ -136,32 +136,58 @@ HipStream& hipStreamOf(Stream& s)
     return *hs;
 }
 
+/* How one UMat argument is addressed, 2-D or a 3-D batch of 2-D frames. A single image is
+   one frame whose stride is never used. */
+struct Frames
+{
+    int n, rows, cols;
+    size_t row, frame;      // bytes between rows, and between frames
+
+    explicit Frames(const UMat& m)
+    {
+        const bool batched = m.dims == 3;
+        n     = batched ? m.size[0] : 1;
+        rows  = batched ? m.size[1] : m.rows;
+        cols  = batched ? m.size[2] : m.cols;
+        row   = m.step[m.dims - 2];
+        frame = batched ? m.step[0] : 0;
+    }
+};
+
+//! 2-D, or a 3-D batch; anything else the backend leaves to OpenCV
+inline bool addressable(const UMat& m, int esz)
+{
+    return (m.dims == 2 || m.dims == 3) && kernels::supportedElementSize(esz);
+}
+
 class HipCoreOps CV_FINAL : public CoreOps
 {
 public:
     bool flip(const UMat& src, UMat& dst, int flipCode, Stream& stream) CV_OVERRIDE
     {
         const int esz = (int)src.elemSize();
-        if (src.dims != 2 || !kernels::supportedElementSize(esz))
+        if (!addressable(src, esz) || src.dims != dst.dims)
             return false;
+        const Frames s_(src), d_(dst);
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(s.device_);
-        check(kernels::flip((const unsigned char*)devicePtr(src), src.step[0],
-                            (unsigned char*)devicePtr(dst), dst.step[0],
-                            src.rows, src.cols, esz, flipCode, s.s_), "flip");
+        check(kernels::flip((const unsigned char*)devicePtr(src), s_.row, s_.frame,
+                            (unsigned char*)devicePtr(dst), d_.row, d_.frame,
+                            s_.n, s_.rows, s_.cols, esz, flipCode, s.s_), "flip");
         return true;
     }
 
     bool transpose(const UMat& src, UMat& dst, Stream& stream) CV_OVERRIDE
     {
         const int esz = (int)src.elemSize();
-        if (src.dims != 2 || !kernels::supportedElementSize(esz))
+        if (!addressable(src, esz) || src.dims != dst.dims)
             return false;
+        const Frames s_(src), d_(dst);
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(s.device_);
-        check(kernels::transpose((const unsigned char*)devicePtr(src), src.step[0],
-                                 (unsigned char*)devicePtr(dst), dst.step[0],
-                                 src.rows, src.cols, esz, s.s_), "transpose");
+        check(kernels::transpose((const unsigned char*)devicePtr(src), s_.row, s_.frame,
+                                 (unsigned char*)devicePtr(dst), d_.row, d_.frame,
+                                 s_.n, s_.rows, s_.cols, esz, s.s_), "transpose");
         return true;
     }
 };

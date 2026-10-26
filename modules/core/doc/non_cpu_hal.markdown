@@ -92,8 +92,16 @@ Asking a driver for memory is dear — an allocation from ROCm's stream-ordered 
 15 us whatever its size, and pinning host memory about 0.2 ms per megabyte — so a pipeline that
 creates a buffer per frame spends most of its time allocating.
 `OPENCV_ACCEL_CACHE_MAX_MB` keeps released memory for the next buffer of the same size and
-kind instead of giving it back. Cached memory is still allocated, so it still counts against
-the pinned budget, and it is all returned to the device when an allocation fails.
+kind instead of giving it back, host copies of device buffers included. Cached memory is still
+allocated, so it still counts against the pinned budget — a buffer the budget would otherwise
+turn down is allowed when the cache already holds a block of that size and kind, since reusing
+it costs nothing.
+
+Three things to know about it. Blocks are matched by **exact size**, which suits a pipeline
+whose frames are all the same and does nothing for one whose sizes vary. Memory whose dma-buf
+was exported, or whose device pointer `UMat::handle()` returned, is never reused, because
+something outside OpenCV may still be reading it. And the cache is emptied only when the
+device runs out of memory, so what it holds stays held until then.
 
 Two things the counters cannot tell you. The budget is per device though pinned memory is a
 property of the machine, and its check is not atomic with the allocation that follows, so

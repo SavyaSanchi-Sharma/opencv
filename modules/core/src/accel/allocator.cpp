@@ -155,9 +155,13 @@ std::vector<Retired>& retiredList()
 
 std::atomic<int> g_retiredCount(0);
 
-// the allocation cache, defined below next to allocateDevice()
-void* cacheTake(Device::Impl* dev, size_t size, MemoryKind kind);
-bool cachePut(Device::Impl* dev, void* ptr, size_t size, MemoryKind kind);
+/* The allocation cache, defined below next to allocateDevice(). @p kind is a MemoryKind, or
+   CACHE_HOST for the host copy of a device buffer, which a backend pins too and which costs
+   the same to allocate again. */
+const int CACHE_HOST = 0;   // no MemoryKind uses it
+void* cacheTake(Device::Impl* dev, size_t size, int kind);
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, int kind);
+bool cacheHas(Device::Impl* dev, size_t size, int kind);
 void cacheFlush(Device::Impl* dev);
 
 void freeNow(const Retired& r)
@@ -180,7 +184,7 @@ void freeNow(const Retired& r)
                 r.dev->pinnedBytes -= r.pinnedSize;
         }
     }
-    if (r.hostCopy)
+    if (r.hostCopy && !cachePut(r.dev, r.hostCopy, r.hostCopySize, CACHE_HOST))
     {
         r.dev->backend->deallocateHost(r.dev->index, r.hostCopy);
         r.dev->pinnedBytes -= r.hostCopySize;
@@ -273,7 +277,10 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage, bool
        are deliberate: a lock here would sit on every allocation to defend a soft limit. */
     const size_t limit = pinnedLimit();
     if (limit && isSharedKind(kind) && (dev->kinds & MEMORY_DEVICE)
-        && dev->pinnedBytes.load() + size > limit)
+        && dev->pinnedBytes.load() + size > limit
+        // a block of this size and kind is already allocated and already counted: reusing it
+        // adds nothing to the total, so the budget has no reason to refuse it
+        && !cacheHas(dev, size, kind))
     {
         CV_LOG_DEBUG(NULL, "accel: " << dev->name << " is at its pinned budget ("
                      << dev->pinnedBytes.load() << " + " << size << " > " << limit
@@ -305,12 +312,12 @@ size_t cacheLimit()
 }
 
 //! memory of exactly this size and kind that was released earlier, or NULL
-void* cacheTake(Device::Impl* dev, size_t size, MemoryKind kind)
+void* cacheTake(Device::Impl* dev, size_t size, int kind)
 {
     if (!cacheLimit())
         return 0;
     std::lock_guard<std::mutex> lock(dev->cacheMutex);
-    auto it = dev->cache.find(std::make_pair(size, (int)kind));
+    auto it = dev->cache.find(std::make_pair(size, kind));
     if (it == dev->cache.end() || it->second.empty())
         return 0;
     void* p = it->second.back();
@@ -319,9 +326,19 @@ void* cacheTake(Device::Impl* dev, size_t size, MemoryKind kind)
     return p;
 }
 
+//! true when cacheTake() would return something, without taking it
+bool cacheHas(Device::Impl* dev, size_t size, int kind)
+{
+    if (!cacheLimit())
+        return false;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    auto it = dev->cache.find(std::make_pair(size, kind));
+    return it != dev->cache.end() && !it->second.empty();
+}
+
 /** @brief Keeps @p ptr for the next buffer of this size and kind. False when the cache is off
 or full, and then the caller frees it. The device work that used it has finished. */
-bool cachePut(Device::Impl* dev, void* ptr, size_t size, MemoryKind kind)
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, int kind)
 {
     const size_t limit = cacheLimit();
     if (!limit || size == 0 || size > limit)
@@ -329,7 +346,7 @@ bool cachePut(Device::Impl* dev, void* ptr, size_t size, MemoryKind kind)
     std::lock_guard<std::mutex> lock(dev->cacheMutex);
     if (dev->cachedBytes + size > limit)
         return false;
-    dev->cache[std::make_pair(size, (int)kind)].push_back(ptr);
+    dev->cache[std::make_pair(size, kind)].push_back(ptr);
     dev->cachedBytes += size;
     return true;
 }
@@ -346,11 +363,14 @@ void cacheFlush(Device::Impl* dev)
     for (auto it = taken.begin(); it != taken.end(); ++it)
     {
         const size_t size = it->first.first;
-        const MemoryKind kind = (MemoryKind)it->first.second;
+        const int kind = it->first.second;
         for (size_t i = 0; i < it->second.size(); i++)
         {
-            dev->backend->deallocate(dev->index, it->second[i], kind);
-            if (isSharedKind(kind))
+            if (kind == CACHE_HOST)
+                dev->backend->deallocateHost(dev->index, it->second[i]);
+            else
+                dev->backend->deallocate(dev->index, it->second[i], (MemoryKind)kind);
+            if (kind == CACHE_HOST || isSharedKind(kind))
                 dev->pinnedBytes -= size;
         }
     }
@@ -427,7 +447,7 @@ bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
     // all work on it has finished, so it can go straight to the next buffer of its size
     if (!cachePut(dev, u->handle, u->size, st->kind))
         b.deallocate(dev->index, u->handle, st->kind);
-    if (u->data)
+    if (u->data && !cachePut(dev, u->data, u->size, CACHE_HOST))
     {
         b.deallocateHost(dev->index, u->data);          // the host copy is not needed any more
         dev->pinnedBytes -= u->size;
@@ -740,9 +760,11 @@ void DeviceAllocator::deallocate(UMatData* u) const
     r.dev = dev_;
     r.devPtr = u->handle;
     r.kind = st->kind;
-    // an import is the exporter's memory: allocateDevice never counted it, and releasing it
-    // releases the import, so it is not ours to keep for the next buffer either
-    r.size = st->imported ? 0 : u->size;
+    /* Not ours to hand to the next buffer: an import is the exporter's memory, and memory
+       whose dma-buf or device pointer went outside may still be read by a display, an encoder
+       or another device. Freeing those was safe because an exported dma-buf keeps the pages
+       alive; reusing them for a new UMat would not be. */
+    r.size = (st->imported || st->externallyReferenced) ? 0 : u->size;
     r.pinnedSize = (!st->imported && isSharedKind(st->kind)) ? u->size : 0;
     r.hostCopy = (!isSharedKind(st->kind) && u->data) ? (void*)u->data : 0;
     r.hostCopySize = r.hostCopy ? u->size : 0;
@@ -799,7 +821,11 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
     {
         if (!u->data && u->size > 0)
         {
-            u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
+            u->data = u->origdata = (uchar*)cacheTake(dev_, u->size, CACHE_HOST);
+            if (!u->data)
+                u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
+            else
+                dev_->pinnedBytes -= u->size;   // added again below, as for a fresh one
             if (!u->data)
                 CV_Error_(Error::StsNoMem, ("accel: no host memory for a copy of %llu bytes", (unsigned long long)u->size));
             /* Counted against the budget because a backend pins this where it can, which is

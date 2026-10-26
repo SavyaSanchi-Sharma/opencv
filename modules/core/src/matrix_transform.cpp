@@ -480,13 +480,45 @@ static bool ocl_transpose( InputArray _src, OutputArray _dst )
 
 #endif
 
+/* A 3-D [N, H, W] argument is a batch: the 2-D operation applied to each of its N frames,
+   channels in the type. One call and one kernel launch cover all of them. The 2-D shape is
+   unchanged. */
+static MatShape batchedShape(InputArray a, bool swapHW)
+{
+    const int d = a.dims();
+    if (d == 3)
+    {
+        const MatShape s = a.shape();
+        return swapHW ? MatShape({s[0], s[2], s[1]}) : s;
+    }
+    const Size sz = a.size();
+    return swapHW ? MatShape({sz.width, sz.height}) : MatShape({sz.height, sz.width});
+}
+
+//! the 2-D operation applied to each frame, on the CPU; for a batch no backend would take
+template<class Fn>
+static void forEachFrame(InputArray _src, OutputArray _dst, bool swapHW, Fn fn2d)
+{
+    Mat src = _src.getMat();
+    const int n = src.size[0];
+    const int dsz[] = { n, swapHW ? src.size[2] : src.size[1],
+                           swapHW ? src.size[1] : src.size[2] };
+    _dst.create(3, dsz, src.type());
+    Mat dst = _dst.getMat();
+    CV_Assert(src.data != dst.data && "flip/transpose of a batch cannot be done in place");
+    for (int i = 0; i < n; i++)
+    {
+        Mat d = accel::batchFrame(dst, i);
+        fn2d(accel::batchFrame(src, i), d);
+    }
+}
+
 static bool accel_transpose(InputArray _src, OutputArray _dst)
 {
     if (_src.empty())
         return false;
-    const Size sz = _src.size();
     accel::detail::OpCall call("transpose");
-    call.input(_src).output(_dst, MatShape({sz.width, sz.height}), _src.type());
+    call.input(_src).output(_dst, batchedShape(_src, true), _src.type());
     return call.run<accel::CoreOps>([](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& s) {
         return ops.transpose(a[0], a[1], s);
     });
@@ -497,6 +529,16 @@ void transpose( InputArray _src, OutputArray _dst )
     CV_INSTRUMENT_REGION();
 
     int type = _src.type(), esz = CV_ELEM_SIZE(type);
+
+    if (_src.dims() == 3)
+    {
+        // a batch of frames: see batchedShape(). transposeND() is the other reading of a 3-D
+        // input, where the axes themselves are permuted
+        CV_Assert( esz <= 32 );
+        CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_transpose(_src, _dst))
+        forEachFrame(_src, _dst, true, [](const Mat& s, Mat& d) { transpose(s, d); });
+        return;
+    }
     CV_Assert( _src.dims() <= 2 && esz <= 32 );
 
     CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_transpose(_src, _dst))
@@ -1037,9 +1079,8 @@ static bool accel_flip(InputArray _src, OutputArray _dst, int flipMode)
 {
     if (_src.empty())
         return false;
-    const Size sz = _src.size();    // what the CPU and OpenCL paths create: always 2-D
     accel::detail::OpCall call("flip");
-    call.input(_src).output(_dst, MatShape({sz.height, sz.width}), _src.type());
+    call.input(_src).output(_dst, batchedShape(_src, false), _src.type());
     return call.run<accel::CoreOps>([flipMode](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& s) {
         return ops.flip(a[0], a[1], flipMode, s);
     });
@@ -1049,6 +1090,15 @@ void flip( InputArray _src, OutputArray _dst, int flip_mode )
 {
     CV_INSTRUMENT_REGION();
 
+    if (_src.dims() == 3)
+    {
+        // a batch of frames: each is flipped on its own. flipND() is the other reading of a
+        // 3-D input, where the chosen axis itself is reversed
+        CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_flip(_src, _dst, flip_mode))
+        forEachFrame(_src, _dst, false,
+                     [flip_mode](const Mat& s, Mat& d) { flip(s, d, flip_mode); });
+        return;
+    }
     CV_Assert( _src.dims() <= 2 );
     Size size = _src.size();
 

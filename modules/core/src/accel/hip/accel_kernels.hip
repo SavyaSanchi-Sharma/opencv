@@ -20,11 +20,16 @@ const int BLOCK_X = 32, BLOCK_Y = 8;
 
 // gridDim.y is limited: taller images are covered by a loop over y
 const unsigned MAX_GRID_Y = 65535;
+// gridDim.z likewise, and a frame of a batch is one z: a larger batch is declined
+const int MAX_GRID_Z = 65535;
 
 template<int N>
-__global__ void flipKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
+__global__ void flipKernel(const unsigned char* src, size_t sstep, size_t sframe,
+                           unsigned char* dst, size_t dstep, size_t dframe,
                            int rows, int cols, bool flipRows, bool flipCols)
 {
+    src += (size_t)blockIdx.z * sframe;     // this block's frame of the batch
+    dst += (size_t)blockIdx.z * dframe;
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     if (x >= cols)
         return;
@@ -38,9 +43,12 @@ __global__ void flipKernel(const unsigned char* src, size_t sstep, unsigned char
 }
 
 template<int N>
-__global__ void transposeKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
+__global__ void transposeKernel(const unsigned char* src, size_t sstep, size_t sframe,
+                                unsigned char* dst, size_t dstep, size_t dframe,
                                 int rows, int cols)
 {
+    src += (size_t)blockIdx.z * sframe;     // this block's frame of the batch
+    dst += (size_t)blockIdx.z * dframe;
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     if (x >= cols)
         return;
@@ -49,29 +57,33 @@ __global__ void transposeKernel(const unsigned char* src, size_t sstep, unsigned
             *(const Bytes<N>*)(src + (size_t)y * sstep + (size_t)x * N);
 }
 
-inline dim3 grid(int rows, int cols)
+//! the frames of a batch go on z, which the hardware limits to MAX_GRID_Z of them
+inline dim3 grid(int batch, int rows, int cols)
 {
     const unsigned gy = (unsigned)((rows + BLOCK_Y - 1) / BLOCK_Y);
-    return dim3((unsigned)((cols + BLOCK_X - 1) / BLOCK_X), gy < MAX_GRID_Y ? gy : MAX_GRID_Y);
+    return dim3((unsigned)((cols + BLOCK_X - 1) / BLOCK_X),
+                gy < MAX_GRID_Y ? gy : MAX_GRID_Y, (unsigned)batch);
 }
 
 template<int N>
-hipError_t flipN(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                 int rows, int cols, int mode, hipStream_t s)
+hipError_t flipN(const unsigned char* src, size_t sstep, size_t sframe,
+                 unsigned char* dst, size_t dstep, size_t dframe,
+                 int batch, int rows, int cols, int mode, hipStream_t s)
 {
     // OpenCV's codes: 0 around the x axis (rows), > 0 around the y axis (columns), < 0 both
     const bool flipRows = mode <= 0, flipCols = mode != 0;
-    hipLaunchKernelGGL(flipKernel<N>, grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
-                       src, sstep, dst, dstep, rows, cols, flipRows, flipCols);
+    hipLaunchKernelGGL(flipKernel<N>, grid(batch, rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
+                       src, sstep, sframe, dst, dstep, dframe, rows, cols, flipRows, flipCols);
     return hipGetLastError();
 }
 
 template<int N>
-hipError_t transposeN(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                      int rows, int cols, hipStream_t s)
+hipError_t transposeN(const unsigned char* src, size_t sstep, size_t sframe,
+                      unsigned char* dst, size_t dstep, size_t dframe,
+                      int batch, int rows, int cols, hipStream_t s)
 {
-    hipLaunchKernelGGL(transposeKernel<N>, grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
-                       src, sstep, dst, dstep, rows, cols);
+    hipLaunchKernelGGL(transposeKernel<N>, grid(batch, rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
+                       src, sstep, sframe, dst, dstep, dframe, rows, cols);
     return hipGetLastError();
 }
 
@@ -104,20 +116,26 @@ bool supportedElementSize(int esz)
     default: return hipErrorInvalidValue; \
     }
 
-hipError_t flip(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                int rows, int cols, int esz, int mode, hipStream_t s)
+hipError_t flip(const unsigned char* src, size_t sstep, size_t sframe,
+                unsigned char* dst, size_t dstep, size_t dframe,
+                int batch, int rows, int cols, int esz, int mode, hipStream_t s)
 {
-    if (rows <= 0 || cols <= 0)
+    if (rows <= 0 || cols <= 0 || batch <= 0)
         return hipSuccess;
-    CV_ACCEL_HIP_BY_SIZE(flipN, src, sstep, dst, dstep, rows, cols, mode, s)
+    if (batch > MAX_GRID_Z)
+        return hipErrorInvalidValue;    // the op declines and OpenCV runs it elsewhere
+    CV_ACCEL_HIP_BY_SIZE(flipN, src, sstep, sframe, dst, dstep, dframe, batch, rows, cols, mode, s)
 }
 
-hipError_t transpose(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                     int rows, int cols, int esz, hipStream_t s)
+hipError_t transpose(const unsigned char* src, size_t sstep, size_t sframe,
+                     unsigned char* dst, size_t dstep, size_t dframe,
+                     int batch, int rows, int cols, int esz, hipStream_t s)
 {
-    if (rows <= 0 || cols <= 0)
+    if (rows <= 0 || cols <= 0 || batch <= 0)
         return hipSuccess;
-    CV_ACCEL_HIP_BY_SIZE(transposeN, src, sstep, dst, dstep, rows, cols, s)
+    if (batch > MAX_GRID_Z)
+        return hipErrorInvalidValue;
+    CV_ACCEL_HIP_BY_SIZE(transposeN, src, sstep, sframe, dst, dstep, dframe, batch, rows, cols, s)
 }
 
 #undef CV_ACCEL_HIP_BY_SIZE

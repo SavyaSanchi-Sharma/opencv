@@ -103,6 +103,20 @@ MEMORY_SHARED_COHERENT for host memory, OpenCL buffers and other UMats, which th
 addresses directly. */
 CV_EXPORTS MemoryKind getMemoryKind(const UMat& m);
 
+/** @brief Frame @p i of a batch: a 2-D header over the bytes of slice @p i of the 3-D
+@p batch, without copying.
+
+A batch holds N frames of the same size and type as `[N, H, W]`, channels in the type, so one
+upload and one call cover all of them. Writing the returned header writes the batch. It keeps
+the batch's memory alive, and for a UMat it is the same buffer, so device work on either is
+ordered against the other.
+
+Throws when @p batch is not 3-D, when @p i is out of range, or when the frames are not laid
+out one after another (a batch that is itself a region of a larger array). */
+CV_EXPORTS UMat batchFrame(const UMat& batch, int i);
+/** @overload */
+CV_EXPORTS Mat batchFrame(const Mat& batch, int i);
+
 /** @brief A new in-order queue of work on @p device (see accel_backend.hpp), for ExecutionScope.
 Work on different streams may run concurrently. OpenCV orders the work of all streams that
 touch the same UMat. */

@@ -500,11 +500,19 @@ bool EmuCoreOps::flip(const UMat& src, UMat& dst, int flipCode, accel::Stream& s
         return false;   // the emulated device has no doubles: the CPU runs these calls
     if (b_->throwNext.exchange(false))
         CV_Error(Error::StsError, "emu: flip failed");
+    if (src.dims != 2 && src.dims != 3)
+        return false;
     EmuStream* s = &emuStreamOf(stream);
     b_->opsRun_[s->device_]++;
+    // a 3-D [N, H, W] argument is a batch of N frames; a 2-D one is a single frame
+    const bool batched = src.dims == 3;
     const uintptr_t sa = (uintptr_t)accel::devicePtr(src), da = (uintptr_t)accel::devicePtr(dst);
-    const size_t ss = src.step[0], ds = dst.step[0];
-    const int rows = src.rows, cols = src.cols, esz = (int)src.elemSize();
+    const size_t ss = src.step[src.dims - 2], ds = dst.step[dst.dims - 2];
+    const size_t sf = batched ? src.step[0] : 0, df = batched ? dst.step[0] : 0;
+    const int n    = batched ? src.size[0] : 1;
+    const int rows = batched ? src.size[1] : src.rows;
+    const int cols = batched ? src.size[2] : src.cols;
+    const int esz = (int)src.elemSize();
     const bool fail = b_->failNextAsync.exchange(false);
     EmuBackend* b = b_;
     s->enqueue([=] {
@@ -514,15 +522,17 @@ bool EmuCoreOps::flip(const UMat& src, UMat& dst, int flipCode, accel::Stream& s
             return;
         }
         std::lock_guard<std::mutex> lock(b->mem_);
-        const uchar* sp = b->deviceBytes(sa, ss, (size_t)cols * esz, rows);
-        uchar* dp = b->deviceBytes(da, ds, (size_t)cols * esz, rows);
+        const uchar* sp = b->deviceBytes(sa, ss, (size_t)cols * esz, rows + (n - 1) * (int)(sf / ss));
+        uchar* dp = b->deviceBytes(da, ds, (size_t)cols * esz, rows + (n - 1) * (int)(df / ds));
         if (!sp || !dp)
             return;
         const bool flipRows = flipCode <= 0, flipCols = flipCode != 0;
-        for (int y = 0; y < rows; y++)
-            for (int x = 0; x < cols; x++)
-                memcpy(dp + y * ds + (size_t)x * esz,
-                       sp + (flipRows ? rows - 1 - y : y) * ss + (size_t)(flipCols ? cols - 1 - x : x) * esz, esz);
+        for (int f = 0; f < n; f++)
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < cols; x++)
+                    memcpy(dp + f * df + y * ds + (size_t)x * esz,
+                           sp + f * sf + (flipRows ? rows - 1 - y : y) * ss
+                              + (size_t)(flipCols ? cols - 1 - x : x) * esz, esz);
     });
     return true;
 }
@@ -532,20 +542,29 @@ bool EmuCoreOps::transpose(const UMat& src, UMat& dst, accel::Stream& stream)
     EmuStream* s = &emuStreamOf(stream);
     if (src.depth() == CV_64F || s->device_ == EMU_ENGINE)
         return false;   // the 2D engine only flips
+    if (src.dims != 2 && src.dims != 3)
+        return false;
     b_->opsRun_[s->device_]++;
+    const bool batched = src.dims == 3;
     const uintptr_t sa = (uintptr_t)accel::devicePtr(src), da = (uintptr_t)accel::devicePtr(dst);
-    const size_t ss = src.step[0], ds = dst.step[0];
-    const int rows = src.rows, cols = src.cols, esz = (int)src.elemSize();
+    const size_t ss = src.step[src.dims - 2], ds = dst.step[dst.dims - 2];
+    const size_t sf = batched ? src.step[0] : 0, df = batched ? dst.step[0] : 0;
+    const int n    = batched ? src.size[0] : 1;
+    const int rows = batched ? src.size[1] : src.rows;
+    const int cols = batched ? src.size[2] : src.cols;
+    const int esz = (int)src.elemSize();
     EmuBackend* b = b_;
     s->enqueue([=] {
         std::lock_guard<std::mutex> lock(b->mem_);
-        const uchar* sp = b->deviceBytes(sa, ss, (size_t)cols * esz, rows);
-        uchar* dp = b->deviceBytes(da, ds, (size_t)rows * esz, cols);
+        const uchar* sp = b->deviceBytes(sa, ss, (size_t)cols * esz, rows + (n - 1) * (int)(sf / ss));
+        uchar* dp = b->deviceBytes(da, ds, (size_t)rows * esz, cols + (n - 1) * (int)(df / ds));
         if (!sp || !dp)
             return;
-        for (int y = 0; y < rows; y++)
-            for (int x = 0; x < cols; x++)
-                memcpy(dp + x * ds + (size_t)y * esz, sp + y * ss + (size_t)x * esz, esz);
+        for (int f = 0; f < n; f++)
+            for (int y = 0; y < rows; y++)
+                for (int x = 0; x < cols; x++)
+                    memcpy(dp + f * df + x * ds + (size_t)y * esz,
+                           sp + f * sf + y * ss + (size_t)x * esz, esz);
     });
     return true;
 }

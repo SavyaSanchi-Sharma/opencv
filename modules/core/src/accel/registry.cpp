@@ -382,6 +382,40 @@ MemoryKind getMemoryKind(const UMat& m)
     return st ? st->kind : MEMORY_SHARED_COHERENT;
 }
 
+namespace {
+
+//! checks batchFrame's arguments and gives the ranges of slice @p i
+void batchFrameRanges(int dims, const int* size, int i, Range ranges[3])
+{
+    CV_Assert(dims == 3 && "accel: a batch is [N, H, W], channels in the type");
+    CV_Assert(0 <= i && i < size[0] && "accel: no such frame in the batch");
+    ranges[0] = Range(i, i + 1);
+    ranges[1] = Range::all();
+    ranges[2] = Range::all();
+}
+
+} // namespace
+
+/* The slice is [1, H, W] over the batch's own buffer; reshaping it to [H, W] drops the
+   leading dimension without copying and keeps the reference to that buffer. The reshape is
+   what rejects a batch whose frames are not contiguous, which is the case this cannot serve
+   with a plain 2-D header. */
+UMat batchFrame(const UMat& batch, int i)
+{
+    Range ranges[3];
+    batchFrameRanges(batch.dims, batch.size.p, i, ranges);
+    const int sz[] = { batch.size[1], batch.size[2] };
+    return UMat(batch, ranges).reshape(0, 2, sz);
+}
+
+Mat batchFrame(const Mat& batch, int i)
+{
+    Range ranges[3];
+    batchFrameRanges(batch.dims, batch.size.p, i, ranges);
+    const int sz[] = { batch.size[1], batch.size[2] };
+    return Mat(batch, ranges).reshape(0, 2, sz);
+}
+
 Ptr<Stream> createStream(const Device& device)
 {
     CV_Assert(!device.empty() && "accel: streams belong to a device");
