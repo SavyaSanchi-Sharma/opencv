@@ -330,8 +330,18 @@ private:
 
 } // namespace
 
+#ifndef BUILD_PLUGIN
+//! built into core: the registry creates it (registry.cpp), there is no plugin to load
+Ptr<Backend> createHipBackend()
+{
+    return makePtr<HipBackend>();
+}
+#endif
+
 }}} // namespace cv::accel::hip_impl
 
+#ifdef BUILD_PLUGIN
 CV_ACCEL_DEFINE_PLUGIN(new cv::accel::hip_impl::HipBackend())
+#endif
 
 #endif // HAVE_ACCEL_HIP

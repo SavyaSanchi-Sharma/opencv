@@ -120,6 +120,21 @@ public:
                 }
             }
 #endif
+#if defined(HAVE_ACCEL_HIP) && !defined(BUILD_PLUGIN)
+            if (utils::getConfigurationParameterBool("OPENCV_ACCEL_HIP", true))
+            {
+                try
+                {
+                    Ptr<Backend> hip = hip_impl::createHipBackend();
+                    if (hip && hip->deviceCount() > 0)
+                        add(hip);
+                }
+                catch (const cv::Exception& e)
+                {
+                    CV_LOG_WARNING(NULL, "accel: the HIP backend is not available: " << e.what());
+                }
+            }
+#endif
             if (utils::getConfigurationParameterBool("OPENCV_ACCEL_PLUGINS_ENABLE", true))
             {
                 std::vector<std::string> plugins = pluginCandidates();

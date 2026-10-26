@@ -99,22 +99,39 @@ ocv_source_group("Include" DIRBASE "${CMAKE_CURRENT_LIST_DIR}/include" FILES ${c
 
 source_group("Src" FILES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string.inc")
 
+# HIP backend of the non-CPU HAL. It also builds standalone as a plugin
+# (misc/plugins/accel_hip); with ROCm present, build it into core so no second build
+# directory is needed. src/accel/backend_hip.cpp is behind HAVE_ACCEL_HIP and the
+# kernels are .hip, which the generic src/*.cpp glob does not pick up.
+set(accel_hip_srcs "")
+if(HAVE_HIP)
+  set(accel_hip_srcs "${CMAKE_CURRENT_LIST_DIR}/src/accel/hip/accel_kernels.hip")
+  set_source_files_properties(${accel_hip_srcs} PROPERTIES LANGUAGE HIP)
+endif()
+
 ocv_glob_module_sources(SOURCES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string.inc"
+                        ${accel_hip_srcs}
                         HEADERS ${core_parallel_hdrs} ${module_opencl_hdrs} ${lib_cuda_hdrs} ${lib_cuda_hdrs_detail})
 
-# src/hip/kernels.cpp holds HIP device kernels. It's a .cpp (not .hip), so the
-# generic src/*.cpp glob picks it up and would otherwise feed it to the C++
-# compiler. Force the HIP toolchain when ROCm is present; with no ROCm the file
-# can't compile as plain C++ (it has __global__/hipLaunchKernelGGL), so drop it.
 if(HAVE_HIP)
-  set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/src/hip/kernels.cpp"
-    PROPERTIES LANGUAGE HIP)
-else()
-  set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/src/hip/kernels.cpp"
-    PROPERTIES HEADER_FILE_ONLY TRUE)
+  # registry.cpp needs it too: that is where the backend is created and registered
+  foreach(_accel_hip_src
+          "src/accel/backend_hip.cpp"
+          "src/accel/hip/accel_kernels.hip"
+          "src/accel/registry.cpp")
+    ocv_append_source_file_compile_definitions(
+      "${CMAKE_CURRENT_LIST_DIR}/${_accel_hip_src}" "HAVE_ACCEL_HIP=1")
+  endforeach()
+  unset(_accel_hip_src)
 endif()
+
+# src/hip.cpp and src/hip/kernels.cpp are the older HIP UMat allocator, superseded by the
+# HIP backend of the non-CPU HAL (src/accel). They are not built; the device path is the
+# accel one, through UMat -> DeviceAllocator -> Backend.
+set_source_files_properties(
+  "${CMAKE_CURRENT_LIST_DIR}/src/hip.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/src/hip/kernels.cpp"
+  PROPERTIES HEADER_FILE_ONLY TRUE)
 
 if(HAVE_HIP)
   ocv_module_include_directories(${the_module} ${hip_INCLUDE_DIRS})

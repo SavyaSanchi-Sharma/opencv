@@ -50,9 +50,6 @@
 #include "precomp.hpp"
 #include "arithm_expr.hpp"   // the new element-wise engine (cv::ew)
 #include "opencl_kernels_core.hpp"
-#ifdef HAVE_HIP
-#  include "opencv2/core/hip.hpp"
-#endif
 
 namespace cv
 {

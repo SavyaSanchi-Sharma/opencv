@@ -26,6 +26,13 @@ Ptr<Backend> createCudaBackend();
 }
 #endif
 
+#if defined(HAVE_ACCEL_HIP) && !defined(BUILD_PLUGIN)
+namespace hip_impl {
+//! the HIP backend (backend_hip.cpp) when it is built into core rather than as a plugin
+Ptr<Backend> createHipBackend();
+}
+#endif
+
 struct Device::Impl
 {
     Impl(const Ptr<Backend>& b, int i);
