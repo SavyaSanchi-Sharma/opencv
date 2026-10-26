@@ -15,6 +15,7 @@
 #ifdef HAVE_ACCEL_HIP
 
 #include "opencv2/core/accel_backend.hpp"
+#include "opencv2/core/utils/configuration.private.hpp"
 #include "opencv2/core/utils/logger.hpp"
 #include "hip/accel_kernels_hip.hpp"
 
@@ -232,12 +233,23 @@ public:
     String deviceDescription(int device) const CV_OVERRIDE { return devs_[device]->prop.name; }
     int memoryKinds(int device) const CV_OVERRIDE { return devs_[device]->kinds; }
 
-    /* The device's own memory on a discrete part, its shared memory on an integrated one:
-       what this backend did before it could offer a choice. Changing an APU to MEMORY_DEVICE
-       by default waits for the promotion rule and for numbers from real hardware. */
+    /* A discrete card has only its own memory. An integrated one has a choice, and the
+       answer depends on what the buffer is for: measured on gfx1036, a coalesced kernel
+       reads both kinds at the same speed, an awkward one (transpose) runs 2.5-3.6x faster
+       in device memory, and pinning host memory costs about 0.2 ms per MB. So device memory
+       is the better guess for a buffer the CPU never touches, and the promotion in
+       DeviceAllocator::map() gives the zero-copy back to buffers it does touch.
+
+       Off by default: promotion has to be enabled for this to pay, and the threshold it
+       needs is a per-machine number. OPENCV_ACCEL_APU_DEVICE_DEFAULT=1 with
+       OPENCV_ACCEL_ZERO_COPY_MAX_BYTES set turns the pair on. */
     MemoryKind defaultMemoryKind(int device) const CV_OVERRIDE
     {
-        return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
+        if (!devs_[device]->shared)
+            return MEMORY_DEVICE;
+        static const bool deviceDefault =
+            utils::getConfigurationParameterBool("OPENCV_ACCEL_APU_DEVICE_DEFAULT", false);
+        return deviceDefault ? MEMORY_DEVICE : MEMORY_SHARED_COHERENT;
     }
 
     void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE

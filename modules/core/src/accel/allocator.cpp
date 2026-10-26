@@ -268,6 +268,78 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
     return kind;
 }
 
+//! OPENCV_ACCEL_ZERO_COPY_MAX_BYTES, read once: 0 turns promotion off, which is the default
+size_t zeroCopyMaxBytes()
+{
+    static const size_t v =
+        (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", 0);
+    return v;
+}
+
+void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind);
+
+/* Moves a MEMORY_DEVICE buffer into memory the CPU addresses, the first time the CPU asks for
+   it. A device buffer costs a download now and an upload after every CPU write; once it is
+   shared, every later access is free. The copy is only worth it while the buffer is small
+   enough that pinning it costs less than the copies it saves, hence the threshold.
+
+   Only for a buffer nobody else can be holding: not imported, not aliased on another device,
+   no device pointer or dma-buf handed out, and no Mat view alive. The caller has waited for
+   the device work. Returns true when the buffer is now of a shared kind. */
+bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
+{
+    const size_t limit = zeroCopyMaxBytes();
+    if (!limit || u->size == 0 || u->size > limit)
+        return false;
+    if (isSharedKind(st->kind) || !dev->canShare())
+        return false;
+    if (st->imported || st->externallyReferenced || st->mapped || !st->aliases.empty())
+        return false;
+
+    const MemoryKind to = (dev->kinds & MEMORY_SHARED_COHERENT) ? MEMORY_SHARED_COHERENT
+                                                                : MEMORY_SHARED_NONCOHERENT;
+    void* p = allocateDevice(dev, u->size, to);
+    if (!p)
+        return false;       // no shared memory to be had: the copy path still works
+
+    Backend& b = *dev->backend;
+    if (st->initialized)
+    {
+        // on the device, so it costs no host bandwidth; the CPU reads it right after
+        const Ptr<Stream>& s = currentStream(dev);
+        try
+        {
+            b.copy(dev->index, COPY_DEVICE_TO_DEVICE, p, u->size, u->handle, u->size,
+                   u->size, 1, *s, true);
+            s->record()->wait();
+        }
+        catch (const cv::Exception& e)
+        {
+            CV_LOG_WARNING(NULL, "accel: promoting a buffer to shared memory failed: " << e.what());
+            b.deallocate(dev->index, p, to);
+            dev->pinnedBytes -= u->size;
+            return false;
+        }
+        countCopy(COPY_DEVICE_TO_DEVICE, u->size);
+    }
+
+    b.deallocate(dev->index, u->handle, st->kind);      // all work on it has finished
+    if (u->data)
+    {
+        b.deallocateHost(dev->index, u->data);          // the host copy is not needed any more
+        dev->pinnedBytes -= u->size;
+    }
+    u->handle = p;
+    st->kind = to;
+    u->data = u->origdata = (uchar*)b.hostAddress(dev->index, p, to);
+    u->flags &= ~UMatData::COPY_ON_MAP;
+    u->markHostCopyObsolete(false);
+    u->markDeviceCopyObsolete(false);
+    CV_LOG_DEBUG(NULL, "accel: " << dev->name << " promoted " << u->size << " bytes to "
+                 << kindName(to) << " on first CPU access");
+    return true;
+}
+
 void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
 {
     collectRetired(false);
@@ -579,7 +651,11 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
     if (st->mapped && (st->mappedWrite || !write))
         return;     // already mapped as needed (UMat::getMat calls map for every view)
 
-    waitOnCpu(st, write);
+    waitOnCpu(st, true);    // promotion frees the memory, so every reader has to be done too
+    // the delayed decision: the CPU is asking for this buffer for the first time, which is
+    // the first moment we know it is not device-only
+    promoteToShared(dev_, u, st);
+
     Backend& b = *dev_->backend;
     const int i = dev_->index;
     if (isSharedKind(st->kind))
