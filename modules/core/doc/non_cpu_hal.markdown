@@ -86,6 +86,14 @@ another device, currently mapped, or whose device pointer or dma-buf someone els
 | `OPENCV_ACCEL_FORCE_MEMORY_KIND` | unset | `device`, `shared`, `shared_nc` or `managed` for every new buffer; ignored, with a warning, where the device cannot provide it |
 | `OPENCV_ACCEL_PINNED_LIMIT_MB` | 0 (no limit) | budget for memory the CPU addresses, per device, counting host copies |
 | `OPENCV_ACCEL_ZERO_COPY_MAX_BYTES` | 0 (off) | largest buffer moved to shared memory on first CPU access |
+| `OPENCV_ACCEL_CACHE_MAX_MB` | 0 (off) | released device memory kept for the next buffer of the same size and kind |
+
+Asking a driver for memory is dear — an allocation from ROCm's stream-ordered pool costs about
+15 us whatever its size, and pinning host memory about 0.2 ms per megabyte — so a pipeline that
+creates a buffer per frame spends most of its time allocating.
+`OPENCV_ACCEL_CACHE_MAX_MB` keeps released memory for the next buffer of the same size and
+kind instead of giving it back. Cached memory is still allocated, so it still counts against
+the pinned budget, and it is all returned to the device when an allocation fails.
 
 Two things the counters cannot tell you. The budget is per device though pinned memory is a
 property of the machine, and its check is not atomic with the allocation that follows, so

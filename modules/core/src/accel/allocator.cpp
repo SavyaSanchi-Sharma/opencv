@@ -133,6 +133,7 @@ struct Retired
     Device::Impl* dev;
     void* devPtr;
     MemoryKind kind;        // the kind devPtr was allocated with, needed to free it
+    size_t size;            // of devPtr, for the cache; 0 for memory that must not be reused
     size_t pinnedSize;      // bytes this counted against dev->pinnedBytes; 0 when it counted none
     void* hostCopy;
     size_t hostCopySize;    // and what the host copy counted, allocated lazily in map()
@@ -154,6 +155,11 @@ std::vector<Retired>& retiredList()
 
 std::atomic<int> g_retiredCount(0);
 
+// the allocation cache, defined below next to allocateDevice()
+void* cacheTake(Device::Impl* dev, size_t size, MemoryKind kind);
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, MemoryKind kind);
+void cacheFlush(Device::Impl* dev);
+
 void freeNow(const Retired& r)
 {
     // imports of these bytes on other devices go first; their work is ordered by the same events
@@ -165,9 +171,14 @@ void freeNow(const Retired& r)
     }
     if (r.devPtr)
     {
-        r.dev->backend->deallocate(r.dev->index, r.devPtr, r.kind);
-        if (r.pinnedSize)
-            r.dev->pinnedBytes -= r.pinnedSize;
+        // kept for the next buffer of this size and kind where there is room; it stays counted
+        // against the pinned budget while it sits there, because it is still allocated
+        if (!r.size || !cachePut(r.dev, r.devPtr, r.size, r.kind))
+        {
+            r.dev->backend->deallocate(r.dev->index, r.devPtr, r.kind);
+            if (r.pinnedSize)
+                r.dev->pinnedBytes -= r.pinnedSize;
+        }
     }
     if (r.hostCopy)
     {
@@ -285,6 +296,66 @@ size_t zeroCopyMaxBytes()
     return v;
 }
 
+//! OPENCV_ACCEL_CACHE_MAX_MB, read once: how much released memory to keep, 0 turns it off
+size_t cacheLimit()
+{
+    static const size_t v =
+        (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_CACHE_MAX_MB", 0) * 1024 * 1024;
+    return v;
+}
+
+//! memory of exactly this size and kind that was released earlier, or NULL
+void* cacheTake(Device::Impl* dev, size_t size, MemoryKind kind)
+{
+    if (!cacheLimit())
+        return 0;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    auto it = dev->cache.find(std::make_pair(size, (int)kind));
+    if (it == dev->cache.end() || it->second.empty())
+        return 0;
+    void* p = it->second.back();
+    it->second.pop_back();
+    dev->cachedBytes -= size;
+    return p;
+}
+
+/** @brief Keeps @p ptr for the next buffer of this size and kind. False when the cache is off
+or full, and then the caller frees it. The device work that used it has finished. */
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, MemoryKind kind)
+{
+    const size_t limit = cacheLimit();
+    if (!limit || size == 0 || size > limit)
+        return false;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    if (dev->cachedBytes + size > limit)
+        return false;
+    dev->cache[std::make_pair(size, (int)kind)].push_back(ptr);
+    dev->cachedBytes += size;
+    return true;
+}
+
+//! gives everything the cache holds back to the device, for when an allocation has failed
+void cacheFlush(Device::Impl* dev)
+{
+    std::map<std::pair<size_t, int>, std::vector<void*> > taken;
+    {
+        std::lock_guard<std::mutex> lock(dev->cacheMutex);
+        taken.swap(dev->cache);
+        dev->cachedBytes = 0;
+    }
+    for (auto it = taken.begin(); it != taken.end(); ++it)
+    {
+        const size_t size = it->first.first;
+        const MemoryKind kind = (MemoryKind)it->first.second;
+        for (size_t i = 0; i < it->second.size(); i++)
+        {
+            dev->backend->deallocate(dev->index, it->second[i], kind);
+            if (isSharedKind(kind))
+                dev->pinnedBytes -= size;
+        }
+    }
+}
+
 void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind);
 
 /* Moves a MEMORY_DEVICE buffer into memory the CPU addresses, the first time the CPU asks for
@@ -353,7 +424,9 @@ bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
         countCopy(COPY_DEVICE_TO_DEVICE, u->size);
     }
 
-    b.deallocate(dev->index, u->handle, st->kind);      // all work on it has finished
+    // all work on it has finished, so it can go straight to the next buffer of its size
+    if (!cachePut(dev, u->handle, u->size, st->kind))
+        b.deallocate(dev->index, u->handle, st->kind);
     if (u->data)
     {
         b.deallocateHost(dev->index, u->data);          // the host copy is not needed any more
@@ -372,12 +445,20 @@ bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
 
 void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
 {
+    // memory of this size and kind released earlier is already of the right kind and already
+    // counted, so it is handed straight back
+    if (void* cached = cacheTake(dev, size, kind))
+        return cached;
+
     collectRetired(false);
     void* p = dev->backend->allocate(dev->index, size, kind);
-    if (!p && g_retiredCount.load() > 0)
+    if (!p)
     {
-        // memory released while device work still used it: wait for that work, then retry
-        collectRetired(true);
+        // out of memory: give back what the cache is sitting on, and what device work had
+        // finished with, then ask once more
+        cacheFlush(dev);
+        if (g_retiredCount.load() > 0)
+            collectRetired(true);
         p = dev->backend->allocate(dev->index, size, kind);
     }
     /* isSharedKind() counts MEMORY_MANAGED too, though managed memory is not pinned up front
@@ -659,7 +740,9 @@ void DeviceAllocator::deallocate(UMatData* u) const
     r.dev = dev_;
     r.devPtr = u->handle;
     r.kind = st->kind;
-    // imports are the exporter's memory: allocateDevice never counted them
+    // an import is the exporter's memory: allocateDevice never counted it, and releasing it
+    // releases the import, so it is not ours to keep for the next buffer either
+    r.size = st->imported ? 0 : u->size;
     r.pinnedSize = (!st->imported && isSharedKind(st->kind)) ? u->size : 0;
     r.hostCopy = (!isSharedKind(st->kind) && u->data) ? (void*)u->data : 0;
     r.hostCopySize = r.hostCopy ? u->size : 0;

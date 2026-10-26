@@ -11,6 +11,7 @@
 #include "opencv2/core/utils/accel_dispatch.private.hpp"
 
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -44,6 +45,15 @@ struct Device::Impl
     MemoryKind defaultKind;             // backend->defaultMemoryKind(index)
     std::atomic<size_t> pinnedBytes;    // allocated with a shared kind, against the budget
     detail::DeviceAllocator* allocator; // lives as long as the process
+
+    /* Released memory kept for the next buffer of the same size and kind, because asking the
+       driver again is dear: measured on ROCm, an allocation from the stream-ordered pool costs
+       about 15 us whatever its size, and pinning host memory about 0.2 ms per megabyte. A
+       pipeline that makes a buffer per frame pays that on every frame. Guarded by its own
+       mutex, bounded by OPENCV_ACCEL_CACHE_MAX_MB, and emptied when the device runs out. */
+    std::mutex cacheMutex;
+    std::map<std::pair<size_t, int>, std::vector<void*> > cache;
+    size_t cachedBytes;                 // under cacheMutex
 
     //! true when the device has a kind the CPU addresses, whatever a given buffer uses
     bool canShare() const { return (kinds & ~(int)MEMORY_DEVICE) != 0; }

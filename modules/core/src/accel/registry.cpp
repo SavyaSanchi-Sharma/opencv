@@ -69,7 +69,8 @@ void Backend::deallocateHost(int, void* ptr)
 
 Device::Impl::Impl(const Ptr<Backend>& b, int i)
     : backend(b), index(i), name(cv::format("%s:%d", b->name().c_str(), i)),
-      kinds(b->memoryKinds(i)), defaultKind(b->defaultMemoryKind(i)), pinnedBytes(0), allocator(0)
+      kinds(b->memoryKinds(i)), defaultKind(b->defaultMemoryKind(i)), pinnedBytes(0), allocator(0),
+      cachedBytes(0)
 {
     CV_Assert(kinds != 0 && "accel: a device must provide at least one memory kind");
     CV_Assert((kinds & (int)defaultKind) != 0 && "accel: the default memory kind is not provided");
