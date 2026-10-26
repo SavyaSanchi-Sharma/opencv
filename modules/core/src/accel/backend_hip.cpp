@@ -168,6 +168,18 @@ public:
 class HipBackend CV_FINAL : public Backend
 {
 public:
+    //! a device attribute, 0 when the runtime will not tell us
+    static int attr(hipDeviceAttribute_t a, int device)
+    {
+        int v = 0;
+        if (hipDeviceGetAttribute(&v, a, device) != hipSuccess)
+        {
+            (void)hipGetLastError();
+            return 0;
+        }
+        return v;
+    }
+
     HipBackend()
     {
         int n = 0;
@@ -181,6 +193,29 @@ public:
             std::unique_ptr<Dev> d(new Dev());
             check(hipGetDeviceProperties(&d->prop, i), "hipGetDeviceProperties");
             d->shared = d->prop.integrated && d->prop.canMapHostMemory;
+            /* What this device can provide. Device memory always; host memory the GPU can
+               address only where the two share it, which on HIP means an integrated part;
+               managed memory where the runtime reports it, discrete parts included. */
+            d->kinds = MEMORY_DEVICE;
+            if (d->shared)
+                d->kinds |= MEMORY_SHARED_COHERENT | MEMORY_SHARED_NONCOHERENT;
+            /* Managed memory, and what XNACK gives when it is on. With XNACK the GPU retries
+               a faulting access instead of dying, so it can reach pageable host memory and
+               managed memory migrates on demand rather than being pinned up front. The arch
+               name carries the setting as a target id suffix, gfx1100:xnack+ or :xnack-.
+               Nothing here depends on it yet; it decides how good MEMORY_MANAGED actually is,
+               which is a question for the promotion rule and for measurements. */
+            d->managed = attr(hipDeviceAttributeManagedMemory, i);
+            d->pageableAccess = attr(hipDeviceAttributePageableMemoryAccess, i);
+            d->concurrentManaged = attr(hipDeviceAttributeConcurrentManagedAccess, i);
+            if (d->managed)
+                d->kinds |= MEMORY_MANAGED;
+            CV_LOG_INFO(NULL, "accel hip:" << i << " " << d->prop.gcnArchName
+                        << " integrated=" << (int)d->prop.integrated
+                        << " kinds=" << d->kinds
+                        << " managed=" << d->managed
+                        << " pageable(xnack)=" << d->pageableAccess
+                        << " concurrentManaged=" << d->concurrentManaged);
             int pools = 0;
             if (hipDeviceGetAttribute(&pools, hipDeviceAttributeMemoryPoolsSupported, i) != hipSuccess)
             {
@@ -195,7 +230,12 @@ public:
     String name() const CV_OVERRIDE { return "hip"; }
     int deviceCount() const CV_OVERRIDE { return (int)devs_.size(); }
     String deviceDescription(int device) const CV_OVERRIDE { return devs_[device]->prop.name; }
-    int memoryKinds(int device) const CV_OVERRIDE
+    int memoryKinds(int device) const CV_OVERRIDE { return devs_[device]->kinds; }
+
+    /* The device's own memory on a discrete part, its shared memory on an integrated one:
+       what this backend did before it could offer a choice. Changing an APU to MEMORY_DEVICE
+       by default waits for the promotion rule and for numbers from real hardware. */
+    MemoryKind defaultMemoryKind(int device) const CV_OVERRIDE
     {
         return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
     }
@@ -203,38 +243,77 @@ public:
     void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE
     {
         Dev& d = *devs_[device];
-        CV_Assert(kind == (d.shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE));
+        CV_Assert((d.kinds & (int)kind) != 0 && "accel(hip): a kind this device does not provide");
         DeviceGuard g(device);
         void* p = 0;
         hipError_t r;
-        if (d.shared)
-            r = hipHostMalloc(&p, size, hipHostMallocMapped | hipHostMallocPortable);  // one address for CPU and GPU
-        else if (d.pools)
+        switch (kind)
         {
-            hipStream_t s = allocStream(device);
-            r = hipMallocAsync(&p, size, s);
-            if (r == hipSuccess)
-                r = hipStreamSynchronize(s);    // from now on usable on every stream
+        case MEMORY_SHARED_COHERENT:
+            // one address for the CPU and the GPU
+            r = hipHostMalloc(&p, size, hipHostMallocMapped | hipHostMallocPortable);
+            break;
+        case MEMORY_SHARED_NONCOHERENT:
+            /* As above but cached on the CPU, so it is faster to read and write there.
+               beginCpuAccess/endCpuAccess are left as the base no-ops: HIP makes
+               coarse-grained memory consistent at command boundaries, and core waits for the
+               last device writer before it calls beginCpuAccess, so there should be nothing
+               to flush. TODO(apu-validation): only an APU can prove that; until one runs the
+               tests, prefer MEMORY_SHARED_COHERENT. */
+            r = hipHostMalloc(&p, size,
+                              hipHostMallocMapped | hipHostMallocPortable | hipHostMallocNonCoherent);
+            break;
+        case MEMORY_MANAGED:
+            r = hipMallocManaged(&p, size, hipMemAttachGlobal);
+            break;
+        default:
+            if (d.pools)
+            {
+                hipStream_t s = allocStream(device);
+                r = hipMallocAsync(&p, size, s);
+                if (r == hipSuccess)
+                    r = hipStreamSynchronize(s);    // from now on usable on every stream
+            }
+            else
+                r = hipMalloc(&p, size);
+            break;
         }
-        else
-            r = hipMalloc(&p, size);
         if (r == hipErrorOutOfMemory)
         {
             (void)hipGetLastError();
             return 0;
         }
         check(r, "allocate");
+        if (isSharedKind(kind))
+        {
+            // the backend hands the CPU address straight back, so the two must agree
+            void* dp = 0;
+            if (hipHostGetDevicePointer(&dp, p, 0) != hipSuccess)
+                (void)hipGetLastError();
+            else if (dp != p)
+            {
+                static bool warned = false;
+                if (!warned)
+                {
+                    warned = true;
+                    CV_LOG_WARNING(NULL, "accel(hip): the device address of shared memory differs from "
+                                   "the host address; this backend assumes unified addressing");
+                }
+            }
+        }
         return p;
     }
 
-    void deallocate(int device, void* ptr, MemoryKind) CV_OVERRIDE
+    void deallocate(int device, void* ptr, MemoryKind kind) CV_OVERRIDE
     {
         // called while UMats are released: report failures, never throw
         try
         {
             Dev& d = *devs_[device];
             DeviceGuard g(device);
-            const hipError_t r = d.shared ? hipHostFree(ptr)
+            // freed the way it was allocated; hipFree takes managed memory
+            const hipError_t r = isSharedKind(kind) && kind != MEMORY_MANAGED ? hipHostFree(ptr)
+                               : kind == MEMORY_MANAGED ? hipFree(ptr)
                                : d.pools ? hipFreeAsync(ptr, allocStream(device))
                                : hipFree(ptr);
             if (r != hipSuccess)
@@ -295,9 +374,14 @@ public:
 private:
     struct Dev
     {
-        Dev() : shared(false), pools(false), allocStream_(0) {}
+        Dev() : shared(false), kinds(MEMORY_DEVICE), managed(0), pageableAccess(0),
+                concurrentManaged(0), pools(false), allocStream_(0) {}
         hipDeviceProp_t prop;
         bool shared;
+        int kinds;              // bitmask of MemoryKind
+        int managed;            // hipMallocManaged works
+        int pageableAccess;     // the GPU reaches pageable host memory, so XNACK is on
+        int concurrentManaged;  // CPU and GPU may touch managed memory at the same time
         bool pools;
         std::once_flag once;
         hipStream_t allocStream_;

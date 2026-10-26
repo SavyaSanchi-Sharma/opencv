@@ -200,6 +200,12 @@ public:
         return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
     }
 
+    //! stated rather than inferred, so adding a kind above cannot change it by accident
+    MemoryKind defaultMemoryKind(int device) const CV_OVERRIDE
+    {
+        return devs_[device]->shared ? MEMORY_SHARED_COHERENT : MEMORY_DEVICE;
+    }
+
     void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE
     {
         Dev& d = *devs_[device];

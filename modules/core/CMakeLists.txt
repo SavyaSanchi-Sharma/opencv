@@ -113,17 +113,6 @@ ocv_glob_module_sources(SOURCES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version
                         ${accel_hip_srcs}
                         HEADERS ${core_parallel_hdrs} ${module_opencl_hdrs} ${lib_cuda_hdrs} ${lib_cuda_hdrs_detail})
 
-if(HAVE_HIP)
-  # registry.cpp needs it too: that is where the backend is created and registered
-  foreach(_accel_hip_src
-          "src/accel/backend_hip.cpp"
-          "src/accel/hip/accel_kernels.hip"
-          "src/accel/registry.cpp")
-    ocv_append_source_file_compile_definitions(
-      "${CMAKE_CURRENT_LIST_DIR}/${_accel_hip_src}" "HAVE_ACCEL_HIP=1")
-  endforeach()
-  unset(_accel_hip_src)
-endif()
 
 # src/hip.cpp and src/hip/kernels.cpp are the older HIP UMat allocator, superseded by the
 # HIP backend of the non-CPU HAL (src/accel). They are not built; the device path is the
@@ -215,6 +204,12 @@ if(HAVE_CUDA)
 endif()
 
 ocv_create_module(${extra_libs})
+
+if(HAVE_HIP)
+  # Module-wide, not per file: the backend, its kernels and the registry all test it,
+  # and so will anything added later. Outside those it guards nothing.
+  ocv_target_compile_definitions(${the_module} PRIVATE "HAVE_ACCEL_HIP=1")
+endif()
 
 if(HAVE_HIP AND HAVE_CUDA AND OPENCV_HIP_CUDA_THRUST_INCLUDE)
   # Put NVIDIA's CCCL/thrust -isystem ahead of ROCm's by adding it as this target's

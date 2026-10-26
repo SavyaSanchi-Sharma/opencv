@@ -11,6 +11,7 @@
 #include "../precomp.hpp"
 #include "../umatrix.hpp"
 #include "accel_impl.hpp"
+#include "opencv2/core/utils/configuration.private.hpp"
 #include "opencv2/core/utils/logger.hpp"
 
 #ifndef _WIN32
@@ -134,6 +135,7 @@ struct Retired
     MemoryKind kind;        // the kind devPtr was allocated with, needed to free it
     size_t pinnedSize;      // bytes this counted against dev->pinnedBytes; 0 when it counted none
     void* hostCopy;
+    size_t hostCopySize;    // and what the host copy counted, allocated lazily in map()
     std::vector<UMatData*> aliases;
     std::vector<Ptr<Event> > events;
 };
@@ -168,7 +170,102 @@ void freeNow(const Retired& r)
             r.dev->pinnedBytes -= r.pinnedSize;
     }
     if (r.hostCopy)
+    {
         r.dev->backend->deallocateHost(r.dev->index, r.hostCopy);
+        r.dev->pinnedBytes -= r.hostCopySize;
+    }
+}
+
+//! OPENCV_ACCEL_FORCE_MEMORY_KIND, read once: a kind name, or 0 for "not set"
+int forcedKind()
+{
+    static const int k = []() -> int
+    {
+        const std::string s = utils::getConfigurationParameterString("OPENCV_ACCEL_FORCE_MEMORY_KIND", "");
+        if (s.empty())
+            return 0;
+        if (s == "device")      return MEMORY_DEVICE;
+        if (s == "shared")      return MEMORY_SHARED_COHERENT;
+        if (s == "shared_nc")   return MEMORY_SHARED_NONCOHERENT;
+        if (s == "managed")     return MEMORY_MANAGED;
+        CV_LOG_WARNING(NULL, "accel: OPENCV_ACCEL_FORCE_MEMORY_KIND=" << s
+                       << " is not one of device, shared, shared_nc, managed; ignored");
+        return 0;
+    }();
+    return k;
+}
+
+//! OPENCV_ACCEL_PINNED_LIMIT_MB, read once: the budget for memory the CPU addresses, 0 = unlimited
+size_t pinnedLimit()
+{
+    static const size_t v = (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_PINNED_LIMIT_MB", 0)
+                            * 1024 * 1024;
+    return v;
+}
+
+/* The kind of a new buffer of @p size bytes on @p dev. In order: a debug override, then what
+   the caller asked for through UMatUsageFlags, then the device's default; a shared choice is
+   turned down to device memory when it would go past the pinned budget. A kind the device
+   does not provide is never returned. */
+MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage)
+{
+    const char* why = "device default";
+    MemoryKind kind = dev->defaultKind;
+
+    if (const int forced = forcedKind())
+    {
+        if (dev->kinds & forced)
+        {
+            kind = (MemoryKind)forced;
+            why = "OPENCV_ACCEL_FORCE_MEMORY_KIND";
+        }
+        else
+        {
+            static bool warned = false;     // once: this is the same for every buffer
+            if (!warned)
+            {
+                warned = true;
+                CV_LOG_WARNING(NULL, "accel: " << dev->name << " does not provide "
+                               << kindName((MemoryKind)forced) << " memory; OPENCV_ACCEL_FORCE_MEMORY_KIND ignored");
+            }
+        }
+    }
+    else if (usage & USAGE_ALLOCATE_DEVICE_MEMORY)
+    {
+        if (dev->kinds & MEMORY_DEVICE)
+        {
+            kind = MEMORY_DEVICE;
+            why = "USAGE_ALLOCATE_DEVICE_MEMORY";
+        }
+    }
+    else if (usage & (USAGE_ALLOCATE_SHARED_MEMORY | USAGE_ALLOCATE_HOST_MEMORY))
+    {
+        if (dev->kinds & MEMORY_SHARED_COHERENT)
+        {
+            kind = MEMORY_SHARED_COHERENT;
+            why = "USAGE_ALLOCATE_SHARED_MEMORY";
+        }
+        else if (dev->kinds & MEMORY_SHARED_NONCOHERENT)
+        {
+            kind = MEMORY_SHARED_NONCOHERENT;
+            why = "USAGE_ALLOCATE_SHARED_MEMORY";
+        }
+    }
+
+    const size_t limit = pinnedLimit();
+    if (limit && isSharedKind(kind) && (dev->kinds & MEMORY_DEVICE)
+        && dev->pinnedBytes.load() + size > limit)
+    {
+        CV_LOG_DEBUG(NULL, "accel: " << dev->name << " is at its pinned budget ("
+                     << dev->pinnedBytes.load() << " + " << size << " > " << limit
+                     << " bytes); " << kindName(kind) << " becomes device memory");
+        kind = MEMORY_DEVICE;
+        why = "OPENCV_ACCEL_PINNED_LIMIT_MB";
+    }
+
+    CV_LOG_DEBUG(NULL, "accel: " << dev->name << " " << size << " bytes as "
+                 << kindName(kind) << " (" << why << ")");
+    return kind;
 }
 
 void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
@@ -361,7 +458,7 @@ UMatData* aliasOn(UMatData* u, Device::Impl* dev)
 }
 
 UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* data0, size_t* step,
-                                    AccessFlag /*flags*/, UMatUsageFlags /*usageFlags*/) const
+                                    AccessFlag /*flags*/, UMatUsageFlags usageFlags) const
 {
     if (data0)
         CV_Error(Error::StsNotImplemented, "accel: device memory cannot wrap user host memory");
@@ -377,6 +474,7 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
     UMatData* u = new UMatData(this);
     u->size = total;
     BufferState* st = new BufferState(dev_);
+    st->kind = chooseKind(dev_, total, usageFlags);
     u->allocatorContext = std::shared_ptr<void>(st, [](void* p) { delete static_cast<BufferState*>(p); });
     if (total > 0)
     {
@@ -450,6 +548,7 @@ void DeviceAllocator::deallocate(UMatData* u) const
     // imports are the exporter's memory: allocateDevice never counted them
     r.pinnedSize = (!st->imported && isSharedKind(st->kind)) ? u->size : 0;
     r.hostCopy = (!isSharedKind(st->kind) && u->data) ? (void*)u->data : 0;
+    r.hostCopySize = r.hostCopy ? u->size : 0;
     r.aliases.swap(st->aliases);
     if (st->write && !finished(st->write))
         r.events.push_back(st->write);
@@ -499,6 +598,8 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
             u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
             if (!u->data)
                 CV_Error_(Error::StsNoMem, ("accel: no host memory for a copy of %llu bytes", (unsigned long long)u->size));
+            // a backend allocates this pinned where it can, so it counts against the budget
+            dev_->pinnedBytes += u->size;
         }
         if (u->hostCopyObsolete() && !st->initialized)
             u->markHostCopyObsolete(false);     // fresh memory: its contents are undefined on both sides
