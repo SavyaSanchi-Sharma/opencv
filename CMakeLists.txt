@@ -681,6 +681,21 @@ if(WITH_HIP)
   include(cmake/OpenCVDetectHIP.cmake)
 endif()
 
+# --- Metal Support ---
+# On by default where it can work at all: the frameworks ship with the OS, so there is nothing
+# to install and nothing to find, unlike ROCm.
+OCV_OPTION(WITH_METAL "Include Apple Metal support" ON
+  VISIBLE_IF APPLE
+  VERIFY HAVE_METAL)
+if(WITH_METAL)
+  include(CheckLanguage)
+  check_language(OBJCXX)
+  if(CMAKE_OBJCXX_COMPILER)
+    enable_language(OBJCXX)
+  endif()
+  include(cmake/OpenCVDetectMetal.cmake)
+endif()
+
 # ----------------------------------------------------------------------------
 #       CHECK FOR SYSTEM LIBRARIES, OPTIONS, ETC..
 # ----------------------------------------------------------------------------

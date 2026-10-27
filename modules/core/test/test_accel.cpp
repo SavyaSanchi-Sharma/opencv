@@ -33,7 +33,11 @@ namespace opencv_test { namespace {
    Each stream runs its work on its own thread, after an optional delay, so a missing wait shows
    up as wrong data. Work on freed or unknown memory is counted as a violation. */
 
-enum { EMU_DISCRETE = 0, EMU_SHARED = 1, EMU_NONCOHERENT = 2, EMU_ENGINE = 3, EMU_DEVICES = 4 };
+/* emu:4 is an "APU": the only device that offers more than one memory kind, so it is the one
+   the kind, budget and promotion tests use. It is last on purpose — loops over the devices
+   that existed before it are bounded by EMU_ENGINE and are left alone. */
+enum { EMU_DISCRETE = 0, EMU_SHARED = 1, EMU_NONCOHERENT = 2, EMU_ENGINE = 3, EMU_APU = 4,
+       EMU_DEVICES = 5 };
 
 std::atomic<int> g_delayUs(0);
 
@@ -194,30 +198,75 @@ public:
             opsRun_[i] = 0;
             live_[i] = 0;
         }
+        for (int i = 0; i < 4; i++)
+            kindsAllocated[i] = 0;
     }
+
+    //! 0 device, 1 coherent, 2 non-coherent, 3 managed
+    static int kindIndex(accel::MemoryKind k)
+    {
+        switch (k)
+        {
+        case accel::MEMORY_SHARED_COHERENT:    return 1;
+        case accel::MEMORY_SHARED_NONCOHERENT: return 2;
+        case accel::MEMORY_MANAGED:            return 3;
+        default:                               return 0;
+        }
+    }
+
+    //! how many allocations of each kind, so a test can say which one a buffer got
+    std::atomic<int> kindsAllocated[4];
 
     String name() const CV_OVERRIDE { return "emu"; }
     int deviceCount() const CV_OVERRIDE { return EMU_DEVICES; }
     String deviceDescription(int d) const CV_OVERRIDE
     {
         static const char* names[] = { "emulated discrete GPU", "emulated coherent memory",
-                                       "emulated non-coherent memory", "emulated 2D engine" };
+                                       "emulated non-coherent memory", "emulated 2D engine",
+                                       "emulated APU" };
         return names[d];
     }
     int memoryKinds(int d) const CV_OVERRIDE
     {
+        if (d == EMU_APU)
+            return accel::MEMORY_DEVICE | accel::MEMORY_SHARED_COHERENT
+                 | accel::MEMORY_SHARED_NONCOHERENT;
         if (d == EMU_DISCRETE)
             return accel::MEMORY_DEVICE;
         return d == EMU_NONCOHERENT ? accel::MEMORY_SHARED_NONCOHERENT : accel::MEMORY_SHARED_COHERENT;
     }
 
-    void* allocate(int d, size_t size, accel::MemoryKind) CV_OVERRIDE
+    void* allocate(int d, size_t size, accel::MemoryKind kind) CV_OVERRIDE
     {
         std::lock_guard<std::mutex> lock(mem_);
         Block* b = new Block();
         b->device = d;
         b->size = size;
-        if (d == EMU_SHARED || d == EMU_ENGINE)
+        b->kind = kind;
+        kindsAllocated[kindIndex(kind)]++;
+        // device memory is a fake address the CPU cannot use, whatever device it is on
+        if (kind == accel::MEMORY_DEVICE)
+        {
+            b->storage.resize(size);
+            b->base = b->storage.data();
+            b->addr = nextFake_;
+            nextFake_ += ((size >> 12) + 2) << 12;
+            blocks_[b->addr] = b;
+            live_[d]++;
+            return (void*)b->addr;
+        }
+        if (kind == accel::MEMORY_SHARED_NONCOHERENT)
+        {
+            b->storage.resize(size);
+            b->base = b->storage.data();
+            b->cache.resize(size);
+            b->addr = nextFake_;
+            nextFake_ += ((size >> 12) + 2) << 12;
+            blocks_[b->addr] = b;
+            live_[d]++;
+            return (void*)b->addr;
+        }
+        // MEMORY_SHARED_COHERENT: one address for the CPU and the device
         {
 #ifdef __linux__
             const int fd = memfd_create("emu", MFD_CLOEXEC);
@@ -239,15 +288,6 @@ public:
                 b->base = b->storage.data();
             }
             b->addr = (uintptr_t)b->base;   // the CPU and the device use the same address
-        }
-        else
-        {
-            b->storage.resize(size);
-            b->base = b->storage.data();
-            if (d == EMU_NONCOHERENT)
-                b->cache.resize(size);
-            b->addr = nextFake_;    // an address the CPU cannot dereference
-            nextFake_ += ((size >> 12) + 2) << 12;
         }
         blocks_[b->addr] = b;
         live_[d]++;
@@ -458,8 +498,9 @@ public:
 private:
     struct Block
     {
-        Block() : device(0), addr(0), size(0), base(0), fd(-1) {}
+        Block() : device(0), kind(accel::MEMORY_DEVICE), addr(0), size(0), base(0), fd(-1) {}
         int device;
+        accel::MemoryKind kind;     // what it was allocated as, so deallocate can check
         uintptr_t addr;
         size_t size;
         uchar* base;
@@ -589,6 +630,36 @@ accel::Device emuDevice(int i)
     emu();
     return accel::Device::find(cv::format("emu:%d", i));
 }
+
+//! a setting of an OPENCV_* variable, put back when it goes out of scope
+class EnvVar
+{
+public:
+    EnvVar(const char* name, const std::string& value) : name_(name)
+    {
+        const char* prev = getenv(name);
+        had_ = prev != 0;
+        if (had_)
+            prev_ = prev;
+        // the accel code reads these through getConfigurationParameterString, which looks at
+        // the environment on every call, so setenv is all it takes
+        if (value.empty())
+            unsetenv(name);
+        else
+            setenv(name, value.c_str(), 1);
+    }
+    ~EnvVar()
+    {
+        if (had_)
+            setenv(name_, prev_.c_str(), 1);
+        else
+            unsetenv(name_);
+    }
+private:
+    const char* name_;
+    bool had_;
+    std::string prev_;
+};
 
 //! a UMat in @p d's memory holding @p m; its allocator field stays empty
 UMat onDevice(const accel::Device& d, const Mat& m)
@@ -1298,5 +1369,241 @@ TEST(Core_Accel_CUDA, region_and_chain)
 }
 
 #endif // HAVE_CUDA
+
+// ---- memory kinds, the policy that picks one, and batching --------------------------------
+
+namespace {
+
+const int APU_KINDS = accel::MEMORY_DEVICE | accel::MEMORY_SHARED_COHERENT
+                    | accel::MEMORY_SHARED_NONCOHERENT;
+
+//! a UMat of @p shape on @p d, created the way UMat::create does, with @p usage
+UMat createOn(const accel::Device& d, const MatShape& shape, int type,
+              UMatUsageFlags usage = USAGE_DEFAULT)
+{
+    UMat u(usage);
+    u.allocator = d.allocator();
+    u.create(shape, type);
+    u.allocator = 0;
+    return u;
+}
+
+} // namespace
+
+TEST(Accel_Kind, deviceReportsWhatItProvides)
+{
+    EXPECT_EQ(accel::MEMORY_DEVICE, emuDevice(EMU_DISCRETE).memoryKinds());
+    EXPECT_EQ(accel::MEMORY_DEVICE, emuDevice(EMU_DISCRETE).defaultMemoryKind());
+    // the CPU addresses its own memory
+    EXPECT_EQ(accel::MEMORY_SHARED_COHERENT, accel::Device().memoryKinds());
+}
+
+TEST(Accel_Kind, usageFlagsChooseTheKind)
+{
+    accel::Device d = emuDevice(EMU_APU);
+    ASSERT_EQ(APU_KINDS, d.memoryKinds());
+
+    UMat def = createOn(d, MatShape({64, 64}), CV_8UC1);
+    UMat dev = createOn(d, MatShape({64, 64}), CV_8UC1, USAGE_ALLOCATE_DEVICE_MEMORY);
+    UMat shr = createOn(d, MatShape({64, 64}), CV_8UC1, USAGE_ALLOCATE_SHARED_MEMORY);
+
+    EXPECT_EQ(d.defaultMemoryKind(), accel::getMemoryKind(def));
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(dev));
+    EXPECT_TRUE(accel::isSharedKind(accel::getMemoryKind(shr)));
+}
+
+TEST(Accel_Kind, overrideIsHonouredAndRefused)
+{
+    {
+        EnvVar force("OPENCV_ACCEL_FORCE_MEMORY_KIND", "device");
+        UMat u = createOn(emuDevice(EMU_APU), MatShape({32, 32}), CV_8UC1);
+        EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(u));
+    }
+    {
+        // a kind the device cannot provide is ignored, and the buffer still works
+        EnvVar force("OPENCV_ACCEL_FORCE_MEMORY_KIND", "managed");
+        accel::Device d = emuDevice(EMU_DISCRETE);
+        UMat u = createOn(d, MatShape({32, 32}), CV_8UC1);
+        EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(u));
+    }
+}
+
+TEST(Accel_Kind, pinnedBudgetTurnsSharedIntoDevice)
+{
+    accel::Device d = emuDevice(EMU_APU);
+    ASSERT_EQ(APU_KINDS, d.memoryKinds());
+
+    EnvVar limit("OPENCV_ACCEL_PINNED_LIMIT_MB", "1");
+    UMat big = createOn(d, MatShape({2048, 1024}), CV_8UC1);    // 2 MB, over the budget
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(big));
+}
+
+TEST(Accel_Kind, promotionOnFirstCpuAccess)
+{
+    accel::Device d = emuDevice(EMU_APU);
+    ASSERT_EQ(APU_KINDS, d.memoryKinds());
+
+    EnvVar force("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", "1048576");
+    Mat src(64, 64, CV_8UC1, Scalar(7));
+
+    UMat u = createOn(d, MatShape({64, 64}), CV_8UC1, USAGE_ALLOCATE_DEVICE_MEMORY);
+    src.copyTo(u);
+    // the kind was asked for, so it is never moved
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(u));
+    EXPECT_EQ(0, cv::norm(u.getMat(ACCESS_READ), src, NORM_INF));
+
+    // ... but one that merely got the default is promoted when the CPU first asks
+    EnvVar devDefault("OPENCV_ACCEL_FORCE_MEMORY_KIND", "device");
+    UMat v = createOn(d, MatShape({64, 64}), CV_8UC1);
+    src.copyTo(v);
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(v));
+}
+
+TEST(Accel_Kind, promotionRespectsTheThreshold)
+{
+    accel::Device d = emuDevice(EMU_APU);
+    EnvVar zc("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", "1024");   // smaller than the buffer
+    Mat src(64, 64, CV_8UC1, Scalar(3));
+
+    UMat u = createOn(d, MatShape({64, 64}), CV_8UC1, USAGE_ALLOCATE_DEVICE_MEMORY);
+    src.copyTo(u);
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::getMemoryKind(u));
+    EXPECT_EQ(0, cv::norm(u.getMat(ACCESS_READ), src, NORM_INF)) << "the copy path must still work";
+}
+
+TEST(Accel_Cache, reusesMemoryAndStillGivesRightResults)
+{
+    EnvVar cache("OPENCV_ACCEL_CACHE_MAX_MB", "16");
+    accel::Device d = emuDevice(EMU_DISCRETE);
+    Mat src(64, 64, CV_8UC1);
+    randu(src, 0, 255);
+    Mat expected;
+    cv::flip(src, expected, 0);
+
+    for (int i = 0; i < 8; i++)
+    {
+        UMat u = onDevice(d, src), out;
+        {
+            accel::ExecutionScope scope(d);
+            cv::flip(u, out, 0);
+        }
+        EXPECT_EQ(0, cv::norm(out.getMat(ACCESS_READ), expected, NORM_INF))
+            << "iteration " << i << " got recycled memory with stale contents";
+    }
+}
+
+TEST(Accel_Cache, exportedMemoryIsNeverReused)
+{
+#ifdef __linux__
+    EnvVar cache("OPENCV_ACCEL_CACHE_MAX_MB", "16");
+    accel::Device d = emuDevice(EMU_SHARED);
+    Mat src(64, 64, CV_8UC1, Scalar(5));
+
+    int fd = -1;
+    {
+        UMat u = onDevice(d, src);
+        fd = accel::exportDmaBuf(u);
+        ASSERT_GE(fd, 0);
+    }   // u is released here; the fd still refers to those bytes
+
+    // whatever the allocator hands out next must not be the exported block
+    UMat other = onDevice(d, Mat(64, 64, CV_8UC1, Scalar(9)));
+    UMat imported = accel::wrapDmaBuf(d, fd, Size(64, 64), CV_8UC1);
+    EXPECT_EQ(0, cv::norm(imported.getMat(ACCESS_READ), src, NORM_INF))
+        << "the exported buffer was reused while its dma-buf was still open";
+    close(fd);
+#endif
+}
+
+TEST(Accel_Batch, frameViewsAddressTheRightBytes)
+{
+    const int N = 4, H = 8, W = 6;
+    const int sz[] = { N, H, W };
+    Mat batch(3, sz, CV_8UC1, Scalar(0));
+    for (int i = 0; i < N; i++)
+        accel::batchFrame(batch, i).setTo(Scalar(i + 1));
+
+    for (int i = 0; i < N; i++)
+    {
+        Mat f = accel::batchFrame(batch, i);
+        EXPECT_EQ(H, f.rows);
+        EXPECT_EQ(W, f.cols);
+        EXPECT_EQ(0, cv::norm(f, Mat(H, W, CV_8UC1, Scalar(i + 1)), NORM_INF)) << "frame " << i;
+    }
+    EXPECT_THROW(accel::batchFrame(batch, N), cv::Exception);
+    EXPECT_THROW(accel::batchFrame(Mat(8, 8, CV_8UC1), 0), cv::Exception);
+}
+
+typedef testing::TestWithParam<int> Accel_BatchOp;
+
+TEST_P(Accel_BatchOp, matchesPerFrameCalls)
+{
+    const int dev = GetParam();
+    const int N = 3, H = 16, W = 12;
+    const int sz[] = { N, H, W };
+    Mat batch(3, sz, CV_8UC3);
+    randu(batch, 0, 255);
+
+    for (int code = -1; code <= 1; code++)
+    {
+        UMat u = createOn(emuDevice(dev), MatShape({N, H, W}), CV_8UC3), out;
+        batch.copyTo(u);
+        {
+            accel::ExecutionScope scope(emuDevice(dev));
+            accel::flipBatch(u, out, code);
+        }
+        Mat got = out.getMat(ACCESS_READ);
+        ASSERT_EQ(3, got.dims);
+        for (int i = 0; i < N; i++)
+        {
+            Mat expected;
+            cv::flip(accel::batchFrame(batch, i), expected, code);
+            EXPECT_EQ(0, cv::norm(accel::batchFrame(got, i), expected, NORM_INF))
+                << "emu:" << dev << " flipBatch code " << code << " frame " << i;
+        }
+    }
+
+    UMat u = createOn(emuDevice(dev), MatShape({N, H, W}), CV_8UC3), out;
+    batch.copyTo(u);
+    {
+        accel::ExecutionScope scope(emuDevice(dev));
+        accel::transposeBatch(u, out);
+    }
+    Mat got = out.getMat(ACCESS_READ);
+    ASSERT_EQ(3, got.dims);
+    EXPECT_EQ(W, got.size[1]);
+    EXPECT_EQ(H, got.size[2]);
+    for (int i = 0; i < N; i++)
+    {
+        Mat expected;
+        cv::transpose(accel::batchFrame(batch, i), expected);
+        EXPECT_EQ(0, cv::norm(accel::batchFrame(got, i), expected, NORM_INF))
+            << "emu:" << dev << " transposeBatch frame " << i;
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(/**/, Accel_BatchOp,
+                        testing::Values(EMU_DISCRETE, EMU_SHARED, EMU_NONCOHERENT));
+
+TEST(Accel_Batch, aSingleImageIsStillPlainFlip)
+{
+    Mat src(16, 16, CV_8UC1);
+    randu(src, 0, 255);
+    Mat expected, got;
+    cv::flip(src, expected, 0);
+    accel::flipBatch(src, got, 0);
+    EXPECT_EQ(2, got.dims);
+    EXPECT_EQ(0, cv::norm(got, expected, NORM_INF));
+}
+
+TEST(Accel_Batch, cvFlipStillRejectsThreeDimensions)
+{
+    // batching is asked for by name: cv::flip keeps its meaning, and flipND() keeps its own
+    const int sz[] = { 2, 8, 8 };
+    Mat batch(3, sz, CV_8UC1, Scalar(1));
+    Mat dst;
+    EXPECT_THROW(cv::flip(batch, dst, 0), cv::Exception);
+    EXPECT_THROW(cv::transpose(batch, dst), cv::Exception);
+}
 
 }} // namespace

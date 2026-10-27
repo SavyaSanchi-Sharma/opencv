@@ -247,8 +247,16 @@ public:
             d->managed = attr(hipDeviceAttributeManagedMemory, i);
             d->pageableAccess = attr(hipDeviceAttributePageableMemoryAccess, i);
             d->concurrentManaged = attr(hipDeviceAttributeConcurrentManagedAccess, i);
-            if (d->managed)
+            /* Managed memory is only worth offering where the GPU can fault on a page and the
+               runtime can migrate it, which is what XNACK gives. Without it the runtime falls
+               back to pinned host memory that the GPU reaches over the bus on every access:
+               measured on a W7900, a flip that takes 0.18 ms in device memory took 676 ms.
+               MEMORY_SHARED_COHERENT is the same thing without the surprise. */
+            if (d->managed && d->pageableAccess)
                 d->kinds |= MEMORY_MANAGED;
+            else if (d->managed)
+                CV_LOG_INFO(NULL, "accel hip:" << i << " has managed memory but XNACK is off, "
+                            "so MEMORY_MANAGED is not offered");
             CV_LOG_INFO(NULL, "accel hip:" << i << " " << d->prop.gcnArchName
                         << " integrated=" << (int)d->prop.integrated
                         << " kinds=" << d->kinds
@@ -283,11 +291,19 @@ public:
        OPENCV_ACCEL_ZERO_COPY_MAX_BYTES set turns the pair on. */
     MemoryKind defaultMemoryKind(int device) const CV_OVERRIDE
     {
-        if (!devs_[device]->shared)
+        const Dev& d = *devs_[device];
+        if (!d.shared)
             return MEMORY_DEVICE;
         static const bool deviceDefault =
             utils::getConfigurationParameterBool("OPENCV_ACCEL_APU_DEVICE_DEFAULT", false);
-        return deviceDefault ? MEMORY_DEVICE : MEMORY_SHARED_COHERENT;
+        if (deviceDefault)
+            return MEMORY_DEVICE;
+        /* Coarse-grained by default. Coherent memory is uncached for the GPU, which costs it
+           dearly on anything but a streaming access, and core waits for the device before the
+           CPU touches a buffer anyway, so the coherence it buys is coherence we do not use.
+           Events are released to system scope, which is what makes this safe. */
+        return (d.kinds & MEMORY_SHARED_NONCOHERENT) ? MEMORY_SHARED_NONCOHERENT
+                                                     : MEMORY_SHARED_COHERENT;
     }
 
     void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE

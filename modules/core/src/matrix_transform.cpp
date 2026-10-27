@@ -530,15 +530,6 @@ void transpose( InputArray _src, OutputArray _dst )
 
     int type = _src.type(), esz = CV_ELEM_SIZE(type);
 
-    if (_src.dims() == 3)
-    {
-        // a batch of frames: see batchedShape(). transposeND() is the other reading of a 3-D
-        // input, where the axes themselves are permuted
-        CV_Assert( esz <= 32 );
-        CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_transpose(_src, _dst))
-        forEachFrame(_src, _dst, true, [](const Mat& s, Mat& d) { transpose(s, d); });
-        return;
-    }
     CV_Assert( _src.dims() <= 2 && esz <= 32 );
 
     CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_transpose(_src, _dst))
@@ -1090,15 +1081,6 @@ void flip( InputArray _src, OutputArray _dst, int flip_mode )
 {
     CV_INSTRUMENT_REGION();
 
-    if (_src.dims() == 3)
-    {
-        // a batch of frames: each is flipped on its own. flipND() is the other reading of a
-        // 3-D input, where the chosen axis itself is reversed
-        CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_flip(_src, _dst, flip_mode))
-        forEachFrame(_src, _dst, false,
-                     [flip_mode](const Mat& s, Mat& d) { flip(s, d, flip_mode); });
-        return;
-    }
     CV_Assert( _src.dims() <= 2 );
     Size size = _src.size();
 
@@ -1152,6 +1134,45 @@ static void flipNDInplace(Mat& m, int axis)
         for (int j = 0, k = n - 1; j < k; j++, k--)
             std::swap_ranges(data + j*step, data + (j + 1)*step, data + k*step);
 }
+
+namespace accel {
+
+/* A batch is [N, H, W] with the channels in the type, so the frames sit one after another and
+   one call covers all of them. A 2-D input is the single-frame case and behaves exactly as
+   cv::flip / cv::transpose. Asked for by name, never inferred from the number of dimensions:
+   flipND() and transposeND() already give a 3-D array a different and equally reasonable
+   meaning, and a caller should say which one they want. */
+
+void flipBatch(InputArray _src, OutputArray _dst, int flipCode)
+{
+    CV_INSTRUMENT_REGION();
+
+    if (_src.dims() <= 2)
+    {
+        cv::flip(_src, _dst, flipCode);
+        return;
+    }
+    CV_Assert(_src.dims() == 3 && "accel: a batch is [N, H, W], channels in the type");
+    CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_flip(_src, _dst, flipCode))
+    forEachFrame(_src, _dst, false, [flipCode](const Mat& s, Mat& d) { cv::flip(s, d, flipCode); });
+}
+
+void transposeBatch(InputArray _src, OutputArray _dst)
+{
+    CV_INSTRUMENT_REGION();
+
+    if (_src.dims() <= 2)
+    {
+        cv::transpose(_src, _dst);
+        return;
+    }
+    CV_Assert(_src.dims() == 3 && "accel: a batch is [N, H, W], channels in the type");
+    CV_Assert(CV_ELEM_SIZE(_src.type()) <= 32);
+    CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_transpose(_src, _dst))
+    forEachFrame(_src, _dst, true, [](const Mat& s, Mat& d) { cv::transpose(s, d); });
+}
+
+} // namespace accel
 
 void flipND(InputArray _src, OutputArray _dst, int _axis)
 {

@@ -194,7 +194,8 @@ void freeNow(const Retired& r)
 //! OPENCV_ACCEL_FORCE_MEMORY_KIND, read once: a kind name, or 0 for "not set"
 int forcedKind()
 {
-    static const int k = []() -> int
+    // read each time rather than cached in a static: these guard calls that cost microseconds
+    // to milliseconds, so a getenv is noise, and tests can change them while the process runs
     {
         const std::string s = utils::getConfigurationParameterString("OPENCV_ACCEL_FORCE_MEMORY_KIND", "");
         if (s.empty())
@@ -206,16 +207,13 @@ int forcedKind()
         CV_LOG_WARNING(NULL, "accel: OPENCV_ACCEL_FORCE_MEMORY_KIND=" << s
                        << " is not one of device, shared, shared_nc, managed; ignored");
         return 0;
-    }();
-    return k;
+    }
 }
 
 //! OPENCV_ACCEL_PINNED_LIMIT_MB, read once: the budget for memory the CPU addresses, 0 = unlimited
 size_t pinnedLimit()
 {
-    static const size_t v = (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_PINNED_LIMIT_MB", 0)
-                            * 1024 * 1024;
-    return v;
+    return (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_PINNED_LIMIT_MB", 0) * 1024 * 1024;
 }
 
 /* The kind of a new buffer of @p size bytes on @p dev. In order: a debug override, then what
@@ -292,23 +290,20 @@ MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage, bool
 
     CV_LOG_DEBUG(NULL, "accel: " << dev->name << " " << size << " bytes as "
                  << kindName(kind) << " (" << why << ")");
+    CV_UNUSED(why);     // the log is compiled out in release builds
     return kind;
 }
 
 //! OPENCV_ACCEL_ZERO_COPY_MAX_BYTES, read once: 0 turns promotion off, which is the default
 size_t zeroCopyMaxBytes()
 {
-    static const size_t v =
-        (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", 0);
-    return v;
+    return (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", 0);
 }
 
 //! OPENCV_ACCEL_CACHE_MAX_MB, read once: how much released memory to keep, 0 turns it off
 size_t cacheLimit()
 {
-    static const size_t v =
-        (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_CACHE_MAX_MB", 0) * 1024 * 1024;
-    return v;
+    return (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_CACHE_MAX_MB", 0) * 1024 * 1024;
 }
 
 //! memory of exactly this size and kind that was released earlier, or NULL
