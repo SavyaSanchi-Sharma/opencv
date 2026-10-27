@@ -60,6 +60,28 @@ enum CopyKind
     COPY_DEVICE_TO_DEVICE = 2   //!< within one device
 };
 
+/** @brief Where bytes are, as the memory they belong to and an offset into it.
+
+A backend's memory is whatever allocate() returned, and what that is only the backend knows:
+CUDA and HIP hand back an address and add @p offset to it, while a Metal buffer is an object
+with no address of its own and the offset goes to the blit encoder or to setBuffer:offset:.
+Describing a location as a pair rather than as an address is what lets a backend hold
+something other than a pointer in UMatData::handle.
+
+On the host side of a copy @p handle is an ordinary pointer, so @p handle + @p offset is the
+address in every backend. */
+struct DeviceRef
+{
+    DeviceRef() : handle(0), offset(0) {}
+    // explicit: a call site has to say which memory and which offset, so that adding the
+    // offset to an address cannot slip back in where the handle is not one
+    explicit DeviceRef(void* h, size_t o = 0) : handle(h), offset(o) {}
+    explicit DeviceRef(const void* h, size_t o = 0) : handle(const_cast<void*>(h)), offset(o) {}
+
+    void* handle;       //!< memory from allocate(), or host memory on the host side of a copy
+    size_t offset;      //!< bytes from the start of @p handle
+};
+
 //! base of the per-module operation interfaces
 class CV_EXPORTS Ops
 {
@@ -69,7 +91,7 @@ public:
 
 /** @brief Operations of the core module.
 
-Arguments are UMats in this device's memory (use devicePtr()), ordered on @p stream: the
+Arguments are UMats in this device's memory (use deviceRef()), ordered on @p stream: the
 work queued on it runs after everything that writes them. Outputs have their final size and
 type and never overlap inputs. An operation returns false, without queueing anything, when the
 device cannot run the call; OpenCV then runs it on the CPU. */
@@ -132,8 +154,8 @@ public:
     may change as soon as this returns, so the backend must have read it by then. In every other
     case OpenCV keeps the host memory alive and unchanged until the stream reaches the copy, and
     waits for the stream before it reads memory written by a COPY_DEVICE_TO_HOST. */
-    virtual void copy(int device, CopyKind kind, void* dst, size_t dstStep,
-                      const void* src, size_t srcStep, size_t widthBytes, size_t rows,
+    virtual void copy(int device, CopyKind kind, DeviceRef dst, size_t dstStep,
+                      DeviceRef src, size_t srcStep, size_t widthBytes, size_t rows,
                       Stream& stream, bool hostStable) = 0;
 
     virtual Ptr<Stream> createStream(int device) = 0;
@@ -157,7 +179,16 @@ Built-in backends (CUDA) register themselves. Backends stay registered for the l
 process. */
 CV_EXPORTS void registerBackend(const Ptr<Backend>& backend);
 
-//! the device address of @p m's first element, for operations
+//! where @p m's first element is, for operations
+static inline DeviceRef deviceRef(const UMat& m)
+{
+    return m.u ? DeviceRef(m.u->handle, m.offset) : DeviceRef();
+}
+
+/** @brief The device address of @p m's first element.
+
+Only for a backend whose allocate() returns an address, which CUDA and HIP do and Metal does
+not. Anything that has to work on every backend uses deviceRef() instead. */
 static inline void* devicePtr(const UMat& m)
 {
     return m.u ? (void*)((uchar*)m.u->handle + m.offset) : 0;

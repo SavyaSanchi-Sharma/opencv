@@ -430,8 +430,8 @@ bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
         const Ptr<Stream>& s = currentStream(dev);
         try
         {
-            b.copy(dev->index, COPY_DEVICE_TO_DEVICE, p, u->size, u->handle, u->size,
-                   u->size, 1, *s, true);
+            b.copy(dev->index, COPY_DEVICE_TO_DEVICE, DeviceRef(p), u->size,
+                   DeviceRef(u->handle), u->size, u->size, 1, *s, true);
             s->record()->wait();
         }
         catch (const cv::Exception& e)
@@ -840,7 +840,8 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
         if (u->hostCopyObsolete() && u->size > 0)
         {
             const Ptr<Stream>& s = currentStream(dev_);
-            b.copy(i, COPY_DEVICE_TO_HOST, u->data, u->size, u->handle, u->size, u->size, 1, *s, true);
+            b.copy(i, COPY_DEVICE_TO_HOST, DeviceRef(u->data), u->size,
+                   DeviceRef(u->handle), u->size, u->size, 1, *s, true);
             Ptr<Event> e = s->record();
             waitAndDrop(e);
             countCopy(COPY_DEVICE_TO_HOST, u->size);
@@ -876,7 +877,8 @@ void DeviceAllocator::unmap(UMatData* u) const
                 // unchanged until it completes (CPU writes wait for it in map())
                 const Ptr<Stream>& s = currentStream(dev_);
                 orderOnStream(st, s, true);
-                b.copy(i, COPY_HOST_TO_DEVICE, u->handle, u->size, u->data, u->size, u->size, 1, *s, true);
+                b.copy(i, COPY_HOST_TO_DEVICE, DeviceRef(u->handle), u->size,
+                       DeviceRef(u->data), u->size, u->size, 1, *s, true);
                 recordUse(st, s, s->record(), true);
                 countCopy(COPY_HOST_TO_DEVICE, u->size);
                 u->markDeviceCopyObsolete(false);
@@ -918,7 +920,8 @@ void DeviceAllocator::download(UMatData* u, void* dst, int dims, const size_t sz
     orderOnStream(st, s, false);
     const size_t bytes = forEachPlane(dims, sz, srcofs, srcstep, 0, dststep,
                                       [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
-        b.copy(i, COPY_DEVICE_TO_HOST, (uchar*)dst + dof, dp, (uchar*)u->handle + so, sp, w, rows, *s, false);
+        b.copy(i, COPY_DEVICE_TO_HOST, DeviceRef(dst, dof), dp,
+               DeviceRef(u->handle, so), sp, w, rows, *s, false);
     });
     Ptr<Event> e = s->record();
     waitAndDrop(e);     // downloads are synchronous: the caller reads the data next
@@ -969,7 +972,8 @@ void DeviceAllocator::upload(UMatData* u, const void* src, int dims, const size_
     const size_t bytes = forEachPlane(dims, sz, 0, srcstep, dstofs, dststep,
                                       [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
         // the caller's memory: the backend reads it before returning
-        b.copy(i, COPY_HOST_TO_DEVICE, (uchar*)u->handle + dof, dp, (const uchar*)src + so, sp, w, rows, *s, false);
+        b.copy(i, COPY_HOST_TO_DEVICE, DeviceRef(u->handle, dof), dp,
+               DeviceRef(src, so), sp, w, rows, *s, false);
     });
     recordUse(st, s, s->record(), true);
     countCopy(COPY_HOST_TO_DEVICE, bytes);
@@ -996,8 +1000,8 @@ void DeviceAllocator::copy(UMatData* srcdata, UMatData* dstdata, int dims, const
             orderOnStream(ds, s, true);
             const size_t bytes = forEachPlane(dims, sz, srcofs, srcstep, dstofs, dststep,
                                               [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
-                b.copy(i, COPY_DEVICE_TO_DEVICE, (uchar*)dstdata->handle + dof, dp,
-                       (const uchar*)srcdata->handle + so, sp, w, rows, *s, true);
+                b.copy(i, COPY_DEVICE_TO_DEVICE, DeviceRef(dstdata->handle, dof), dp,
+                       DeviceRef(srcdata->handle, so), sp, w, rows, *s, true);
             });
             Ptr<Event> e = s->record();
             recordUse(ss, s, e, false);

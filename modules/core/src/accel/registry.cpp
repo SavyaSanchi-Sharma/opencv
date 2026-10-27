@@ -136,6 +136,21 @@ public:
                 }
             }
 #endif
+#if defined(HAVE_ACCEL_METAL) && !defined(BUILD_PLUGIN)
+            if (utils::getConfigurationParameterBool("OPENCV_ACCEL_METAL", true))
+            {
+                try
+                {
+                    Ptr<Backend> metal = metal_impl::createMetalBackend();
+                    if (metal && metal->deviceCount() > 0)
+                        add(metal);
+                }
+                catch (const cv::Exception& e)
+                {
+                    CV_LOG_WARNING(NULL, "accel: the Metal backend is not available: " << e.what());
+                }
+            }
+#endif
             if (utils::getConfigurationParameterBool("OPENCV_ACCEL_PLUGINS_ENABLE", true))
             {
                 std::vector<std::string> plugins = pluginCandidates();

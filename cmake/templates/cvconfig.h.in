@@ -31,6 +31,9 @@
 /* AMD ROCm/HIP Runtime API */
 #cmakedefine HAVE_HIP
 
+/* Apple Metal */
+#cmakedefine HAVE_METAL
+
 /* NVIDIA CUDA Runtime API*/
 #cmakedefine HAVE_CUDA
 

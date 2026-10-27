@@ -384,12 +384,15 @@ public:
             (void)hipGetLastError();
     }
 
-    void copy(int device, CopyKind kind, void* dst, size_t dstStep, const void* src, size_t srcStep,
+    void copy(int device, CopyKind kind, DeviceRef dst, size_t dstStep, DeviceRef src, size_t srcStep,
               size_t widthBytes, size_t rows, Stream& stream, bool hostStable) CV_OVERRIDE
     {
+        // every handle here is an address, device memory and host memory alike
+        void* d = (uchar*)dst.handle + dst.offset;
+        const void* sp = (const uchar*)src.handle + src.offset;
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(device);
-        check(hipMemcpy2DAsync(dst, dstStep, src, srcStep, widthBytes, rows, hipMemcpyDefault, s.s_),
+        check(hipMemcpy2DAsync(d, dstStep, sp, srcStep, widthBytes, rows, hipMemcpyDefault, s.s_),
               "hipMemcpy2DAsync");
         if (kind == COPY_HOST_TO_DEVICE && !hostStable)
         {

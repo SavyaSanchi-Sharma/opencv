@@ -271,12 +271,15 @@ public:
             cudaGetLastError();
     }
 
-    void copy(int device, CopyKind kind, void* dst, size_t dstStep, const void* src, size_t srcStep,
+    void copy(int device, CopyKind kind, DeviceRef dst, size_t dstStep, DeviceRef src, size_t srcStep,
               size_t widthBytes, size_t rows, Stream& stream, bool hostStable) CV_OVERRIDE
     {
+        // every handle here is an address, device memory and host memory alike
+        void* d = (uchar*)dst.handle + dst.offset;
+        const void* sp = (const uchar*)src.handle + src.offset;
         CudaStream& s = cudaStreamOf(stream);
         DeviceGuard g(device);
-        check(cudaMemcpy2DAsync(dst, dstStep, src, srcStep, widthBytes, rows, cudaMemcpyDefault, s.s_),
+        check(cudaMemcpy2DAsync(d, dstStep, sp, srcStep, widthBytes, rows, cudaMemcpyDefault, s.s_),
               "cudaMemcpy2DAsync");
         if (kind == COPY_HOST_TO_DEVICE && !hostStable)
         {

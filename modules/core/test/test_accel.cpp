@@ -357,18 +357,21 @@ public:
         memcpy(b->base + off, b->cache.data() + off, size);     // the device now sees the CPU's bytes
     }
 
-    void copy(int d, accel::CopyKind kind, void* dst, size_t dstStep, const void* src, size_t srcStep,
+    void copy(int d, accel::CopyKind kind, accel::DeviceRef dst, size_t dstStep,
+              accel::DeviceRef src, size_t srcStep,
               size_t w, size_t rows, accel::Stream& stream, bool hostStable) CV_OVERRIDE
     {
         EmuStream& s = emuStreamOf(stream);
         CV_Assert(s.device_ == d);
-        const uintptr_t da = (uintptr_t)dst, sa = (uintptr_t)src;
+        // this backend's handles are addresses of its own making, so the offset folds into them
+        const uintptr_t da = (uintptr_t)dst.handle + dst.offset;
+        const uintptr_t sa = (uintptr_t)src.handle + src.offset;
         if (kind == accel::COPY_HOST_TO_DEVICE && !hostStable)
         {
             // the caller's memory may change once we return: read it now, as a staging copy would
             std::shared_ptr<std::vector<uchar> > staged = std::make_shared<std::vector<uchar> >(w * rows);
             for (size_t r = 0; r < rows; r++)
-                memcpy(staged->data() + r * w, (const uchar*)src + r * srcStep, w);
+                memcpy(staged->data() + r * w, (const uchar*)sa + r * srcStep, w);
             s.enqueue([this, staged, da, dstStep, w, rows] {
                 std::lock_guard<std::mutex> lock(mem_);
                 uchar* p = deviceBytes(da, dstStep, w, rows);

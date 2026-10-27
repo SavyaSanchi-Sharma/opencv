@@ -34,6 +34,13 @@ Ptr<Backend> createHipBackend();
 }
 #endif
 
+#if defined(HAVE_ACCEL_METAL) && !defined(BUILD_PLUGIN)
+namespace metal_impl {
+//! the Metal backend (backend_metal.mm) when it is built into core rather than as a plugin
+Ptr<Backend> createMetalBackend();
+}
+#endif
+
 struct Device::Impl
 {
     Impl(const Ptr<Backend>& b, int i);

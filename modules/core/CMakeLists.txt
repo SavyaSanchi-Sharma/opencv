@@ -184,6 +184,9 @@ endif()
 if(HAVE_HIP)
   list(APPEND extra_libs hip::host)
 endif()
+if(HAVE_METAL)
+  list(APPEND extra_libs ${METAL_LIBRARIES})
+endif()
 if(HAVE_CUDA)
   # Real CUDA installation present — cudev module required.
   if(NOT HAVE_opencv_cudev)
@@ -201,6 +204,15 @@ if(HAVE_HIP)
   # Module-wide, not per file: the backend, its kernels and the registry all test it,
   # and so will anything added later. Outside those it guards nothing.
   ocv_target_compile_definitions(${the_module} PRIVATE "HAVE_ACCEL_HIP=1")
+endif()
+
+if(HAVE_METAL)
+  # As above. src/accel/backend_metal.mm is behind HAVE_ACCEL_METAL and comes in through the
+  # module's own src/*.mm glob, so there is no source to list here.
+  ocv_target_compile_definitions(${the_module} PRIVATE "HAVE_ACCEL_METAL=1")
+  # The backend manages its Metal objects by hand; ARC would release them a second time.
+  set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/accel/backend_metal.mm"
+                              PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
 endif()
 
 if(HAVE_HIP AND HAVE_CUDA AND OPENCV_HIP_CUDA_THRUST_INCLUDE)
