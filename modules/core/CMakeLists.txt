@@ -100,9 +100,24 @@ ocv_source_group("Include" DIRBASE "${CMAKE_CURRENT_LIST_DIR}/include" FILES ${c
 
 source_group("Src" FILES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string.inc")
 
+# HIP backend of the non-CPU HAL. It also builds standalone as a plugin
+# (misc/plugins/accel_hip); with ROCm present, build it into core so no second build
+# directory is needed. src/accel/backend_hip.cpp is behind HAVE_ACCEL_HIP and the
+# kernels are .hip, which the generic src/*.cpp glob does not pick up.
+set(accel_hip_srcs "")
+if(HAVE_HIP)
+  set(accel_hip_srcs "${CMAKE_CURRENT_LIST_DIR}/src/accel/hip/accel_kernels.hip")
+  set_source_files_properties(${accel_hip_srcs} PROPERTIES LANGUAGE HIP)
+endif()
+
 ocv_glob_module_sources(SOURCES "${OPENCV_MODULE_opencv_core_BINARY_DIR}/version_string.inc"
+                        ${accel_hip_srcs}
                         HEADERS ${core_parallel_hdrs} ${module_opencl_hdrs} ${lib_cuda_hdrs} ${lib_cuda_hdrs_detail})
 
+
+if(HAVE_HIP)
+  ocv_module_include_directories(${the_module} ${hip_INCLUDE_DIRS})
+endif()
 ocv_module_include_directories(${the_module} ${ZLIB_INCLUDE_DIRS} ${OPENCL_INCLUDE_DIRS})
 if(ANDROID AND HAVE_CPUFEATURES)
   ocv_append_source_file_compile_definitions(${CMAKE_CURRENT_SOURCE_DIR}/src/system.cpp "HAVE_CPUFEATURES=1")
@@ -167,17 +182,45 @@ if(PARALLEL_ENABLE_PLUGINS)
   endif()
 endif()
 
+if(HAVE_HIP)
+  list(APPEND extra_libs hip::host)
+endif()
+if(HAVE_METAL)
+  list(APPEND extra_libs ${METAL_LIBRARIES})
+endif()
 if(HAVE_CUDA)
+  # Real CUDA installation present — cudev module required.
   if(NOT HAVE_opencv_cudev)
     message(FATAL_ERROR "CUDA: OpenCV requires enabled 'cudev' module from 'opencv_contrib' repository: https://github.com/opencv/opencv_contrib")
   endif()
-  if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
-   list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
-  endif()
   ocv_warnings_disable(CMAKE_CXX_FLAGS -Wundef -Wenum-compare -Wunused-function -Wshadow)
+  if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
+    list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
+  endif()
 endif()
 
 ocv_create_module(${extra_libs})
+
+if(HAVE_HIP)
+  # Module-wide, not per file: the backend, its kernels and the registry all test it,
+  # and so will anything added later. Outside those it guards nothing.
+  ocv_target_compile_definitions(${the_module} PRIVATE "HAVE_ACCEL_HIP=1")
+endif()
+
+if(HAVE_METAL)
+  # As above. src/accel/backend_metal.mm is behind HAVE_ACCEL_METAL and comes in through the
+  # module's own src/*.mm glob, so there is no source to list here.
+  ocv_target_compile_definitions(${the_module} PRIVATE "HAVE_ACCEL_METAL=1")
+  # The backend manages its Metal objects by hand; ARC would release them a second time.
+  set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/accel/backend_metal.mm"
+                              PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
+endif()
+
+if(HAVE_HIP AND HAVE_CUDA AND OPENCV_HIP_CUDA_THRUST_INCLUDE)
+  # Put NVIDIA's CCCL/thrust -isystem ahead of ROCm's by adding it as this target's
+  # own system include (emitted before hip::device's interface includes in the RSP).
+  target_include_directories(${the_module} SYSTEM BEFORE PRIVATE ${OPENCV_HIP_CUDA_THRUST_INCLUDE})
+endif()
 
 ocv_target_link_libraries(${the_module} PRIVATE
     "${ZLIB_LIBRARIES}" "${OPENCL_LIBRARIES}" "${VA_LIBRARIES}"
