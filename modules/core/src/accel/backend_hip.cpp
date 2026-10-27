@@ -89,7 +89,8 @@ public:
 class HipStream CV_FINAL : public Stream
 {
 public:
-    explicit HipStream(int device) : device_(device), s_(0)
+    HipStream(int device, bool releaseToSystem)
+        : device_(device), s_(0), releaseToSystem_(releaseToSystem)
     {
         DeviceGuard g(device);
         check(hipStreamCreateWithFlags(&s_, hipStreamNonBlocking), "hipStreamCreateWithFlags");
@@ -100,11 +101,14 @@ public:
     {
         DeviceGuard g(device_);
         hipEvent_t e = 0;
-        /* Released to system scope: the CPU waits on these events before it reads a buffer,
-           and on coarse-grained memory (MEMORY_SHARED_NONCOHERENT) it would otherwise see
-           bytes still sitting in the GPU's caches. */
-        check(hipEventCreateWithFlags(&e, hipEventDisableTiming | hipEventReleaseToSystem),
-              "hipEventCreateWithFlags");
+        /* The CPU waits on these events before it reads a buffer, and on coarse-grained
+           memory it would otherwise see bytes still in the GPU's caches — so an event has to
+           be released to system scope. That release flushes those caches, which is a real
+           cost on every operation, so it is asked for only on a device that can hold
+           MEMORY_SHARED_NONCOHERENT at all. A discrete GPU never can. */
+        const unsigned flags = hipEventDisableTiming
+                             | (releaseToSystem_ ? hipEventReleaseToSystem : 0u);
+        check(hipEventCreateWithFlags(&e, flags), "hipEventCreateWithFlags");
         const hipError_t r = hipEventRecord(e, s_);
         if (r != hipSuccess)
         {
@@ -131,6 +135,7 @@ public:
 
     const int device_;
     hipStream_t s_;
+    const bool releaseToSystem_;    // the device can hold coarse-grained shared memory
 };
 
 HipStream& hipStreamOf(Stream& s)
@@ -433,7 +438,8 @@ public:
 
     Ptr<Stream> createStream(int device) CV_OVERRIDE
     {
-        return makePtr<HipStream>(device);
+        return makePtr<HipStream>(device,
+                                  (devs_[device]->kinds & MEMORY_SHARED_NONCOHERENT) != 0);
     }
 
     Ops* ops(const String& module) CV_OVERRIDE
