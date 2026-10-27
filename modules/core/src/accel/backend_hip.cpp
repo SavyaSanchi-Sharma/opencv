@@ -100,7 +100,11 @@ public:
     {
         DeviceGuard g(device_);
         hipEvent_t e = 0;
-        check(hipEventCreateWithFlags(&e, hipEventDisableTiming), "hipEventCreateWithFlags");
+        /* Released to system scope: the CPU waits on these events before it reads a buffer,
+           and on coarse-grained memory (MEMORY_SHARED_NONCOHERENT) it would otherwise see
+           bytes still sitting in the GPU's caches. */
+        check(hipEventCreateWithFlags(&e, hipEventDisableTiming | hipEventReleaseToSystem),
+              "hipEventCreateWithFlags");
         const hipError_t r = hipEventRecord(e, s_);
         if (r != hipSuccess)
         {
@@ -154,10 +158,18 @@ struct Frames
     }
 };
 
-//! 2-D, or a 3-D batch; anything else the backend leaves to OpenCV
+//! a frame of a batch is one gridDim.z, which the hardware limits
+const int MAX_BATCH = 65535;
+
+//! 2-D, or a 3-D batch this backend can launch; anything else it leaves to OpenCV
 inline bool addressable(const UMat& m, int esz)
 {
-    return (m.dims == 2 || m.dims == 3) && kernels::supportedElementSize(esz);
+    if (!kernels::supportedElementSize(esz))
+        return false;
+    if (m.dims == 2)
+        return true;
+    // declining sends OpenCV to its per-frame fallback; throwing here would fail the call
+    return m.dims == 3 && m.size[0] <= MAX_BATCH;
 }
 
 class HipCoreOps CV_FINAL : public CoreOps
@@ -292,14 +304,13 @@ public:
             r = hipHostMalloc(&p, size, hipHostMallocMapped | hipHostMallocPortable);
             break;
         case MEMORY_SHARED_NONCOHERENT:
-            /* As above but cached on the CPU, so it is faster to read and write there.
-               beginCpuAccess/endCpuAccess are left as the base no-ops: HIP makes
-               coarse-grained memory consistent at command boundaries, and core waits for the
-               last device writer before it calls beginCpuAccess, so there should be nothing
-               to flush. TODO(apu-validation): only an APU can prove that; until one runs the
-               tests, prefer MEMORY_SHARED_COHERENT. */
-            r = hipHostMalloc(&p, size,
-                              hipHostMallocMapped | hipHostMallocPortable | hipHostMallocNonCoherent);
+            /* Coarse-grained: the GPU may cache it, which is what makes it faster to work on
+               than coherent memory. hipHostMallocMapped is deliberately absent — asking for a
+               mapping makes the allocation fine-grained again and quietly undoes this. With
+               unified addressing, which every APU has, the GPU uses the same pointer anyway.
+               The release-to-system scope on recorded events is what flushes the GPU's caches
+               before the CPU reads (see HipStream::record). */
+            r = hipHostMalloc(&p, size, hipHostMallocPortable | hipHostMallocNonCoherent);
             break;
         case MEMORY_MANAGED:
             r = hipMallocManaged(&p, size, hipMemAttachGlobal);
@@ -322,7 +333,9 @@ public:
             return 0;
         }
         check(r, "allocate");
-        if (isSharedKind(kind))
+        // managed memory is one allocation with one address, not a host mapping, so there is
+        // no separate device pointer to ask about
+        if (isSharedKind(kind) && kind != MEMORY_MANAGED)
         {
             // the backend hands the CPU address straight back, so the two must agree
             void* dp = 0;

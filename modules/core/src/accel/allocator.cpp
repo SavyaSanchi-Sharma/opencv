@@ -694,6 +694,24 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
     if (total > 0)
     {
         u->handle = allocateDevice(dev_, total, st->kind);
+        /* An integrated GPU's device memory is a carve-out of system RAM, and a small one on
+           many machines. When it is full the rest of system RAM usually is not, and memory
+           the CPU shares costs only a copy we would have made anyway — so a buffer that was
+           not asked to be device memory takes that instead of failing. */
+        if (!u->handle && st->kind == MEMORY_DEVICE && !st->kindRequested && dev_->canShare())
+        {
+            const MemoryKind fallback = isSharedKind(dev_->defaultKind)
+                ? dev_->defaultKind
+                : ((dev_->kinds & MEMORY_SHARED_NONCOHERENT) ? MEMORY_SHARED_NONCOHERENT
+                                                             : MEMORY_SHARED_COHERENT);
+            u->handle = allocateDevice(dev_, total, fallback);
+            if (u->handle)
+            {
+                CV_LOG_DEBUG(NULL, "accel: " << dev_->name << " has no device memory for "
+                             << total << " bytes; using " << kindName(fallback) << " instead");
+                st->kind = fallback;
+            }
+        }
         if (!u->handle)
         {
             delete u;
