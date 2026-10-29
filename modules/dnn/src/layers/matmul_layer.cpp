@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+#include "../net_impl.hpp"
 #include "cpu_kernels/fusion_apply.hpp"
 
 #include <type_traits>
@@ -20,6 +21,7 @@
 // CUDA backend
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/matmul_broadcast.hpp"
+#include "fusion_cuda.hpp"
 using namespace cv::dnn::cuda4dnn;
 #endif
 
@@ -65,61 +67,55 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE {
-        if (fusion.expr)
+#ifdef HAVE_CUDA
+        // CUDA runs a fused activation or scale/shift after the MatMul; N is known for a constant B
+        const int N = (blobs.empty() || blobs[0].dims < 2) ? -1
+                      : blobs[0].size[blobs[0].dims - (trans_b ? 2 : 1)];
+        const bool cudaFusion = backendId == DNN_BACKEND_CUDA && cudaSupportsFusion(fusion, N);
+#else
+        const bool cudaFusion = false;
+#endif
+        if (fusion.expr && !cudaFusion)
             return backendId == DNN_BACKEND_OPENCV;
+#ifdef HAVE_CUDA
+        if (backendId == DNN_BACKEND_CUDA) {
+            // classic-engine nets carry no graph args to inspect; keep their previous answer
+            if (inputs.empty())
+                return true;
+            // MatMulBroadcastOp applies neither alpha nor a scaled bias, and adds the bias without broadcasting
+            if (alpha != 1.f || beta != 1.f)
+                return false;
+            const bool constB = inputs.size() == 1 && (blobs.size() == 1 || blobs.size() == 2);
+            const bool inputB = blobs.empty() && inputs.size() == 2;
+            if (!constB && !inputB)
+                return false;
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (!netimpl_)
+                return false;
+            // an intermediate arg has no type until the first forward; refuse only a known non-float one
+            for (const Arg& a : inputs) {
+                const int t = netimpl_->argData(a).type;
+                if (t >= 0 && t != CV_32F)
+                    return false;
+            }
+            for (const Mat& b : blobs)
+                if (b.type() != CV_32F)
+                    return false;
+            // gemmBatched reads the last two axes of A, B and Y; 1-D operands stay on CPU
+            for (const Arg& a : inputs) {
+                const int dims = netimpl_->argData(a).shape.dims;
+                if (dims >= 0 && dims < 2)
+                    return false;
+            }
+            if (!blobs.empty() && blobs[0].dims < 2)
+                return false;
+            return true;
+        }
+#endif
         return backendId == DNN_BACKEND_OPENCV ||
                backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
                (backendId == DNN_BACKEND_VKCOM && haveVulkan() && !trans_a && !trans_b) ||
-               backendId == DNN_BACKEND_CUDA ||
                backendId == DNN_BACKEND_CANN;
-    }
-
-    // numpy 1-D promotion: A[K]->[1,K], B[K]->[K,1]. `out` drops the inserted 1-dims.
-    static void matmulShapes(const MatShape& rawA, const MatShape& rawB, bool trans_a, bool trans_b,
-                             MatShape& Ap, MatShape& Bp, MatShape& full, MatShape& out) {
-        const bool a1d = rawA.size() == 1, b1d = rawB.size() == 1;
-        Ap = a1d ? MatShape{1, rawA[0]} : rawA;
-        Bp = b1d ? MatShape{rawB[0], 1} : rawB;
-        CV_CheckGE(Ap.size(), (size_t)2, "DNN/MatMul: invalid shape of input A");
-        CV_CheckGE(Bp.size(), (size_t)2, "DNN/MatMul: invalid shape of input B");
-
-        int mA = Ap[Ap.size() - 2], nA = Ap.back();
-        int mB = Bp[Bp.size() - 2], nB = Bp.back();
-        int M = trans_a ? nA : mA;
-        int N = trans_b ? mB : nB;
-        int K_A = trans_a ? mA : nA;
-        int K_B = trans_b ? nB : mB;
-        CV_CheckEQ(K_A, K_B, "DNN/MatMul: invalid dimension K");
-
-        if (Ap.size() != 2 || Bp.size() != 2) {
-            const auto &more = Ap.size() > Bp.size() ? Ap : Bp;
-            const auto &less = Ap.size() > Bp.size() ? Bp : Ap;
-            size_t diff_dims = more.size() - less.size();
-            full = more;
-            for (size_t i = 0; i < less.size() - 2; i++) {
-                const auto dl = less[i], dm = more[i + diff_dims];
-                if (dl != 1 && dm != 1 && dl != dm)
-                    CV_Error(Error::StsBadSize, "DNN/MatMul: invalid shape for broadcasting");
-                if (dm == 1)
-                    full[i + diff_dims] = dl;
-            }
-            full[full.size() - 2] = M;
-            full[full.size() - 1] = N;
-        } else {
-            full = MatShape{M, N};
-        }
-
-        // both 1-D, no batch -> 0-D scalar (total 1), not empty (total 0)
-        if (a1d && b1d && full.size() == 2) {
-            out = MatShape::scalar();
-            return;
-        }
-        // drop the 1-dims inserted by promotion
-        out.clear();
-        for (size_t i = 0; i + 2 < full.size(); i++)
-            out.push_back(full[i]);
-        if (!a1d) out.push_back(M);
-        if (!b1d) out.push_back(N);
     }
 
     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -697,8 +693,8 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
 #ifdef HAVE_CUDA
     Ptr<BackendNode> initCUDA(void *context_,
-                              const std::vector<Ptr<BackendWrapper>>& inputs,
-                              const std::vector<Ptr<BackendWrapper>>& outputs) override {
+                              InputArrayOfArrays,
+                              InputArrayOfArrays outputs) override {
         auto context = reinterpret_cast<csl::CSLContext*>(context_);
         auto input_B = Mat(), bias = Mat();
         if (!blobs.empty()) {
@@ -710,7 +706,10 @@ class MatMulLayerImpl CV_FINAL : public MatMulLayer {
 
         CV_CheckFalse(helper.empty(), "DNN/MatMul/CUDA: MatMulHelper is not initialized");
 
-        return make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, beta, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+        // the fused math runs on the same stream, right after the MatMul
+        csl::Stream stream = context->stream;
+        Ptr<BackendNode> matmulNode = make_cuda_node<cuda4dnn::MatMulBroadcastOp>(preferableTarget, std::move(context->stream), std::move(context->cublas_handle), input_B, bias, beta, trans_a, trans_b, helper.A_offsets, helper.B_offsets, helper.C_offsets, helper.batch);
+        return makeFusedCudaNode(fusion, matmulNode, preferableTarget, stream, outputs.shape(0));
     }
 #endif // HAVE_CUDA
 
