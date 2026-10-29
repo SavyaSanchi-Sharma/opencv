@@ -12,6 +12,12 @@ project(opencv_core_accel_hip CXX)
 
 get_filename_component(OpenCV_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
+# Before enable_language(HIP): without a build type the HIP sources get no -O flag at all,
+# and an unoptimised kernel spills to scratch instead of keeping values in registers.
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+endif()
+
 include(CheckLanguage)
 check_language(HIP)
 if(NOT CMAKE_HIP_COMPILER)

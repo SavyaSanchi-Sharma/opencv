@@ -1388,8 +1388,10 @@ static bool accel_setTo(UMat& dst, InputArray _value)
         for (int i = 0; i < n; i++)
             s.val[i] = tmp.at<double>(i);
     }
+    // OpCall keeps pointers to its arguments, so the array must outlive run().
+    const _OutputArray dstArr(dst);
     accel::detail::OpCall call("setTo");
-    call.output(dst, dst.shape(), dst.type());
+    call.output(dstArr, dst.shape(), dst.type());
     return call.run<accel::CoreOps>([&s](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& st) {
         return ops.setTo(a[0], s, st);
     });

@@ -215,8 +215,10 @@ void Mat::convertTo(OutputArray dst, int type_, double alpha, double beta) const
 
 static bool accel_convertTo(const UMat& src, OutputArray dst, int dtype, double alpha, double beta)
 {
+    // OpCall keeps pointers to its arguments, so the array must outlive run().
+    const _InputArray srcArr(src);
     accel::detail::OpCall call("convertTo");
-    call.input(src).output(dst, src.shape(), dtype);
+    call.input(srcArr).output(dst, src.shape(), dtype);
     return call.run<accel::CoreOps>([alpha, beta](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& s) {
         return ops.convertTo(a[0], a[1], alpha, beta, s);
     });

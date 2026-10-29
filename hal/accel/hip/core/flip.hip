@@ -25,8 +25,8 @@ __global__ void flipKernel(const unsigned char* src, size_t sstep, unsigned char
     for (unsigned y = blockIdx.y * blockDim.y + threadIdx.y; y < (unsigned)rows; y += gridDim.y * blockDim.y)
     {
         const unsigned sy = flipRows ? (unsigned)rows - 1 - y : y;
-        *(Bytes<N>*)(dst + (size_t)y * dstep + (size_t)x * N) =
-            *(const Bytes<N>*)(src + (size_t)sy * sstep + (size_t)sx * N);
+        hipCopyN<N>(dst + (size_t)y * dstep + (size_t)x * N,
+                    src + (size_t)sy * sstep + (size_t)sx * N);
     }
 }
 

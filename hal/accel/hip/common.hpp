@@ -10,10 +10,59 @@
 #include <hip/hip_runtime.h>
 
 #include <limits>
+#include <type_traits>
 
 namespace cv { namespace accel { namespace hip_impl { namespace kernels {
 
+// Alignment decides the copy width: an unaligned Bytes<16> is 16 byte-moves, an aligned one
+// is a single dwordx4. Callers must check the pointers and steps before using the aligned form.
 template<int N> struct Bytes { unsigned char b[N]; };
+template<> struct __align__(2)  Bytes<2>  { unsigned char b[2];  };
+template<> struct __align__(4)  Bytes<4>  { unsigned char b[4];  };
+template<> struct __align__(8)  Bytes<8>  { unsigned char b[8];  };
+template<> struct __align__(16) Bytes<16> { unsigned char b[16]; };
+
+template<int N> struct BytesU { unsigned char b[N]; };
+
+template<typename T>
+__host__ __device__ __forceinline__ bool hipAligned(const void* p, size_t step)
+{
+    return ((reinterpret_cast<uintptr_t>(p) | step) & (alignof(T) - 1)) == 0;
+}
+
+// Copy N bytes without forming a Bytes<N> temporary: an array member of a struct is placed in
+// scratch (VRAM) rather than registers, which costs far more than the copy itself.
+template<int N>
+__device__ __forceinline__ void hipCopyN(unsigned char* d, const unsigned char* s)
+{
+#pragma unroll
+    for (int i = 0; i < N; i++)
+        d[i] = s[i];
+}
+
+#define CV_ACCEL_HIP_COPY_WORDS(N_, WORD_) \
+    template<> __device__ __forceinline__ void hipCopyN<N_>(unsigned char* d, const unsigned char* s) \
+    { \
+        if ((((uintptr_t)d | (uintptr_t)s) & (sizeof(WORD_) - 1)) == 0) \
+            *(WORD_*)d = *(const WORD_*)s; \
+        else \
+        { \
+            _Pragma("unroll") \
+            for (int i = 0; i < N_; i++) d[i] = s[i]; \
+        } \
+    }
+CV_ACCEL_HIP_COPY_WORDS(2,  ushort)
+CV_ACCEL_HIP_COPY_WORDS(4,  uint)
+CV_ACCEL_HIP_COPY_WORDS(8,  uint2)
+CV_ACCEL_HIP_COPY_WORDS(16, uint4)
+#undef CV_ACCEL_HIP_COPY_WORDS
+
+template<typename T, typename D> struct HipWorkType
+{
+    static const bool wide = std::is_same<T, int>::value || std::is_same<T, double>::value ||
+                             std::is_same<D, int>::value || std::is_same<D, double>::value;
+    typedef typename std::conditional<wide, double, float>::type type;
+};
 
 const int BLOCK_X = 32, BLOCK_Y = 8;
 
@@ -44,6 +93,16 @@ inline dim3 grid(int rows, int cols)
 
 template<typename D, typename S>
 __host__ __device__ __forceinline__ D hip_saturate_cast(S val) {
+#if defined(__HIP_DEVICE_COMPILE__)
+    // Narrow integer destinations from a float source stay in 32-bit float: a double round
+    // trip is many times slower on RDNA, and float holds every value these types can take.
+    if constexpr (std::is_same<S, float>::value && std::is_integral<D>::value && sizeof(D) <= 2)
+    {
+        const float lo = static_cast<float>(std::numeric_limits<D>::lowest());
+        const float hi = static_cast<float>(std::numeric_limits<D>::max());
+        return static_cast<D>(__float2int_rn(fminf(fmaxf(val, lo), hi)));
+    }
+#endif
     const double d = static_cast<double>(val);
     if (d < static_cast<double>(std::numeric_limits<D>::lowest())) return std::numeric_limits<D>::lowest();
     if (d > static_cast<double>(std::numeric_limits<D>::max()))    return std::numeric_limits<D>::max();
