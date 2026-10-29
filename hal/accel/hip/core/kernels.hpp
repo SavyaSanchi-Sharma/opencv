@@ -24,14 +24,9 @@ hipError_t flip(const unsigned char* src, size_t sstep, unsigned char* dst, size
 hipError_t transpose(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
                      int rows, int cols, int esz, hipStream_t s);
 
-//! @p val is a Scalar's 4 doubles; a NULL @p mask means unmasked
+//! @p val is a Scalar's 4 doubles; every element is written
 hipError_t setTo(unsigned char* dst, size_t dstep, int rows, int cols, int depth, int cn,
-                 const unsigned char* mask, size_t maskStep, const double* val, hipStream_t s);
-
-//! @p maskCn is 1 to gate whole elements, or @p cn to gate each channel
-hipError_t copyToWithMask(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                          const unsigned char* mask, size_t maskStep,
-                          int rows, int cols, int esz1, int cn, int maskCn, hipStream_t s);
+                 const double* val, hipStream_t s);
 
 //! dst = src * @p alpha + @p beta, saturating to @p ddepth
 hipError_t convertToScale(const unsigned char* src, size_t sstep, int sdepth,

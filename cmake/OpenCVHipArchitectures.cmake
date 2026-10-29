@@ -67,8 +67,8 @@ macro(ocv_hip_select_architectures)
     endif()
 
     if(NOT _hip_archs)
-      message(FATAL_ERROR "HIP: could not determine any GPU architecture to build for. "
-        "Set CMAKE_HIP_ARCHITECTURES explicitly, e.g. -DCMAKE_HIP_ARCHITECTURES=gfx1100.")
+      message(FATAL_ERROR "HIP: no GPU found and the compiler reported no generic targets. "
+        "Check that ROCm is installed and amdgpu-arch works.")
     endif()
 
     set(CMAKE_HIP_ARCHITECTURES "${_hip_archs}" CACHE STRING "HIP architectures to build for" FORCE)

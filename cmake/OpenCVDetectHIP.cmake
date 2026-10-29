@@ -28,8 +28,7 @@ set(ENABLE_CUDA_FIRST_CLASS_LANGUAGE ON)
 set(CMAKE_HIP_STANDARD 17)
 set(CMAKE_HIP_STANDARD_REQUIRED ON)
 
-include("${OpenCV_SOURCE_DIR}/cmake/OpenCVHipArchitectures.cmake")
-ocv_hip_select_architectures()
+# CMAKE_HIP_ARCHITECTURES is chosen before enable_language(HIP), in the root CMakeLists.
 
 # Define __HIP_PLATFORM_AMD__ for non-CUDA compiles only (nvcc must not see it).
 add_compile_options($<$<NOT:$<COMPILE_LANGUAGE:CUDA>>:-D__HIP_PLATFORM_AMD__>)

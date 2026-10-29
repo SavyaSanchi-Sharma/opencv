@@ -42,10 +42,9 @@
 #include "precomp.hpp"
 #include "opencl_kernels_core.hpp"
 #include "umatrix.hpp"
-#ifdef HAVE_HIP
-#  include "opencv2/core/hip.hpp"
-#endif
+#include "accel/accel_impl.hpp"
 
+#include "opencv2/core/utils/accel_dispatch.private.hpp"
 #include <opencv2/core/utils/tls.hpp>
 
 ///////////////////////////////// UMat implementation ///////////////////////////////
@@ -449,10 +448,6 @@ UMat& UMat::operator=(UMat&& m)
 
 MatAllocator* UMat::getStdAllocator()
 {
-#ifdef HAVE_HIP
-    if (cv::hip::useHip())
-        return cv::hip::getHipAllocator();
-#endif
 #ifdef HAVE_OPENCL
     if (ocl::useOpenCL())
         return ocl::getOpenCLAllocator();
@@ -651,6 +646,8 @@ void UMat::create(int d0, const int* _sizes, int _type, UMatUsageFlags _usageFla
     if( total() > 0 )
     {
         MatAllocator *a = allocator, *a0 = getStdAllocator();
+        if (!a)
+            a = accel::detail::scopeAllocator();    // a device ExecutionScope places new data on its device
         if (!a)
         {
             a = a0;
@@ -1176,11 +1173,15 @@ Mat UMat::getMat(AccessFlag accessFlags) const
     if(!u)
         return Mat();
     // TODO Support ACCESS_READ (ACCESS_WRITE) without unnecessary data transfers
-    accessFlags |= ACCESS_RW;
+    // Accelerator memory does: a CPU read leaves the device copy current, and map() is called for
+    // every view, so a write view taken after read views upgrades the mapping.
+    const bool accelMemory = accel::detail::isDeviceAllocator(u->currAllocator);
+    if (!accelMemory || !(accessFlags & ACCESS_RW))
+        accessFlags |= ACCESS_RW;
     UMatDataAutoLock autolock(u);
     try
     {
-        if(CV_XADD(&u->refcount, 1) == 0)
+        if(CV_XADD(&u->refcount, 1) == 0 || accelMemory)
             u->currAllocator->map(u, accessFlags);
         if (u->data != 0)
         {
@@ -1214,6 +1215,9 @@ void* UMat::handle(AccessFlag accessFlags) const
     {
         u->currAllocator->unmap(u);
     }
+
+    // accelerator memory: the caller's own device work must see OpenCV's finished results
+    accel::detail::prepareHandle(u, accessFlags);
 
     if (!!(accessFlags & ACCESS_WRITE))
         u->markHostCopyObsolete(true);
@@ -1325,30 +1329,6 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
         copyTo(_dst);
         return;
     }
-#ifdef HAVE_HIP
-    if (dims <= 2 && cv::hip::isHipUMat(*this) && _dst.isUMat())
-    {
-        UMat mask = _mask.getUMat();
-        if (cv::hip::isHipUMat(mask))
-        {
-            UMatData* prevu = _dst.getUMat().u;
-            _dst.create(size(), type());
-            UMat dst = _dst.getUMat();
-            // Zero a freshly allocated dst first (the kernel writes only masked pixels), matching
-            // Mat::copyTo / OpenCL HAVE_DST_UNINIT. Skip when dst is reused, to keep its pixels.
-            // Each handle is the base of its parent allocation; offset selects the ROI.
-            if (prevu != dst.u)
-                cv::hip::device::setToWithoutMask((uchar*)dst.u->handle + dst.offset, dst.step[0],
-                                                  rows, cols, type(), Scalar::all(0));
-            cv::hip::device::copyToWithMask((uchar*)u->handle + offset, step[0],
-                                            (uchar*)dst.u->handle + dst.offset, dst.step[0],
-                                            (uchar*)mask.u->handle + mask.offset, mask.step[0],
-                                            rows, cols, type(), mask.channels());
-            dst.u->markHostCopyObsolete(true);
-            return;
-        }
-    }
-#endif
 #ifdef HAVE_OPENCL
     int cn = channels(), mtype = _mask.type(), mdepth = CV_MAT_DEPTH(mtype), mcn = CV_MAT_CN(mtype);
     CV_Assert( (mdepth == CV_8U || mdepth == CV_8S || mdepth == CV_Bool) && (mcn == 1 || mcn == cn) );
@@ -1394,49 +1374,35 @@ void UMat::copyTo(OutputArray _dst, InputArray _mask) const
 // void UMat::convertTo moved to convert.dispatch.cpp
 //
 
+static bool accel_setTo(UMat& dst, InputArray _value)
+{
+    Mat value = _value.getMat();
+    if (!checkScalar(value, dst.type(), _value.kind(), _InputArray::UMAT))
+        return false;
+    Scalar s;
+    {
+        Mat tmp;
+        value.convertTo(tmp, CV_64F);
+        tmp = tmp.reshape(1, 1);
+        const int n = (int)std::min(tmp.total(), (size_t)4);
+        for (int i = 0; i < n; i++)
+            s.val[i] = tmp.at<double>(i);
+    }
+    accel::detail::OpCall call("setTo");
+    call.output(dst, dst.shape(), dst.type());
+    return call.run<accel::CoreOps>([&s](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& st) {
+        return ops.setTo(a[0], s, st);
+    });
+}
+
 UMat& UMat::setTo(InputArray _value, InputArray _mask)
 {
     CV_INSTRUMENT_REGION();
 
     bool haveMask = !_mask.empty();
-#ifdef HAVE_HIP
-    // HIP kernel tables cover CV_8U..CV_64F only; newer 5.x depths fall through to OpenCL/CPU.
-    if (dims <= 2 && cv::hip::isHipUMat(*this) && CV_MAT_CN(type()) <= 4 &&
-        CV_MAT_DEPTH(type()) <= CV_64F)
-    {
-        Mat value = _value.getMat();
-        CV_Assert(checkScalar(value, type(), _value.kind(), _InputArray::UMAT));
-        Scalar s;
-        {
-            Mat tmp;
-            value.convertTo(tmp, CV_64F);
-            tmp = tmp.reshape(1, 1);
-            int n = (int)std::min(tmp.total(), (size_t)4);
-            for (int i = 0; i < n; i++)
-                s.val[i] = tmp.at<double>(i);
-        }
-        if (haveMask)
-        {
-            UMat mask = _mask.getUMat();
-            if (cv::hip::isHipUMat(mask))
-            {
-                cv::hip::device::setToWithMask((uchar*)u->handle + offset, step[0], rows, cols, type(),
-                                               (uchar*)mask.u->handle + mask.offset, mask.step[0],
-                                               s);
-                u->markHostCopyObsolete(true);
-                return *this;
-            }
-            // mask not on HIP device, fall through to CPU
-        }
-        else
-        {
-            cv::hip::device::setToWithoutMask((uchar*)u->handle + offset, step[0], rows, cols, type(),
-                                              s);
-            u->markHostCopyObsolete(true);
-            return *this;
-        }
-    }
-#endif
+
+    CV_ACCEL_RUN_(!haveMask, accel_setTo(*this, _value), *this)
+
 #ifdef HAVE_OPENCL
     int tp = type(), cn = CV_MAT_CN(tp), d = CV_MAT_DEPTH(tp);
 
