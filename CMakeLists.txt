@@ -670,6 +670,20 @@ if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
   endif()
 endif()
 
+# --- HIP/ROCm Support ---
+OCV_OPTION(WITH_HIP "Include AMD ROCm/HIP support" OFF)
+if(WITH_HIP)
+  include(CheckLanguage)
+  check_language(HIP)
+  if(CMAKE_HIP_COMPILER)
+    # Must precede enable_language(HIP): CMake caches its own CMAKE_HIP_ARCHITECTURES there.
+    include(cmake/OpenCVHipArchitectures.cmake)
+    ocv_hip_select_architectures()
+    enable_language(HIP)
+  endif()
+  include(cmake/OpenCVDetectHIP.cmake)
+endif()
+
 # ----------------------------------------------------------------------------
 #       CHECK FOR SYSTEM LIBRARIES, OPTIONS, ETC..
 # ----------------------------------------------------------------------------
