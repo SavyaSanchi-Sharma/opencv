@@ -23,12 +23,29 @@ __global__ void setToKernel(unsigned char* dst, size_t dstep, int rows, int cols
         *(T*)(dst + (size_t)y * dstep + (size_t)x * sizeof(T)) = val;
 }
 
+// OpenCV only guarantees a row step that is a multiple of elemSize1, so a ROI or user-wrapped
+// buffer can be misaligned for a 8- or 16-byte vector type.
+template<typename T>
+__global__ void setToUnalignedKernel(unsigned char* dst, size_t dstep, int rows, int cols, T val)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x >= cols)
+        return;
+    for (unsigned y = blockIdx.y * blockDim.y + threadIdx.y; y < (unsigned)rows; y += gridDim.y * blockDim.y)
+        hipCopyN<(int)sizeof(T)>(dst + (size_t)y * dstep + (size_t)x * sizeof(T),
+                                 (const unsigned char*)&val);
+}
+
 template<typename T>
 hipError_t setToT(unsigned char* dst, size_t dstep, int rows, int cols, const double* v, hipStream_t s)
 {
     const T val = HipVecTraits<T>::make(v);
-    hipLaunchKernelGGL(setToKernel<T>, grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
-                       dst, dstep, rows, cols, val);
+    if (hipAligned<T>(dst, dstep))
+        hipLaunchKernelGGL(setToKernel<T>, grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
+                           dst, dstep, rows, cols, val);
+    else
+        hipLaunchKernelGGL(setToUnalignedKernel<T>, grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
+                           dst, dstep, rows, cols, val);
     return hipGetLastError();
 }
 
@@ -49,7 +66,7 @@ template<typename T, typename D>
 hipError_t convertScaleT(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
                          int rows, int cols, double alpha, double beta, hipStream_t s)
 {
-    typedef typename HipLargerType<T, float>::type S;
+    typedef typename HipWorkType<T, D>::type S;
     hipLaunchKernelGGL((convertScaleKernel<T, D, S>), grid(rows, cols), dim3(BLOCK_X, BLOCK_Y), 0, s,
                        src, sstep, dst, dstep, rows, cols,
                        hip_saturate_cast<S>(alpha), hip_saturate_cast<S>(beta));

@@ -166,6 +166,43 @@ not the version it was built for. Define it with CV_ACCEL_DEFINE_PLUGIN. */
 typedef Backend* (*FN_opencv_core_accel_plugin_init_v1)(int major, int minor, int patch);
 #define CV_ACCEL_PLUGIN_INIT_NAME "opencv_core_accel_plugin_init_v1"
 
+/** @brief Tag of the C++ ABI a plugin was built with.
+
+Backend, Ptr, String, std::vector and UMat all cross the library boundary, and the Backend is
+created by the plugin's operator new and released by OpenCV, so both sides must agree on the
+compiler and the standard library. A plugin built with a different one is rejected rather than
+left to fail somewhere later. The OpenCV version check ignores the patch number, which does not
+change the ABI within a release. */
+typedef const char* (*FN_opencv_core_accel_plugin_abi_v1)();
+#define CV_ACCEL_PLUGIN_ABI_NAME "opencv_core_accel_plugin_abi_v1"
+
+#if defined(__clang__)
+#  define CV_ACCEL_ABI_COMPILER "clang" CVAUX_STR(__clang_major__)
+#elif defined(__GNUC__)
+#  define CV_ACCEL_ABI_COMPILER "gcc" CVAUX_STR(__GNUC__)
+#elif defined(_MSC_VER)
+#  define CV_ACCEL_ABI_COMPILER "msvc" CVAUX_STR(_MSC_VER)
+#else
+#  define CV_ACCEL_ABI_COMPILER "unknown"
+#endif
+
+#if defined(_GLIBCXX_USE_CXX11_ABI)
+#  define CV_ACCEL_ABI_STDLIB "libstdc++" CVAUX_STR(_GLIBCXX_USE_CXX11_ABI)
+#elif defined(_LIBCPP_VERSION)
+#  define CV_ACCEL_ABI_STDLIB "libc++"
+#else
+#  define CV_ACCEL_ABI_STDLIB "stdlib"
+#endif
+
+#if defined(__SIZEOF_POINTER__)
+#  define CV_ACCEL_ABI_PTR_BITS __SIZEOF_POINTER__
+#else
+#  define CV_ACCEL_ABI_PTR_BITS 0
+#endif
+
+#define CV_ACCEL_PLUGIN_ABI_TAG \
+    CV_ACCEL_ABI_COMPILER "/" CV_ACCEL_ABI_STDLIB "/ptr" CVAUX_STR(CV_ACCEL_ABI_PTR_BITS)
+
 //! @}
 
 }} // namespace cv::accel
@@ -183,6 +220,10 @@ typedef Backend* (*FN_opencv_core_accel_plugin_init_v1)(int major, int minor, in
 CV_ACCEL_DEFINE_PLUGIN(new MyBackend())
 @endcode */
 #define CV_ACCEL_DEFINE_PLUGIN(expr) \
+    extern "C" CV_ACCEL_PLUGIN_EXPORTS const char* opencv_core_accel_plugin_abi_v1() \
+    { \
+        return CV_ACCEL_PLUGIN_ABI_TAG; \
+    } \
     extern "C" CV_ACCEL_PLUGIN_EXPORTS cv::accel::Backend* opencv_core_accel_plugin_init_v1(int major, int minor, int patch) \
     { \
         (void)patch; \

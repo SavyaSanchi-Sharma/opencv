@@ -167,6 +167,22 @@ public:
             CV_LOG_WARNING(NULL, "accel: " << path << " is not a backend plugin (no " CV_ACCEL_PLUGIN_INIT_NAME ")");
             return false;
         }
+        // Objects of C++ types cross this boundary in both directions, so refuse a plugin built
+        // with a different compiler or standard library instead of failing later.
+        FN_opencv_core_accel_plugin_abi_v1 abi =
+            reinterpret_cast<FN_opencv_core_accel_plugin_abi_v1>(lib->getSymbol(CV_ACCEL_PLUGIN_ABI_NAME));
+        if (!abi)
+        {
+            CV_LOG_WARNING(NULL, "accel: " << path << " does not report its ABI (no " CV_ACCEL_PLUGIN_ABI_NAME ")");
+            return false;
+        }
+        const char* tag = abi();
+        if (!tag || std::string(tag) != CV_ACCEL_PLUGIN_ABI_TAG)
+        {
+            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " was built with a different C++ ABI ("
+                           << (tag ? tag : "none") << ", OpenCV uses " CV_ACCEL_PLUGIN_ABI_TAG ")");
+            return false;
+        }
         Backend* raw = init(CV_VERSION_MAJOR, CV_VERSION_MINOR, CV_VERSION_REVISION);
         if (!raw)
         {

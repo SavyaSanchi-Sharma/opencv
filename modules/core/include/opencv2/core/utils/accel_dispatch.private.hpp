@@ -62,11 +62,14 @@ public:
     }
 
 private:
+    // By value: an InputArray built from a UMat at the call site is a temporary, and storing
+    // its address left a dangling pointer. Copying the wrapper is cheap and still refers to
+    // the caller's matrix.
     struct Arg
     {
         bool isOutput;
-        const _InputArray* in;
-        const _OutputArray* out;
+        _InputArray in;
+        _OutputArray out;
         MatShape shape;
         int type;
     };

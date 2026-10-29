@@ -22,8 +22,6 @@ template<> struct __align__(4)  Bytes<4>  { unsigned char b[4];  };
 template<> struct __align__(8)  Bytes<8>  { unsigned char b[8];  };
 template<> struct __align__(16) Bytes<16> { unsigned char b[16]; };
 
-template<int N> struct BytesU { unsigned char b[N]; };
-
 template<typename T>
 __host__ __device__ __forceinline__ bool hipAligned(const void* p, size_t step)
 {
@@ -188,9 +186,6 @@ DEFINE_VT4(double4, double, make_double4);
 #undef DEFINE_VT2
 #undef DEFINE_VT3
 #undef DEFINE_VT4
-
-template<typename A, typename B> struct HipLargerType                { typedef float  type; };
-template<>                       struct HipLargerType<double, float> { typedef double type; };
 
 }}}} // namespace cv::accel::hip_impl::kernels
 

@@ -115,9 +115,9 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         for (size_t i = 0; i < args_.size() && !dev; i++)
         {
             const Arg& a = args_[i];
-            if (!a.isOutput && a.in->isUMat())
+            if (!a.isOutput && a.in.isUMat())
             {
-                BufferState* st = stateOf(umatOf(*a.in).u);
+                BufferState* st = stateOf(umatOf(a.in).u);
                 if (st)
                     dev = st->dev;
             }
@@ -135,18 +135,18 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
     for (size_t i = 0; i < n; i++)
     {
         const Arg& a = args_[i];
-        const int kind = a.in->kind();
+        const int kind = a.in.kind();
         if (kind != _InputArray::MAT && kind != _InputArray::UMAT)
             return false;
-        if (kind == _InputArray::UMAT && copyOnlyMemory(umatOf(*a.in)))
+        if (kind == _InputArray::UMAT && copyOnlyMemory(umatOf(a.in)))
             fallbackCopies = true;
         if (!a.isOutput)
         {
-            if (a.in->empty())
+            if (a.in.empty())
                 return false;
             if (kind == _InputArray::UMAT)
             {
-                const UMat& m = umatOf(*a.in);
+                const UMat& m = umatOf(a.in);
                 if (onDevice(m, dev))
                 {
                     mapped = mapped || m.u->refcount > 0;
@@ -161,17 +161,17 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         }
         if (kind == _InputArray::UMAT)
         {
-            UMat& m = a.out->getUMatRef();
+            UMat& m = a.out.getUMatRef();
             bool aliases = false;
             for (size_t j = 0; j < n; j++)
-                if (!args_[j].isOutput && args_[j].in->isUMat() && m.u && umatOf(*args_[j].in).u == m.u)
+                if (!args_[j].isOutput && args_[j].in.isUMat() && m.u && umatOf(args_[j].in).u == m.u)
                     aliases = true;
             if (!aliases && onDevice(m, dev) && m.type() == a.type && m.shape() == a.shape)
             {
                 mapped = mapped || m.u->refcount > 0;
                 continue;
             }
-            if (!aliases && movable(m, *a.out))
+            if (!aliases && movable(m, a.out))
             {
                 plan[i] = PLAN_CREATE;
                 continue;
@@ -196,7 +196,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         {
             if (plan[i] == PLAN_CREATE)
             {
-                UMat& m = args_[i].out->getUMatRef();
+                UMat& m = args_[i].out.getUMatRef();
                 if (!onDevice(m, dev))
                 {
                     m.release();
@@ -235,16 +235,16 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         switch (plan[i])
         {
         case PLAN_USE:
-            umats[i] = a.isOutput ? a.out->getUMatRef() : umatOf(*a.in);
+            umats[i] = a.isOutput ? a.out.getUMatRef() : umatOf(a.in);
             break;
         case PLAN_UPLOAD:
             if (!createOn(umats[i], dev, a.shape, a.type))
                 return fallback();
-            a.in->copyTo(umats[i]);
+            a.in.copyTo(umats[i]);
             break;
         case PLAN_CREATE:
         {
-            UMat& m = a.out->getUMatRef();
+            UMat& m = a.out.getUMatRef();
             m.release();
             if (!createOn(m, dev, a.shape, a.type))
                 return fallback();
@@ -327,7 +327,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         // 5. results whose destination is elsewhere
         for (size_t i = 0; i < n; i++)
             if (plan[i] == PLAN_TEMP)
-                umats[i].copyTo(*args_[i].out);
+                umats[i].copyTo(args_[i].out);
         return true;
     }
     return fallback();
@@ -341,8 +341,7 @@ OpCall& OpCall::input(InputArray arr)
 {
     Arg a;
     a.isOutput = false;
-    a.in = &arr;
-    a.out = 0;
+    a.in = arr;
     a.type = arr.empty() ? -1 : arr.type();
     if (!arr.empty())
         a.shape = arr.shape();
@@ -354,8 +353,8 @@ OpCall& OpCall::output(OutputArray arr, const MatShape& shape, int type)
 {
     Arg a;
     a.isOutput = true;
-    a.in = &arr;
-    a.out = &arr;
+    a.in = arr;
+    a.out = arr;
     a.shape = shape;
     a.type = type;
     args_.push_back(a);

@@ -18,6 +18,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
 endif()
 
+set(CMAKE_HIP_STANDARD 17)
+set(CMAKE_HIP_STANDARD_REQUIRED ON)
+
 include(CheckLanguage)
 check_language(HIP)
 if(NOT CMAKE_HIP_COMPILER)
@@ -55,7 +58,8 @@ set(OPENCV_PLUGIN_EXTRA_INCLUDES "${CMAKE_CURRENT_LIST_DIR}")
 ocv_create_plugin(core "opencv_core_accel_hip" "hip::host" "HIP"
                   "src/accel/hip/backend_hip.cpp")
 
-target_compile_definitions(${OPENCV_PLUGIN_NAME} PRIVATE HAVE_ACCEL_HIP=1)
+target_compile_definitions(${OPENCV_PLUGIN_NAME} PRIVATE HAVE_ACCEL_HIP=1 __HIP_PLATFORM_AMD__=1)
+target_include_directories(${OPENCV_PLUGIN_NAME} PRIVATE ${hip_INCLUDE_DIRS})
 if(ROCM_FOUND)
   target_compile_definitions(${OPENCV_PLUGIN_NAME} PRIVATE
       OPENCV_ROCM_VERSION_MAJOR=${ROCM_VERSION_MAJOR}

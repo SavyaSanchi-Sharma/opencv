@@ -20,29 +20,37 @@ __global__ void transposeKernel(const unsigned char* src, size_t sstep, unsigned
     // +1 column so columns of the tile land in different LDS banks
     __shared__ Bytes<N> tile[TILE][TILE + 1];
 
-    int x = blockIdx.x * TILE + threadIdx.x;
-    int y = blockIdx.y * TILE + threadIdx.y;
-    for (int j = 0; j < TILE; j += TILE_ROWS)
-        if (x < cols && y + j < rows)
-            hipCopyN<N>(tile[threadIdx.y + j][threadIdx.x].b,
-                        src + (size_t)(y + j) * sstep + (size_t)x * N);
+    // gridDim.y is capped, so one block walks several tile rows. The condition depends only
+    // on blockIdx.y and gridDim.y, so every thread of the block runs the same iterations and
+    // reaches both __syncthreads().
+    for (int ty = blockIdx.y; (size_t)ty * TILE < (size_t)rows; ty += gridDim.y)
+    {
+        const int xs = blockIdx.x * TILE + threadIdx.x;
+        const int ys = ty * TILE + threadIdx.y;
 
-    __syncthreads();
+        __syncthreads();    // the previous iteration has finished reading the tile
+        for (int j = 0; j < TILE; j += TILE_ROWS)
+            if (xs < cols && ys + j < rows)
+                hipCopyN<N>(tile[threadIdx.y + j][threadIdx.x].b,
+                            src + (size_t)(ys + j) * sstep + (size_t)xs * N);
+        __syncthreads();
 
-    x = blockIdx.y * TILE + threadIdx.x;
-    y = blockIdx.x * TILE + threadIdx.y;
-    for (int j = 0; j < TILE; j += TILE_ROWS)
-        if (x < rows && y + j < cols)
-            hipCopyN<N>(dst + (size_t)(y + j) * dstep + (size_t)x * N,
-                        tile[threadIdx.x][threadIdx.y + j].b);
+        const int xd = ty * TILE + threadIdx.x;
+        const int yd = blockIdx.x * TILE + threadIdx.y;
+        for (int j = 0; j < TILE; j += TILE_ROWS)
+            if (xd < rows && yd + j < cols)
+                hipCopyN<N>(dst + (size_t)(yd + j) * dstep + (size_t)xd * N,
+                            tile[threadIdx.x][threadIdx.y + j].b);
+    }
 }
 
 template<int N>
 hipError_t transposeN(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
                       int rows, int cols, hipStream_t s)
 {
-    const dim3 grid((unsigned)((cols + TILE - 1) / TILE), (unsigned)((rows + TILE - 1) / TILE));
-    hipLaunchKernelGGL(transposeKernel<N>, grid, dim3(TILE, TILE_ROWS), 0, s,
+    const unsigned tilesY = (unsigned)((rows + TILE - 1) / TILE);
+    const dim3 g((unsigned)((cols + TILE - 1) / TILE), tilesY < MAX_GRID_Y ? tilesY : MAX_GRID_Y);
+    hipLaunchKernelGGL(transposeKernel<N>, g, dim3(TILE, TILE_ROWS), 0, s,
                        src, sstep, dst, dstep, rows, cols);
     return hipGetLastError();
 }
