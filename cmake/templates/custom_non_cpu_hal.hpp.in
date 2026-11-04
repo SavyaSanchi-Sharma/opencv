@@ -1,0 +1,6 @@
+#ifndef _CUSTOM_NON_CPU_HAL_INCLUDED_
+#define _CUSTOM_NON_CPU_HAL_INCLUDED_
+
+@_non_cpu_hal_includes@
+
+#endif
