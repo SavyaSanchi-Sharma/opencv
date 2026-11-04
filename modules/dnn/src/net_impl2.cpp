@@ -619,7 +619,7 @@ void Net::Impl::finalizeGraph(const Ptr<Graph>& graph, bool useCUDA)
         // a dynamic op stays on CUDA only if getMemoryShapes() reads its value inputs through
         // argTensor(), i.e. the host copies forwardGraph() downloads before the op runs
         static const std::set<std::string> hostSizedDynamicOps = {
-            "Reshape2", "Expand2", "Squeeze", "Unsqueeze", "Slice2", "ConstantOfShape", "Tile2"
+            "Reshape2", "Expand2", "Squeeze", "Unsqueeze", "Slice2", "ConstantOfShape", "Tile2", "Resize2", "Range", "Pad2"
         };
         // Shape and the small ops on its values run on the host, so the dynamic ops they size never wait for the device
         static const std::set<std::string> hostShapeOpTypes = {
@@ -1687,8 +1687,12 @@ static void forwardOpCUDA(Net::Impl* netimpl, GraphImpl* gimpl, size_t opidx,
     }
     std::vector<UMat> inpG(inputs.size()), outG(outputs.size());
     for (size_t i = 0; i < inputs.size(); i++) {
-        if (inpMats[i].empty())
+        if (inpMats[i].empty()) {
+            // a zero-element tensor still has a shape (Shape reads it); this header allocates nothing
+            if (inpMats[i].dims > 0 && inpMats[i].total() == 0)
+                inpG[i] = UMat(inpMats[i].dims, inpMats[i].size.p, inpMats[i].type());
             continue;
+        }
         netimpl->cudaUploadArg(inputs[i], inpMats[i]);   // H2D only if host-authoritative
         inpG[i] = netimpl->cudaDeviceBuffer(inputs[i]);
     }
@@ -2615,6 +2619,32 @@ std::ostream& Net::Impl::dump(std::ostream& strm)
     }
     strm << "}\n";
     return strm;
+}
+
+std::vector<std::string> cudaFallbackOps(const Net& net)
+{
+    std::vector<std::string> ops;
+#ifdef HAVE_CUDA
+    Net::Impl* impl = net.getImpl();
+    if (!impl || !impl->mainGraph || !impl->cudaInfo || impl->preferableBackend != DNN_BACKEND_CUDA)
+        return ops;
+    CV_Assert(impl->finalized && "cudaFallbackOps() reads the placement the first forward() made");
+    for (const Ptr<Graph>& graph : impl->allgraphs) {
+        const GraphImpl* g = static_cast<const GraphImpl*>(graph.get());
+        for (size_t i = 0; i < g->prog_.size(); i++) {
+            const Ptr<LayerInfo>& op = g->prog_[i];
+            if (!op)
+                continue;
+            const bool onCuda = i < g->execBackend_.size() && g->execBackend_[i] == DNN_BACKEND_CUDA;
+            const bool hostShape = i < g->hostShapeOp_.size() && g->hostShapeOp_[i];
+            if (!onCuda && !hostShape)
+                ops.push_back(op->name + " (" + op->type + ")");
+        }
+    }
+#else
+    CV_UNUSED(net);
+#endif
+    return ops;
 }
 
 CV__DNN_INLINE_NS_END
