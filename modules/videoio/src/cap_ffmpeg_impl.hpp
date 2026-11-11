@@ -690,7 +690,7 @@ void CvCapture_FFMPEG::close()
     {
 #ifdef CV_FFMPEG_CODECPAR
 // avcodec_close removed in FFmpeg release 8.0
-# if (LIBAVCODEC_BUILD < CALC_FFMPEG_VERSION(61, 9, 108))
+# if (LIBAVCODEC_BUILD < CALC_FFMPEG_VERSION(62, 3, 100))
         avcodec_close( context );
 # endif
 #endif
@@ -2021,7 +2021,21 @@ bool CvCapture_FFMPEG::retrieveFrame(int flag, unsigned char** data, int* step, 
     }
 
 #if LIBSWSCALE_BUILD >= CALC_FFMPEG_VERSION(6, 4, 100)
-    sws_scale_frame(img_convert_ctx, &rgb_picture, sw_picture);
+#ifdef AV_FRAME_FLAG_INTERLACED
+    // swscale refuses to convert between interlaced and progressive frames
+    const int field_flags = AV_FRAME_FLAG_INTERLACED | AV_FRAME_FLAG_TOP_FIELD_FIRST;
+    rgb_picture.flags = (rgb_picture.flags & ~field_flags) | (sw_picture->flags & field_flags);
+#endif
+    int sws_ret = sws_scale_frame(img_convert_ctx, &rgb_picture, sw_picture);
+    if (sws_ret < 0)
+    {
+#if USE_AV_HW_CODECS
+        if (sw_picture != picture)
+            av_frame_free(&sw_picture);
+#endif
+        CV_LOG_ERROR(NULL, "sws_scale_frame failed: " << _opencv_ffmpeg_get_error_string(sws_ret));
+        return false;
+    }
 #else
     sws_scale(
             img_convert_ctx,
@@ -2661,6 +2675,38 @@ static AVCodecContext * icv_configure_video_stream_FFMPEG(AVFormatContext *oc,
     c->time_base.den = frame_rate;
     c->time_base.num = frame_rate_base;
     /* adjust time base for supported framerates */
+#if LIBAVCODEC_BUILD >= CALC_FFMPEG_VERSION(61, 13, 100)
+    if (codec){
+        const AVRational *supported_framerates = NULL;
+        int num_supported_framerates = 0;
+        int ret = avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_FRAME_RATE, 0,
+                                               (const void **)&supported_framerates, &num_supported_framerates);
+
+        if (ret >= 0 && supported_framerates && num_supported_framerates > 0){
+            AVRational req = {frame_rate, frame_rate_base};
+            const AVRational *best=NULL;
+            AVRational best_error= {INT_MAX, 1};
+            for(int i = 0; i < num_supported_framerates; i++){
+                const AVRational *p = &supported_framerates[i];
+                AVRational error = av_sub_q(req, *p);
+                if(error.num <0) error.num *= -1;
+                if(av_cmp_q(error, best_error) < 0){
+                    best_error = error;
+                    best = p;
+                }
+            }
+            if (best == NULL)
+            {
+                #ifdef CV_FFMPEG_CODECPAR
+                avcodec_free_context(&c);
+                #endif
+                return NULL;
+            }
+            c->time_base.den = best->num;
+            c->time_base.num = best->den;
+        }
+    }
+#else
     if(codec && codec->supported_framerates){
         const AVRational *p= codec->supported_framerates;
         AVRational req = {frame_rate, frame_rate_base};
@@ -2684,6 +2730,7 @@ static AVCodecContext * icv_configure_video_stream_FFMPEG(AVFormatContext *oc,
         c->time_base.den= best->num;
         c->time_base.num= best->den;
     }
+#endif
 
     c->gop_size = 12; /* emit one intra frame every twelve frames at most */
     c->pix_fmt = pixel_format;

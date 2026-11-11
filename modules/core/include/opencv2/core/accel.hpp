@@ -33,6 +33,20 @@ class Stream;   // accel_backend.hpp
 //! @addtogroup core_accel
 //! @{
 
+/** @brief How the memory of a buffer relates to the CPU.
+
+One kind is chosen per buffer, among those its device offers (Device::memoryKinds). */
+enum MemoryKind
+{
+    MEMORY_DEVICE             = 1 << 0, //!< device memory; the CPU works on a copy of it
+    MEMORY_SHARED_COHERENT    = 1 << 1, //!< the CPU addresses it; coherent, so no cache maintenance
+    MEMORY_SHARED_NONCOHERENT = 1 << 2, //!< the CPU addresses it; cached, maintained around CPU access
+    MEMORY_MANAGED            = 1 << 3  //!< the CPU addresses it; the runtime migrates it
+};
+
+//! true for the kinds the CPU addresses directly, whose access needs no copy
+static inline bool isSharedKind(int kind) { return kind != 0 && kind != MEMORY_DEVICE; }
+
 /** @brief A device of an accelerator backend, or the CPU (an empty Device). */
 class CV_EXPORTS Device
 {
@@ -56,6 +70,12 @@ public:
     /** @brief true when the CPU reaches this device's memory directly (NPUs, integrated GPUs),
     false when it works on a copy (discrete GPUs). */
     bool sharesHostMemory() const;
+    /** @brief The MemoryKind values this device can provide, as a bitmask.
+    MEMORY_SHARED_COHERENT for the CPU (an empty Device). */
+    int memoryKinds() const;
+
+    //! the kind a new buffer on this device gets when nothing asks for another one
+    MemoryKind defaultMemoryKind() const;
 
     /** @brief Allocator that places UMat data on this device.
     Use it as `UMat u; u.allocator = device.allocator();` before creating the data.
@@ -77,6 +97,11 @@ private:
 
 //! the device that holds @p m: empty for host memory, OpenCL buffers and other UMats
 CV_EXPORTS Device getDevice(const UMat& m);
+
+/** @brief The memory kind of @p m's buffer.
+MEMORY_SHARED_COHERENT for host memory, OpenCL buffers and other UMats, which the CPU
+addresses directly. */
+CV_EXPORTS MemoryKind getMemoryKind(const UMat& m);
 
 /** @brief A new in-order queue of work on @p device (see accel_backend.hpp), for ExecutionScope.
 Work on different streams may run concurrently. OpenCV orders the work of all streams that

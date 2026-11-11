@@ -11,6 +11,7 @@
 #include "../precomp.hpp"
 #include "../umatrix.hpp"
 #include "accel_impl.hpp"
+#include "opencv2/core/utils/configuration.private.hpp"
 #include "opencv2/core/utils/logger.hpp"
 
 #ifndef _WIN32
@@ -29,6 +30,19 @@ inline BufferState* state(const UMatData* u)
     return static_cast<BufferState*>(u->allocatorContext.get());
 }
 
+//! for messages; also the spelling OPENCV_ACCEL_FORCE_MEMORY_KIND accepts
+const char* kindName(MemoryKind kind)
+{
+    switch (kind)
+    {
+    case MEMORY_DEVICE:             return "device";
+    case MEMORY_SHARED_COHERENT:    return "shared";
+    case MEMORY_SHARED_NONCOHERENT: return "shared_nc";
+    case MEMORY_MANAGED:            return "managed";
+    }
+    return "?";
+}
+
 void closeFd(int fd)
 {
 #ifdef _WIN32
@@ -38,9 +52,8 @@ void closeFd(int fd)
 #endif
 }
 
-/* Calls fn(srcOffset, dstOffset, srcPitch, dstPitch, widthBytes, rows) for each 2-D plane of
-   an N-D region. As everywhere in MatAllocator, sz[dims-1] and ofs[dims-1] are in bytes and
-   step[dims-1] is the element size. */
+// calls fn(srcOffset, dstOffset, srcPitch, dstPitch, widthBytes, rows) per 2-D plane of an N-D
+// region; as everywhere in MatAllocator, the last dimension's sizes and offsets are in bytes
 template<typename Fn>
 size_t forEachPlane(int dims, const size_t sz[], const size_t srcofs[], const size_t srcstep[],
                     const size_t dstofs[], const size_t dststep[], Fn fn)
@@ -118,7 +131,11 @@ struct Retired
 {
     Device::Impl* dev;
     void* devPtr;
+    MemoryKind kind;        // the kind devPtr was allocated with, needed to free it
+    size_t size;            // of devPtr, for the cache; 0 for memory that must not be reused
+    size_t pinnedSize;      // bytes this counted against dev->pinnedBytes; 0 when it counted none
     void* hostCopy;
+    size_t hostCopySize;    // and what the host copy counted, allocated lazily in map()
     std::vector<UMatData*> aliases;
     std::vector<Ptr<Event> > events;
 };
@@ -137,6 +154,13 @@ std::vector<Retired>& retiredList()
 
 std::atomic<int> g_retiredCount(0);
 
+// the allocation cache (below); kind is a MemoryKind, or CACHE_HOST for a device buffer's host copy
+const int CACHE_HOST = 0;   // no MemoryKind uses it
+void* cacheTake(Device::Impl* dev, size_t size, int kind);
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, int kind);
+bool cacheHas(Device::Impl* dev, size_t size, int kind);
+void cacheFlush(Device::Impl* dev);
+
 void freeNow(const Retired& r)
 {
     // imports of these bytes on other devices go first; their work is ordered by the same events
@@ -147,21 +171,322 @@ void freeNow(const Retired& r)
         a->currAllocator->deallocate(a);
     }
     if (r.devPtr)
-        r.dev->backend->deallocate(r.dev->index, r.devPtr);
-    if (r.hostCopy)
+    {
+        // kept for the next buffer of this size and kind where there is room; it stays counted
+        // against the pinned budget while it sits there, because it is still allocated
+        if (!r.size || !cachePut(r.dev, r.devPtr, r.size, r.kind))
+        {
+            r.dev->backend->deallocate(r.dev->index, r.devPtr, r.kind);
+            if (r.pinnedSize)
+                r.dev->pinnedBytes -= r.pinnedSize;
+        }
+    }
+    if (r.hostCopy && !cachePut(r.dev, r.hostCopy, r.hostCopySize, CACHE_HOST))
+    {
         r.dev->backend->deallocateHost(r.dev->index, r.hostCopy);
+        r.dev->pinnedBytes -= r.hostCopySize;
+    }
 }
 
-void* allocateDevice(Device::Impl* dev, size_t size)
+//! the OPENCV_ACCEL_* settings that steer allocations, read once (reloadSettings() for tests)
+struct Settings
 {
-    collectRetired(false);
-    void* p = dev->backend->allocate(dev->index, size);
-    if (!p && g_retiredCount.load() > 0)
+    std::atomic<int> forcedKind;        // OPENCV_ACCEL_FORCE_MEMORY_KIND, 0 when not set
+    std::atomic<size_t> pinnedLimit;    // OPENCV_ACCEL_PINNED_LIMIT_MB in bytes, 0 = unlimited
+    std::atomic<size_t> zeroCopyMax;    // OPENCV_ACCEL_ZERO_COPY_MAX_BYTES, 0 = no promotion
+    std::atomic<size_t> cacheLimit;     // OPENCV_ACCEL_CACHE_MAX_MB in bytes, 0 = no cache
+    std::atomic<bool> warnedForced;     // the warning about an override a device cannot follow
+
+    Settings() { read(); }
+
+    void read()
     {
-        // memory released while device work still used it: wait for that work, then retry
-        collectRetired(true);
-        p = dev->backend->allocate(dev->index, size);
+        forcedKind = parseKind(utils::getConfigurationParameterString("OPENCV_ACCEL_FORCE_MEMORY_KIND", ""));
+        pinnedLimit = (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_PINNED_LIMIT_MB", 0) * 1024 * 1024;
+        zeroCopyMax = (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_ZERO_COPY_MAX_BYTES", 0);
+        cacheLimit = (size_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_CACHE_MAX_MB", 0) * 1024 * 1024;
+        warnedForced = false;
     }
+
+    static int parseKind(const std::string& s)
+    {
+        if (s.empty())          return 0;
+        if (s == "device")      return MEMORY_DEVICE;
+        if (s == "shared")      return MEMORY_SHARED_COHERENT;
+        if (s == "shared_nc")   return MEMORY_SHARED_NONCOHERENT;
+        if (s == "managed")     return MEMORY_MANAGED;
+        CV_LOG_WARNING(NULL, "accel: OPENCV_ACCEL_FORCE_MEMORY_KIND=" << s
+                       << " is not one of device, shared, shared_nc, managed; ignored");
+        return 0;
+    }
+};
+
+Settings& settings()
+{
+    static Settings* s = new Settings();
+    return *s;
+}
+
+//! OPENCV_ACCEL_FORCE_MEMORY_KIND: a MemoryKind, or 0 for "not set"
+int forcedKind()
+{
+    return settings().forcedKind.load(std::memory_order_relaxed);
+}
+
+//! the budget for memory the CPU addresses, 0 = unlimited
+size_t pinnedLimit()
+{
+    return settings().pinnedLimit.load(std::memory_order_relaxed);
+}
+
+// the kind of a new buffer: the debug override, else the UMatUsageFlags, else the device default;
+// shared memory past the pinned budget becomes device memory
+MemoryKind chooseKind(Device::Impl* dev, size_t size, UMatUsageFlags usage, bool& requested)
+{
+    const char* why = "device default";
+    requested = false;      // set once something other than the device default decides
+    MemoryKind kind = newBufferKind(dev);
+    const int forced = forcedKind();
+    const bool overridden = forced && (dev->kinds & forced);
+
+    if (overridden)
+    {
+        why = "OPENCV_ACCEL_FORCE_MEMORY_KIND";
+        requested = true;
+    }
+    else if (forced)
+    {
+        if (!settings().warnedForced.exchange(true))    // once: this is the same for every buffer
+            CV_LOG_WARNING(NULL, "accel: " << dev->name << " does not provide "
+                           << kindName((MemoryKind)forced) << " memory; OPENCV_ACCEL_FORCE_MEMORY_KIND ignored");
+    }
+    else if (usage & USAGE_ALLOCATE_DEVICE_MEMORY)
+    {
+        if (dev->kinds & MEMORY_DEVICE)
+        {
+            kind = MEMORY_DEVICE;
+            why = "USAGE_ALLOCATE_DEVICE_MEMORY";
+            requested = true;
+        }
+    }
+    else if (usage & (USAGE_ALLOCATE_SHARED_MEMORY | USAGE_ALLOCATE_HOST_MEMORY))
+    {
+        if (dev->kinds & MEMORY_SHARED_COHERENT)
+        {
+            kind = MEMORY_SHARED_COHERENT;
+            why = "USAGE_ALLOCATE_SHARED_MEMORY";
+            requested = true;
+        }
+        else if (dev->kinds & MEMORY_SHARED_NONCOHERENT)
+        {
+            kind = MEMORY_SHARED_NONCOHERENT;
+            why = "USAGE_ALLOCATE_SHARED_MEMORY";
+            requested = true;
+        }
+    }
+
+    // soft per-device limit, checked without a lock: concurrent allocations may overshoot it
+    const size_t limit = pinnedLimit();
+    if (limit && isSharedKind(kind) && (dev->kinds & MEMORY_DEVICE)
+        && dev->pinnedBytes.load() + size > limit
+        // a block of this size and kind is already allocated and already counted: reusing it
+        // adds nothing to the total, so the budget has no reason to refuse it
+        && !cacheHas(dev, size, kind))
+    {
+        CV_LOG_DEBUG(NULL, "accel: " << dev->name << " is at its pinned budget ("
+                     << dev->pinnedBytes.load() << " + " << size << " > " << limit
+                     << " bytes); " << kindName(kind) << " becomes device memory");
+        kind = MEMORY_DEVICE;
+        why = "OPENCV_ACCEL_PINNED_LIMIT_MB";
+        requested = true;   // promotion must not undo the budget on the first CPU access
+    }
+
+    CV_LOG_DEBUG(NULL, "accel: " << dev->name << " " << size << " bytes as "
+                 << kindName(kind) << " (" << why << ")");
+    CV_UNUSED(why);     // the log is compiled out in release builds
+    return kind;
+}
+
+//! the largest buffer promoted to shared memory; 0 turns promotion off, which is the default
+size_t zeroCopyMaxBytes()
+{
+    return settings().zeroCopyMax.load(std::memory_order_relaxed);
+}
+
+//! how much released memory to keep; 0 turns the cache off
+size_t cacheLimit()
+{
+    return settings().cacheLimit.load(std::memory_order_relaxed);
+}
+
+//! memory of exactly this size and kind that was released earlier, or NULL
+void* cacheTake(Device::Impl* dev, size_t size, int kind)
+{
+    if (!cacheLimit())
+        return 0;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    auto it = dev->cache.find(std::make_pair(size, kind));
+    if (it == dev->cache.end() || it->second.empty())
+        return 0;
+    void* p = it->second.back();
+    it->second.pop_back();
+    dev->cachedBytes -= size;
+    return p;
+}
+
+//! true when cacheTake() would return something, without taking it
+bool cacheHas(Device::Impl* dev, size_t size, int kind)
+{
+    if (!cacheLimit())
+        return false;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    auto it = dev->cache.find(std::make_pair(size, kind));
+    return it != dev->cache.end() && !it->second.empty();
+}
+
+/** @brief Keeps @p ptr for the next buffer of this size and kind. False when the cache is off
+or full, and then the caller frees it. The device work that used it has finished. */
+bool cachePut(Device::Impl* dev, void* ptr, size_t size, int kind)
+{
+    const size_t limit = cacheLimit();
+    if (!limit || size == 0 || size > limit)
+        return false;
+    std::lock_guard<std::mutex> lock(dev->cacheMutex);
+    if (dev->cachedBytes + size > limit)
+        return false;
+    dev->cache[std::make_pair(size, kind)].push_back(ptr);
+    dev->cachedBytes += size;
+    return true;
+}
+
+//! gives everything the cache holds back to the device, for when an allocation has failed
+void cacheFlush(Device::Impl* dev)
+{
+    std::map<std::pair<size_t, int>, std::vector<void*> > taken;
+    {
+        std::lock_guard<std::mutex> lock(dev->cacheMutex);
+        taken.swap(dev->cache);
+        dev->cachedBytes = 0;
+    }
+    for (auto it = taken.begin(); it != taken.end(); ++it)
+    {
+        const size_t size = it->first.first;
+        const int kind = it->first.second;
+        for (size_t i = 0; i < it->second.size(); i++)
+        {
+            if (kind == CACHE_HOST)
+                dev->backend->deallocateHost(dev->index, it->second[i]);
+            else
+                dev->backend->deallocate(dev->index, it->second[i], (MemoryKind)kind);
+            if (kind == CACHE_HOST || isSharedKind(kind))
+                dev->pinnedBytes -= size;
+        }
+    }
+}
+
+void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind);
+
+// a device buffer moves to shared memory on its first CPU access when it is small enough
+// (OPENCV_ACCEL_ZERO_COPY_MAX_BYTES) and nothing else holds or is using its address
+bool canPromote(Device::Impl* dev, const UMatData* u, const BufferState* st)
+{
+    const size_t limit = zeroCopyMaxBytes();
+    if (!limit || u->size == 0 || u->size > limit)
+        return false;
+    if (isSharedKind(st->kind) || !dev->canShare())
+        return false;
+    // the caller asked for this kind, or the pinned budget could not afford another one
+    if (st->kindRequested)
+        return false;
+    if (st->imported || st->externallyReferenced || st->mapped || !st->aliases.empty() ||
+        st->inflight > 0)
+        return false;
+    // the newest bytes are in the host copy, which this would not carry over
+    if (u->deviceCopyObsolete())
+        return false;
+    // shared memory is what the budget counts, so promotion has to respect it as well
+    const size_t pinLimit = pinnedLimit();
+    if (pinLimit && dev->pinnedBytes.load() + u->size > pinLimit)
+    {
+        CV_LOG_DEBUG(NULL, "accel: " << dev->name << " is at its pinned budget; "
+                     << u->size << " bytes stay in device memory");
+        return false;
+    }
+    return true;
+}
+
+bool promoteToShared(Device::Impl* dev, UMatData* u, BufferState* st)
+{
+    if (!canPromote(dev, u, st))
+        return false;
+
+    const MemoryKind to = mostSharedKind(dev->kinds);
+    void* p = allocateDevice(dev, u->size, to);
+    if (!p)
+        return false;       // no shared memory to be had: the copy path still works
+
+    Backend& b = *dev->backend;
+    if (st->initialized)
+    {
+        // on the device, so it costs no host bandwidth; the CPU reads it right after
+        const Ptr<Stream>& s = currentStream(dev);
+        try
+        {
+            b.copy(dev->index, COPY_DEVICE_TO_DEVICE, DeviceRef(p), u->size,
+                   DeviceRef(u->handle), u->size, u->size, 1, *s, true);
+            s->record()->wait();
+        }
+        catch (const cv::Exception& e)
+        {
+            CV_LOG_WARNING(NULL, "accel: promoting a buffer to shared memory failed: " << e.what());
+            b.deallocate(dev->index, p, to);
+            dev->pinnedBytes -= u->size;
+            return false;
+        }
+        countCopy(COPY_DEVICE_TO_DEVICE, u->size);
+    }
+
+    // all work on it has finished, so it can go straight to the next buffer of its size
+    if (!cachePut(dev, u->handle, u->size, st->kind))
+        b.deallocate(dev->index, u->handle, st->kind);
+    if (u->data && !cachePut(dev, u->data, u->size, CACHE_HOST))
+    {
+        b.deallocateHost(dev->index, u->data);          // the host copy is not needed any more
+        dev->pinnedBytes -= u->size;
+    }
+    u->handle = p;
+    st->kind = to;
+    u->data = u->origdata = (uchar*)b.hostAddress(dev->index, p, to);
+    u->flags &= ~UMatData::COPY_ON_MAP;
+    u->markHostCopyObsolete(false);
+    u->markDeviceCopyObsolete(false);
+    CV_LOG_DEBUG(NULL, "accel: " << dev->name << " promoted " << u->size << " bytes to "
+                 << kindName(to) << " on first CPU access");
+    return true;
+}
+
+void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
+{
+    // memory of this size and kind released earlier is already of the right kind and already
+    // counted, so it is handed straight back
+    if (void* cached = cacheTake(dev, size, kind))
+        return cached;
+
+    collectRetired(false);
+    void* p = dev->backend->allocate(dev->index, size, kind);
+    if (!p)
+    {
+        // out of memory: give back what the cache is sitting on, and what device work had
+        // finished with, then ask once more
+        cacheFlush(dev);
+        if (g_retiredCount.load() > 0)
+            collectRetired(true);
+        p = dev->backend->allocate(dev->index, size, kind);
+    }
+    // managed memory is not pinned up front, but counting it errs on the safe side
+    if (p && isSharedKind(kind))
+        dev->pinnedBytes += size;
+>>>>>>> pr30398
     return p;
 }
 
@@ -185,6 +510,18 @@ private:
 };
 
 } // namespace
+
+void reloadSettings()
+{
+    settings().read();
+}
+
+MemoryKind newBufferKind(Device::Impl* dev)
+{
+    // what chooseKind() picks before it knows size and usage; dispatch.cpp predicts outputs with it
+    const int forced = forcedKind();
+    return (forced && (dev->kinds & forced)) ? (MemoryKind)forced : dev->defaultKind;
+}
 
 void collectRetired(bool wait)
 {
@@ -296,6 +633,7 @@ void prepareHandle(UMatData* u, AccessFlag accessFlags)
         return;
     UMatDataAutoLock lock(u);
     waitOnCpu(st, !!(accessFlags & ACCESS_WRITE));
+    st->externallyReferenced = true;    // the caller keeps the device pointer; the memory stays put
 }
 
 UMatData* aliasOn(UMatData* u, Device::Impl* dev)
@@ -313,7 +651,7 @@ UMatData* aliasOn(UMatData* u, Device::Impl* dev)
             return 0;
 
     UMatData* a = 0;
-    const int fd = st->dev->backend->exportDmaBuf(st->dev->index, u->handle, u->size);
+    const int fd = st->dev->backend->exportDmaBuf(st->dev->index, u->handle, u->size, st->kind);
     if (fd >= 0)
     {
         try
@@ -339,7 +677,7 @@ UMatData* aliasOn(UMatData* u, Device::Impl* dev)
 }
 
 UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* data0, size_t* step,
-                                    AccessFlag /*flags*/, UMatUsageFlags /*usageFlags*/) const
+                                    AccessFlag /*flags*/, UMatUsageFlags usageFlags) const
 {
     if (data0)
         CV_Error(Error::StsNotImplemented, "accel: device memory cannot wrap user host memory");
@@ -355,20 +693,45 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
     UMatData* u = new UMatData(this);
     u->size = total;
     BufferState* st = new BufferState(dev_);
+    st->kind = chooseKind(dev_, total, usageFlags, st->kindRequested);
     u->allocatorContext = std::shared_ptr<void>(st, [](void* p) { delete static_cast<BufferState*>(p); });
     if (total > 0)
     {
-        u->handle = allocateDevice(dev_, total);
+        try
+        {
+            u->handle = allocateDevice(dev_, total, st->kind);
+            // an integrated GPU's device memory is a small carve-out: when it is full, a buffer
+            // that did not ask for device memory takes shared memory instead of failing
+            if (!u->handle && st->kind == MEMORY_DEVICE && !st->kindRequested && dev_->canShare())
+            {
+                const MemoryKind fallback = isSharedKind(dev_->defaultKind) ? dev_->defaultKind
+                                                                            : mostSharedKind(dev_->kinds);
+                u->handle = allocateDevice(dev_, total, fallback);
+                if (u->handle)
+                {
+                    CV_LOG_DEBUG(NULL, "accel: " << dev_->name << " has no device memory for "
+                                 << total << " bytes; using " << kindName(fallback) << " instead");
+                    st->kind = fallback;
+                }
+            }
+        }
+        catch (...)
+        {
+            delete u;
+            throw;
+        }
         if (!u->handle)
         {
             delete u;
-            CV_Error_(Error::StsNoMem, ("accel: %s is out of memory (%llu bytes requested)",
-                                        dev_->name.c_str(), (unsigned long long)total));
+            CV_Error_(Error::StsNoMem, ("accel: %s is out of memory (%llu bytes of %s requested)",
+                                        dev_->name.c_str(), (unsigned long long)total,
+                                        kindName(st->kind)));
         }
     }
-    if (dev_->shared)
+    if (isSharedKind(st->kind))
     {
-        u->data = u->origdata = total > 0 ? (uchar*)dev_->backend->hostAddress(dev_->index, u->handle) : 0;
+        u->data = u->origdata = total > 0
+            ? (uchar*)dev_->backend->hostAddress(dev_->index, u->handle, st->kind) : 0;
     }
     else
     {
@@ -381,19 +744,24 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
 
 UMatData* DeviceAllocator::importDmaBuf(int fd, size_t size) const
 {
-    void* p = dev_->backend->importDmaBuf(dev_->index, fd, size);
+    // the kind of an import is the exporter's, not this device's default
+    MemoryKind kind = dev_->defaultKind;
+    void* p = dev_->backend->importDmaBuf(dev_->index, fd, size, kind);
     if (!p)
         return 0;
+    CV_Assert((dev_->kinds & (int)kind) != 0 && "accel: an import of a kind the device does not provide");
     UMatData* u = new UMatData(this);
     u->size = size;
     u->handle = p;
     u->flags |= UMatData::USER_ALLOCATED;   // never released and created again elsewhere
     BufferState* st = new BufferState(dev_);
+    st->kind = kind;
     st->imported = true;
     st->initialized = true;
+    st->externallyReferenced = true;    // the exporter still holds these bytes
     u->allocatorContext = std::shared_ptr<void>(st, [](void* q) { delete static_cast<BufferState*>(q); });
-    if (dev_->shared)
-        u->data = u->origdata = (uchar*)dev_->backend->hostAddress(dev_->index, p);
+    if (isSharedKind(kind))
+        u->data = u->origdata = (uchar*)dev_->backend->hostAddress(dev_->index, p, kind);
     else
     {
         u->flags |= UMatData::COPY_ON_MAP;
@@ -417,7 +785,12 @@ void DeviceAllocator::deallocate(UMatData* u) const
     Retired r;
     r.dev = dev_;
     r.devPtr = u->handle;
-    r.hostCopy = (!dev_->shared && u->data) ? (void*)u->data : 0;
+    r.kind = st->kind;
+    // imported memory, or memory whose address went outside OpenCV, must never be reused
+    r.size = (st->imported || st->externallyReferenced) ? 0 : u->size;
+    r.pinnedSize = (!st->imported && isSharedKind(st->kind)) ? u->size : 0;
+    r.hostCopy = (!isSharedKind(st->kind) && u->data) ? (void*)u->data : 0;
+    r.hostCopySize = r.hostCopy ? u->size : 0;
     r.aliases.swap(st->aliases);
     if (st->write && !finished(st->write))
         r.events.push_back(st->write);
@@ -448,32 +821,44 @@ void DeviceAllocator::map(UMatData* u, AccessFlag accessFlags) const
     if (st->mapped && (st->mappedWrite || !write))
         return;     // already mapped as needed (UMat::getMat calls map for every view)
 
-    waitOnCpu(st, write);
+    // promotion frees the old memory, so it waits for the readers as well as the writers
+    const bool promoting = canPromote(dev_, u, st);
+    waitOnCpu(st, write || promoting);
+    if (promoting)
+        promoteToShared(dev_, u, st);
+
     Backend& b = *dev_->backend;
     const int i = dev_->index;
-    if (dev_->shared)
+    if (isSharedKind(st->kind))
     {
         if (u->size > 0)
         {
             if (st->mapped)
-                b.endCpuAccess(i, u->handle, u->size, false);  // a read mapping becomes a write mapping
-            b.beginCpuAccess(i, u->handle, u->size, write);
+                b.endCpuAccess(i, u->handle, u->size, st->kind, false);  // a read mapping becomes a write mapping
+            b.beginCpuAccess(i, u->handle, u->size, st->kind, write);
         }
     }
     else
     {
         if (!u->data && u->size > 0)
         {
-            u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
+            u->data = u->origdata = (uchar*)cacheTake(dev_, u->size, CACHE_HOST);
+            if (!u->data)
+                u->data = u->origdata = (uchar*)b.allocateHost(i, u->size);
+            else
+                dev_->pinnedBytes -= u->size;   // added again below, as for a fresh one
             if (!u->data)
                 CV_Error_(Error::StsNoMem, ("accel: no host memory for a copy of %llu bytes", (unsigned long long)u->size));
+            // counted as pinned: backends pin host copies so copies to and from them are async
+            dev_->pinnedBytes += u->size;
         }
         if (u->hostCopyObsolete() && !st->initialized)
             u->markHostCopyObsolete(false);     // fresh memory: its contents are undefined on both sides
         if (u->hostCopyObsolete() && u->size > 0)
         {
             const Ptr<Stream>& s = currentStream(dev_);
-            b.copy(i, COPY_DEVICE_TO_HOST, u->data, u->size, u->handle, u->size, u->size, 1, *s, true);
+            b.copy(i, COPY_DEVICE_TO_HOST, DeviceRef(u->data), u->size,
+                   DeviceRef(u->handle), u->size, u->size, 1, *s, true);
             Ptr<Event> e = s->record();
             waitAndDrop(e);
             countCopy(COPY_DEVICE_TO_HOST, u->size);
@@ -498,10 +883,10 @@ void DeviceAllocator::unmap(UMatData* u) const
         {
             Backend& b = *dev_->backend;
             const int i = dev_->index;
-            if (dev_->shared)
+            if (isSharedKind(st->kind))
             {
                 if (u->size > 0)
-                    b.endCpuAccess(i, u->handle, u->size, st->mappedWrite);
+                    b.endCpuAccess(i, u->handle, u->size, st->kind, st->mappedWrite);
             }
             else if (u->deviceCopyObsolete())
             {
@@ -509,7 +894,8 @@ void DeviceAllocator::unmap(UMatData* u) const
                 // unchanged until it completes (CPU writes wait for it in map())
                 const Ptr<Stream>& s = currentStream(dev_);
                 orderOnStream(st, s, true);
-                b.copy(i, COPY_HOST_TO_DEVICE, u->handle, u->size, u->data, u->size, u->size, 1, *s, true);
+                b.copy(i, COPY_HOST_TO_DEVICE, DeviceRef(u->handle), u->size,
+                       DeviceRef(u->data), u->size, u->size, 1, *s, true);
                 recordUse(st, s, s->record(), true);
                 countCopy(COPY_HOST_TO_DEVICE, u->size);
                 u->markDeviceCopyObsolete(false);
@@ -531,27 +917,28 @@ void DeviceAllocator::download(UMatData* u, void* dst, int dims, const size_t sz
     BufferState* st = state(u);
     Backend& b = *dev_->backend;
     const int i = dev_->index;
-    if (dev_->shared || (!u->hostCopyObsolete() && u->data))
+    if (isSharedKind(st->kind) || (!u->hostCopyObsolete() && u->data))
     {
         // the CPU reaches the bytes: the shared memory itself, or a host copy that is current
         waitOnCpu(st, false);
-        const bool bracket = dev_->shared && !st->mapped && u->size > 0;
+        const bool bracket = isSharedKind(st->kind) && !st->mapped && u->size > 0;
         if (bracket)
-            b.beginCpuAccess(i, u->handle, u->size, false);
+            b.beginCpuAccess(i, u->handle, u->size, st->kind, false);
         forEachPlane(dims, sz, srcofs, srcstep, 0, dststep,
                      [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
             for (size_t r = 0; r < rows; r++)
                 memcpy((uchar*)dst + dof + r * dp, u->data + so + r * sp, w);
         });
         if (bracket)
-            b.endCpuAccess(i, u->handle, u->size, false);
+        b.endCpuAccess(i, u->handle, u->size, st->kind, false);
         return;
     }
     const Ptr<Stream>& s = currentStream(dev_);
     orderOnStream(st, s, false);
     const size_t bytes = forEachPlane(dims, sz, srcofs, srcstep, 0, dststep,
                                       [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
-        b.copy(i, COPY_DEVICE_TO_HOST, (uchar*)dst + dof, dp, (uchar*)u->handle + so, sp, w, rows, *s, false);
+        b.copy(i, COPY_DEVICE_TO_HOST, DeviceRef(dst, dof), dp,
+               DeviceRef(u->handle, so), sp, w, rows, *s, false);
     });
     Ptr<Event> e = s->record();
     waitAndDrop(e);     // downloads are synchronous: the caller reads the data next
@@ -567,21 +954,21 @@ void DeviceAllocator::upload(UMatData* u, const void* src, int dims, const size_
     BufferState* st = state(u);
     Backend& b = *dev_->backend;
     const int i = dev_->index;
-    if (dev_->shared || st->mapped)
+    if (isSharedKind(st->kind) || st->mapped)
     {
         // shared memory, or a copy-only buffer whose Mat views the CPU uses: the CPU writes the
         // bytes it reaches, and unmap() uploads a written host copy
         waitOnCpu(st, true);
-        const bool bracket = dev_->shared && !st->mapped && u->size > 0;
+        const bool bracket = isSharedKind(st->kind) && !st->mapped && u->size > 0;
         if (bracket)
-            b.beginCpuAccess(i, u->handle, u->size, true);
+            b.beginCpuAccess(i, u->handle, u->size, st->kind, true);
         if (st->mapped && !st->mappedWrite)
         {
             // the CPU now writes into a read mapping: make it a write mapping, so unmap() flushes it
-            if (dev_->shared && u->size > 0)
+            if (isSharedKind(st->kind) && u->size > 0)
             {
-                b.endCpuAccess(i, u->handle, u->size, false);
-                b.beginCpuAccess(i, u->handle, u->size, true);
+                b.endCpuAccess(i, u->handle, u->size, st->kind, false);
+                b.beginCpuAccess(i, u->handle, u->size, st->kind, true);
             }
             st->mappedWrite = true;
         }
@@ -591,8 +978,8 @@ void DeviceAllocator::upload(UMatData* u, const void* src, int dims, const size_
                 memcpy(u->data + dof + r * dp, (const uchar*)src + so + r * sp, w);
         });
         if (bracket)
-            b.endCpuAccess(i, u->handle, u->size, true);
-        if (!dev_->shared)
+            b.endCpuAccess(i, u->handle, u->size, st->kind, true);
+        if (!isSharedKind(st->kind))
             u->markDeviceCopyObsolete(true);
         st->initialized = true;
         return;
@@ -602,7 +989,8 @@ void DeviceAllocator::upload(UMatData* u, const void* src, int dims, const size_
     const size_t bytes = forEachPlane(dims, sz, 0, srcstep, dstofs, dststep,
                                       [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
         // the caller's memory: the backend reads it before returning
-        b.copy(i, COPY_HOST_TO_DEVICE, (uchar*)u->handle + dof, dp, (const uchar*)src + so, sp, w, rows, *s, false);
+        b.copy(i, COPY_HOST_TO_DEVICE, DeviceRef(u->handle, dof), dp,
+               DeviceRef(src, so), sp, w, rows, *s, false);
     });
     recordUse(st, s, s->record(), true);
     countCopy(COPY_HOST_TO_DEVICE, bytes);
@@ -629,14 +1017,14 @@ void DeviceAllocator::copy(UMatData* srcdata, UMatData* dstdata, int dims, const
             orderOnStream(ds, s, true);
             const size_t bytes = forEachPlane(dims, sz, srcofs, srcstep, dstofs, dststep,
                                               [&](size_t so, size_t dof, size_t sp, size_t dp, size_t w, size_t rows) {
-                b.copy(i, COPY_DEVICE_TO_DEVICE, (uchar*)dstdata->handle + dof, dp,
-                       (const uchar*)srcdata->handle + so, sp, w, rows, *s, true);
+                b.copy(i, COPY_DEVICE_TO_DEVICE, DeviceRef(dstdata->handle, dof), dp,
+                       DeviceRef(srcdata->handle, so), sp, w, rows, *s, true);
             });
             Ptr<Event> e = s->record();
             recordUse(ss, s, e, false);
             recordUse(ds, s, e, true);
             ds->initialized = true;
-            if (!dev_->shared)
+            if (!isSharedKind(ds->kind))    // the destination buffer's own kind, not the device's
             {
                 dstdata->markHostCopyObsolete(true);
                 dstdata->markDeviceCopyObsolete(false);
@@ -671,14 +1059,21 @@ UMat wrapDmaBuf(const Device& device, int fd, Size size, int type, size_t step, 
     const size_t row = (size_t)size.width * CV_ELEM_SIZE(type);
     if (step == Mat::AUTO_STEP)
         step = row;
-    CV_Assert(step >= row && step % CV_ELEM_SIZE1(type) == 0);
-    const size_t needed = offset + step * (size_t)(size.height - 1) + row;
-    size_t bufferSize = needed;
+    CV_Assert(step >= row && step % CV_ELEM_SIZE1(type) == 0 && offset % CV_ELEM_SIZE1(type) == 0);
+    // offset + step * (height - 1) + row, refusing a step or offset that would wrap it
+    const size_t rowsBefore = (size_t)(size.height - 1);
+    CV_Assert((rowsBefore == 0 || step <= (SIZE_MAX - row) / rowsBefore) && "accel: the dma-buf step is too large");
+    const size_t span = step * rowsBefore + row;
+    CV_Assert(offset <= SIZE_MAX - span && "accel: the dma-buf offset is too large");
+    const size_t needed = offset + span;
+    size_t bufferSize = 0;
 #ifndef _WIN32
     const off_t end = ::lseek(fd, 0, SEEK_END);   // the size of a dma-buf
     if (end > 0)
         bufferSize = (size_t)end;
 #endif
+    if (bufferSize == 0)
+        CV_Error(Error::StsBadArg, "accel: cannot tell the size of the dma-buf");
     if (needed > bufferSize)
         CV_Error_(Error::StsOutOfRange, ("accel: the image needs %llu bytes, the dma-buf has %llu",
                                          (unsigned long long)needed, (unsigned long long)bufferSize));
@@ -719,12 +1114,13 @@ int exportDmaBuf(const UMat& m)
     if (st->mapped)
         CV_Error(Error::StsError, "accel: release the Mat views of a UMat before exporting it");
     detail::waitOnCpu(st, true);
-    const int fd = st->dev->backend->exportDmaBuf(st->dev->index, u->handle, u->size);
+    const int fd = st->dev->backend->exportDmaBuf(st->dev->index, u->handle, u->size, st->kind);
     if (fd < 0)
         CV_Error_(Error::StsNotImplemented, ("accel: %s cannot export its memory as a dma-buf", st->dev->name.c_str()));
-    if (!st->dev->shared)
+    if (!isSharedKind(st->kind))
         u->markHostCopyObsolete(true);  // someone else may write it from now on
     st->initialized = true;
+    st->externallyReferenced = true;    // the caller owns the fd; we never learn when it is done
     return fd;
 }
 

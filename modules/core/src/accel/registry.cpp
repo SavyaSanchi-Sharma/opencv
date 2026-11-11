@@ -29,15 +29,19 @@ Backend::~Backend() {}
 
 bool CoreOps::flip(const UMat&, UMat&, int, Stream&) { return false; }
 bool CoreOps::transpose(const UMat&, UMat&, Stream&) { return false; }
-bool CoreOps::setTo(UMat&, const Scalar&, Stream&) { return false; }
-bool CoreOps::convertTo(const UMat&, UMat&, double, double, Stream&) { return false; }
 
-void* Backend::hostAddress(int, void* ptr) { return ptr; }
-void Backend::beginCpuAccess(int, void*, size_t, bool) {}
-void Backend::endCpuAccess(int, void*, size_t, bool) {}
-void* Backend::importDmaBuf(int, int, size_t) { return 0; }
-int Backend::exportDmaBuf(int, void*, size_t) { return -1; }
+void* Backend::hostAddress(int, void* ptr, MemoryKind) { return ptr; }
+void Backend::beginCpuAccess(int, void*, size_t, MemoryKind, bool) {}
+void Backend::endCpuAccess(int, void*, size_t, MemoryKind, bool) {}
+void* Backend::importDmaBuf(int, int, size_t, MemoryKind&) { return 0; }
+int Backend::exportDmaBuf(int, void*, size_t, MemoryKind) { return -1; }
 Ops* Backend::ops(const String&) { return 0; }
+
+MemoryKind Backend::defaultMemoryKind(int device) const
+{
+    // shared memory is used where there is some
+    return detail::mostSharedKind(memoryKinds(device));
+}
 
 void* Backend::allocateHost(int, size_t size)
 {
@@ -58,8 +62,11 @@ void Backend::deallocateHost(int, void* ptr)
 
 Device::Impl::Impl(const Ptr<Backend>& b, int i)
     : backend(b), index(i), name(cv::format("%s:%d", b->name().c_str(), i)),
-      shared(b->sharesHostMemory(i)), allocator(0)
+      kinds(b->memoryKinds(i)), defaultKind(b->defaultMemoryKind(i)), pinnedBytes(0), allocator(0),
+      cachedBytes(0)
 {
+    CV_Assert(kinds != 0 && "accel: a device must provide at least one memory kind");
+    CV_Assert((kinds & (int)defaultKind) != 0 && "accel: the default memory kind is not provided");
     allocator = new detail::DeviceAllocator(this);
 }
 
@@ -67,18 +74,22 @@ const Ptr<Stream>& Device::Impl::defaultStream()
 {
     std::lock_guard<std::mutex> lock(streamMutex_);
     if (!stream_)
-    {
-        stream_ = backend->createStream(index);
-        CV_Assert(stream_ && "accel: the backend returned no stream");
-    }
+        stream_ = newStream();
     return stream_;
+}
+
+Ptr<Stream> Device::Impl::newStream()
+{
+    Ptr<Stream> s = backend->createStream(index);
+    CV_Assert(s && "accel: the backend returned no stream");
+    s->owner_ = this;
+    return s;
 }
 
 namespace {
 
-/* Backends and devices registered in this process. Nothing is ever removed, so Device::Impl
-   pointers stay valid; the registry, its devices and their default streams live until the
-   process exits (destroying them at exit would race with the backends' own teardown). */
+// never shrinks, so Device::Impl pointers stay valid; leaked at exit, not to race backend teardown
+>>>>>>> pr30398
 class Registry
 {
 public:
@@ -97,7 +108,7 @@ public:
             {
                 try
                 {
-                    Ptr<Backend> cuda = impl::createCudaBackend();
+                    Ptr<Backend> cuda = cuda_impl::createCudaBackend();
                     if (cuda && cuda->deviceCount() > 0)
                         add(cuda);
                 }
@@ -160,33 +171,27 @@ public:
             CV_LOG_WARNING(NULL, "accel: cannot load the plugin " << path);
             return false;
         }
-        FN_opencv_core_accel_plugin_init_v1 init =
-            reinterpret_cast<FN_opencv_core_accel_plugin_init_v1>(lib->getSymbol(CV_ACCEL_PLUGIN_INIT_NAME));
+        FN_opencv_core_accel_plugin_init_t init =
+            reinterpret_cast<FN_opencv_core_accel_plugin_init_t>(lib->getSymbol(CV_ACCEL_PLUGIN_INIT_NAME));
         if (!init)
         {
             CV_LOG_WARNING(NULL, "accel: " << path << " is not a backend plugin (no " CV_ACCEL_PLUGIN_INIT_NAME ")");
             return false;
         }
-        // Objects of C++ types cross this boundary in both directions, so refuse a plugin built
-        // with a different compiler or standard library instead of failing later.
-        FN_opencv_core_accel_plugin_abi_v1 abi =
-            reinterpret_cast<FN_opencv_core_accel_plugin_abi_v1>(lib->getSymbol(CV_ACCEL_PLUGIN_ABI_NAME));
-        if (!abi)
+        const OpenCV_Core_Accel_Plugin_API* api = 0;
+        for (int v = CV_ACCEL_PLUGIN_API_VERSION; v >= 0 && !api; v--)
+            api = init(CV_ACCEL_PLUGIN_ABI_VERSION, v, NULL);
+        if (!api)
         {
-            CV_LOG_WARNING(NULL, "accel: " << path << " does not report its ABI (no " CV_ACCEL_PLUGIN_ABI_NAME ")");
+            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " implements another version of the backend interface");
             return false;
         }
-        const char* tag = abi();
-        if (!tag || std::string(tag) != CV_ACCEL_PLUGIN_ABI_TAG)
-        {
-            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " was built with a different C++ ABI ("
-                           << (tag ? tag : "none") << ", OpenCV uses " CV_ACCEL_PLUGIN_ABI_TAG ")");
+        if (!compatible(api->api_header, path))
             return false;
-        }
-        Backend* raw = init(CV_VERSION_MAJOR, CV_VERSION_MINOR, CV_VERSION_REVISION);
-        if (!raw)
+        Backend* raw = 0;
+        if (api->createBackend(&raw) != CV_ERROR_OK || !raw)
         {
-            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " was built for another OpenCV version or failed to start");
+            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " failed to start");
             return false;
         }
         Ptr<Backend> backend(raw);
@@ -214,6 +219,24 @@ public:
 private:
     Registry() {}
 
+    // the interface passes C++ objects (UMat, String, Ptr): plugins need this exact OpenCV version
+    static bool compatible(const OpenCV_API_Header& h, const std::string& path)
+    {
+        if (h.valid_size < sizeof(OpenCV_Core_Accel_Plugin_API) || h.min_api_version != CV_ACCEL_PLUGIN_ABI_VERSION)
+        {
+            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " implements another version of the backend interface");
+            return false;
+        }
+        if (h.opencv_version_major != CV_VERSION_MAJOR || h.opencv_version_minor != CV_VERSION_MINOR
+            || h.opencv_version_patch != CV_VERSION_REVISION)
+        {
+            CV_LOG_WARNING(NULL, "accel: the plugin " << path << " was built for OpenCV "
+                           << h.opencv_version_major << "." << h.opencv_version_minor << "."
+                           << h.opencv_version_patch << ", this is " CV_VERSION);
+            return false;
+        }
+        return true;
+    }
     //! OPENCV_ACCEL_PLUGINS, otherwise libopencv_core_accel_*.so in the plugin directories
     static std::vector<std::string> pluginCandidates()
     {
@@ -349,7 +372,8 @@ String Device::backend() const { return impl_ ? impl_->backend->name() : String(
 int Device::index() const { return impl_ ? impl_->index : -1; }
 String Device::name() const { return impl_ ? impl_->name : String("cpu"); }
 String Device::description() const { return impl_ ? impl_->backend->deviceDescription(impl_->index) : String("CPU"); }
-bool Device::sharesHostMemory() const { return impl_ ? impl_->shared : true; }
+int Device::memoryKinds() const { return impl_ ? impl_->kinds : (int)MEMORY_SHARED_COHERENT; }
+MemoryKind Device::defaultMemoryKind() const { return impl_ ? impl_->defaultKind : MEMORY_SHARED_COHERENT; }
 
 MatAllocator* Device::allocator() const
 {
@@ -362,12 +386,16 @@ Device getDevice(const UMat& m)
     return st ? Device(st->dev) : Device();
 }
 
+MemoryKind getMemoryKind(const UMat& m)
+{
+    detail::BufferState* st = detail::stateOf(m.u);
+    return st ? st->kind : MEMORY_SHARED_COHERENT;
+}
+
 Ptr<Stream> createStream(const Device& device)
 {
     CV_Assert(!device.empty() && "accel: streams belong to a device");
-    Ptr<Stream> s = device.impl()->backend->createStream(device.index());
-    CV_Assert(s && "accel: the backend returned no stream");
-    return s;
+    return device.impl()->newStream();
 }
 
 ExecutionScope::ExecutionScope(const Device& device)
@@ -382,6 +410,7 @@ ExecutionScope::ExecutionScope(const Device& device, const Ptr<Stream>& stream)
     : prevActive_(tlsScope.active), prev_(tlsScope.dev), prevStream_(tlsScope.stream), stream_(stream)
 {
     CV_Assert(!device.empty() && stream && "accel: a stream needs its device");
+    CV_Assert(stream->device() == device && "accel: the stream belongs to another device");
     tlsScope.active = true;
     tlsScope.dev = device.impl();
     tlsScope.stream = &stream_;
@@ -457,6 +486,17 @@ void resetTransferStats()
 }
 
 namespace detail {
+
+MemoryKind mostSharedKind(int kinds)
+{
+    if (kinds & MEMORY_SHARED_COHERENT)
+        return MEMORY_SHARED_COHERENT;
+    if (kinds & MEMORY_SHARED_NONCOHERENT)
+        return MEMORY_SHARED_NONCOHERENT;
+    if (kinds & MEMORY_MANAGED)
+        return MEMORY_MANAGED;
+    return MEMORY_DEVICE;
+}
 
 bool isActive()
 {

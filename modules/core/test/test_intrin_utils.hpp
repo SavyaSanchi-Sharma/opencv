@@ -726,6 +726,38 @@ template<typename R> struct TheTest
             EXPECT_EQ(dataA[i] <  dataB[i], resG[i] != 0);
             EXPECT_EQ(dataA[i] <= dataB[i], resH[i] != 0);
         }
+
+        if (std::numeric_limits<LaneType>::has_quiet_NaN || std::is_same<LaneType, hfloat>::value)
+        {
+            const LaneType qnan = (LaneType)std::numeric_limits<float>::quiet_NaN();
+            dataA[0] = qnan;
+            if (VTraits<R>::vlanes() > 1)
+            {
+                dataA[1] = qnan;
+                dataB[1] = qnan;
+            }
+            if (VTraits<R>::vlanes() > 2)
+                dataB[2] = qnan;
+            a = dataA; b = dataB;
+
+            resC = (v_eq(a, b));
+            resD = (v_ne(a, b));
+            resE = (v_gt(a, b));
+            resF = (v_ge(a, b));
+            resG = (v_lt(a, b));
+            resH = (v_le(a, b));
+
+            for (int i = 0; i < VTraits<R>::vlanes(); ++i)
+            {
+                SCOPED_TRACE(cv::format("nan i=%d", i));
+                EXPECT_EQ(dataA[i] == dataB[i], resC.as_int(i) != 0);
+                EXPECT_EQ(dataA[i] != dataB[i], resD.as_int(i) != 0);
+                EXPECT_EQ(dataA[i] >  dataB[i], resE.as_int(i) != 0);
+                EXPECT_EQ(dataA[i] >= dataB[i], resF.as_int(i) != 0);
+                EXPECT_EQ(dataA[i] <  dataB[i], resG.as_int(i) != 0);
+                EXPECT_EQ(dataA[i] <= dataB[i], resH.as_int(i) != 0);
+            }
+        }
         return *this;
     }
 
@@ -1539,11 +1571,22 @@ template<typename R> struct TheTest
             {
                 LaneType x = dataO[i];
                 double xd = (double)x;
+
+                // NOTE: Armv7 scalar cvRound and vector v_round may produce different result on the range edges and clams differently
+                auto check_big_int = [&](int v0, int v) {
+                    constexpr int F2INT_MAX = 2147483520;
+                    if (v0 < F2INT_MAX) {
+                        EXPECT_EQ(v0, v);
+                    } else {
+                        EXPECT_GE(v, F2INT_MAX);
+                    }
+                };
                 SCOPED_TRACE(cv::format("overflow: i=%d, x=%g", i, xd));
-                EXPECT_EQ(saturate_cast<ILaneType>(cvRound(x)), roundO[i]);
-                EXPECT_EQ(saturate_cast<ILaneType>(cvTrunc(x)), truncO[i]);
-                EXPECT_EQ(saturate_cast<ILaneType>(cvFloor(x)), floorO[i]);
-                EXPECT_EQ(saturate_cast<ILaneType>(cvCeil(x)), ceilO[i]);
+                check_big_int(saturate_cast<ILaneType>(cvRound(x)), roundO[i]);
+                check_big_int(saturate_cast<ILaneType>(cvTrunc(x)), truncO[i]);
+                check_big_int(saturate_cast<ILaneType>(cvFloor(x)), floorO[i]);
+                check_big_int(saturate_cast<ILaneType>(cvCeil(x)), ceilO[i]);
+
                 if (sizeof(ILaneType) == 4)
                 {
                     if (xd >= 2147483648.)

@@ -11,6 +11,7 @@
 #include "opencv2/core/utils/accel_dispatch.private.hpp"
 
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -20,7 +21,7 @@ namespace cv { namespace accel {
 namespace detail { class DeviceAllocator; }
 
 #ifdef HAVE_CUDA
-namespace impl {
+namespace cuda_impl {
 //! the built-in CUDA backend (backend_cuda.cpp)
 Ptr<Backend> createCudaBackend();
 }
@@ -33,11 +34,24 @@ struct Device::Impl
     Ptr<Backend> backend;
     int index;
     String name;                        // "cuda:0"
-    bool shared;                        // backend->sharesHostMemory(index)
+    int kinds;                          // backend->memoryKinds(index)
+    MemoryKind defaultKind;             // backend->defaultMemoryKind(index)
+    std::atomic<size_t> pinnedBytes;    // allocated with a shared kind, against the budget
     detail::DeviceAllocator* allocator; // lives as long as the process
+
+    // released memory reused for the next buffer of the same size and kind, since driver allocation
+    // and pinning are slow; bounded by OPENCV_ACCEL_CACHE_MAX_MB, flushed when the device runs out
+    std::mutex cacheMutex;
+    std::map<std::pair<size_t, int>, std::vector<void*> > cache;
+    size_t cachedBytes;                 // under cacheMutex
+
+    //! true when the device has a kind the CPU addresses, whatever a given buffer uses
+    bool canShare() const { return (kinds & ~(int)MEMORY_DEVICE) != 0; }
 
     //! the stream cv:: calls use on this device outside an ExecutionScope with a stream of its own
     const Ptr<Stream>& defaultStream();
+    //! a new stream of this device, which knows it belongs here (Stream::device())
+    Ptr<Stream> newStream();
 
 private:
     std::mutex streamMutex_;
@@ -46,33 +60,26 @@ private:
 
 namespace detail {
 
-/*
-State of one device buffer, kept in UMatData::allocatorContext.
-
-The UMatData flags say which copy is current, as in the T-API: HOST_COPY_OBSOLETE and
-DEVICE_COPY_OBSOLETE for memory the CPU reaches through a copy (COPY_ON_MAP is set). Shared
-memory has one copy only; there the flags are unused.
-
-The events order device work against the CPU and against other streams: CPU reads wait for
-the last write, CPU writes and the release of the memory wait for the reads as well. Streams
-are held, so a stream is never confused with a later one at the same address. All fields are
-protected by the UMatData lock.
-
-Shared memory can be reached by other devices through a dma-buf (setPreferredDevices). Such
-an import is an alias: a UMatData of the other device over the same bytes, owned by this
-buffer and released with it. Device work on an alias is ordered by the events of the buffer it
-imports, so one set of events covers every device touching those bytes.
-*/
+// State of one device buffer (UMatData::allocatorContext), guarded by the UMatData lock. Its events
+// order device work against the CPU and other streams, including work on aliases (dma-buf imports).
 struct BufferState
 {
     explicit BufferState(Device::Impl* d)
-        : dev(d), initialized(false), mapped(false), mappedWrite(false), imported(false), aliasOf(0) {}
+        : dev(d), kind(d->defaultKind), kindRequested(false), initialized(false), mapped(false),
+          mappedWrite(false), imported(false), externallyReferenced(false), inflight(0),
+          aliasOf(0) {}
 
     Device::Impl* dev;
+    MemoryKind kind;        // the kind this buffer's memory was allocated with
+    // the kind was asked for (usage flags, override, pinned budget): the buffer is never promoted
+    bool kindRequested;
     bool initialized;       // something was written into it; until then there is nothing to download
     bool mapped;            // Mat views exist (UMat::getMat)
     bool mappedWrite;       // ... and one of them may write
     bool imported;          // memory of someone else (wrapDmaBuf)
+    // a device pointer or dma-buf of these bytes went outside OpenCV: they never move or get reused
+    bool externallyReferenced;
+    int inflight;           // OpCalls queueing work on it without the lock: it must not move
     Ptr<Event> write;       // the last device work writing the buffer
     Ptr<Stream> writeStream;
     std::vector<std::pair<Ptr<Stream>, Ptr<Event> > > reads;   // last read per stream since that write
@@ -82,13 +89,8 @@ struct BufferState
     std::vector<Device::Impl*> refused; // devices that cannot import them
 };
 
-/*
-MatAllocator of one device. UMat data it creates lives in the device's memory, and the CPU
-reaches it the way the T-API does: map() when the first Mat view is taken, unmap() when the
-last one goes. For copy-only memory map() downloads into a host copy when that is stale and
-unmap() uploads what the CPU wrote; for shared memory both only order the CPU access against
-device work and keep the CPU caches right.
-*/
+// MatAllocator of one device. map()/unmap() keep a host copy of copy-only memory in sync, and order
+// CPU access to shared memory against device work.
 class DeviceAllocator CV_FINAL : public MatAllocator
 {
 public:
@@ -118,6 +120,14 @@ public:
 private:
     Device::Impl* dev_;
 };
+
+//! the most CPU-accessible kind among @p kinds, MEMORY_DEVICE when there is no other
+MemoryKind mostSharedKind(int kinds);
+
+/** @brief The kind a new buffer on @p dev will get, before its size or its UMatUsageFlags are
+known: the debug override when it applies, otherwise the device's default. For predicting what
+a buffer that does not exist yet will cost. */
+MemoryKind newBufferKind(Device::Impl* dev);
 
 //! the state of device memory; NULL for host memory, OpenCL buffers and other UMats
 BufferState* stateOf(const UMatData* u);

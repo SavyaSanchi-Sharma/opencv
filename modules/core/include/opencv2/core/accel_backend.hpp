@@ -8,6 +8,7 @@
 #define OPENCV_CORE_ACCEL_BACKEND_HPP
 
 #include "opencv2/core/accel.hpp"
+#include "opencv2/core/llapi/llapi.h"
 
 /*
 Interface for accelerator backends (CUDA, HIP, NPU runtimes, ...).
@@ -42,6 +43,7 @@ public:
 class CV_EXPORTS Stream
 {
 public:
+    Stream() : owner_(0) {}
     virtual ~Stream();
     //! an event that completes when the work queued so far has finished
     virtual Ptr<Event> record() = 0;
@@ -51,6 +53,13 @@ public:
     virtual bool waitEvent(const Ptr<Event>& event) = 0;
     //! blocks until all queued work has finished; throws the error of failed device work
     virtual void synchronize() = 0;
+
+    //! the device OpenCV created this stream for (createStream); empty for any other stream
+    Device device() const { return Device(owner_); }
+
+private:
+    friend struct Device::Impl;     // sets owner_ on the streams it creates
+    Device::Impl* owner_;
 };
 
 enum CopyKind
@@ -58,6 +67,28 @@ enum CopyKind
     COPY_HOST_TO_DEVICE = 0,
     COPY_DEVICE_TO_HOST = 1,
     COPY_DEVICE_TO_DEVICE = 2   //!< within one device
+};
+
+/** @brief Where bytes are, as the memory they belong to and an offset into it.
+
+A backend's memory is whatever allocate() returned, and what that is only the backend knows:
+CUDA and HIP hand back an address and add @p offset to it, while memory that is an object with
+no address of its own (a Metal or Vulkan buffer) takes the offset as a separate argument.
+Describing a location as a pair rather than as an address is what lets a backend hold
+something other than a pointer in UMatData::handle.
+
+On the host side of a copy @p handle is an ordinary pointer, so @p handle + @p offset is the
+address in every backend. */
+struct DeviceRef
+{
+    DeviceRef() : handle(0), offset(0) {}
+    // explicit: a call site has to say which memory and which offset, so that adding the
+    // offset to an address cannot slip back in where the handle is not one
+    explicit DeviceRef(void* h, size_t o = 0) : handle(h), offset(o) {}
+    explicit DeviceRef(const void* h, size_t o = 0) : handle(const_cast<void*>(h)), offset(o) {}
+
+    void* handle;       //!< memory from allocate(), or host memory on the host side of a copy
+    size_t offset;      //!< bytes from the start of @p handle
 };
 
 //! base of the per-module operation interfaces
@@ -117,6 +148,31 @@ public:
     virtual void beginCpuAccess(int device, void* ptr, size_t size, bool write);
     //! called when the CPU is done: makes its writes visible to the device (cache clean). Does nothing by default.
     virtual void endCpuAccess(int device, void* ptr, size_t size, bool written);
+    /** @brief The MemoryKind values this device can provide, as a bitmask. At least one bit
+    must be set. A device whose memory the CPU cannot address offers MEMORY_DEVICE alone. */
+    virtual int memoryKinds(int device) const = 0;
+    /** @brief The kind of a new buffer when nothing asks for another one.
+
+    By default the most CPU-accessible kind the device offers, so a device with shared memory
+    uses it and the CPU reaches its buffers without copies. Override to choose another one. */
+    virtual MemoryKind defaultMemoryKind(int device) const;
+
+    /** @brief @p size bytes of memory of @p kind, one of memoryKinds(), or NULL when the
+    device is out of memory. */
+    virtual void* allocate(int device, size_t size, MemoryKind kind) = 0;
+    /** @brief Frees memory from allocate(), of the @p kind it was allocated with. OpenCV calls
+    it only after all work using the memory has finished. */
+    virtual void deallocate(int device, void* ptr, MemoryKind kind) = 0;
+
+    //! the CPU address of memory of a shared @p kind; returns @p ptr by default
+    virtual void* hostAddress(int device, void* ptr, MemoryKind kind);
+    /** @brief Called before the CPU accesses memory of a shared @p kind, after the device work
+    on it has finished: makes the device's writes visible to the CPU (cache invalidation on
+    MEMORY_SHARED_NONCOHERENT). Does nothing by default, as coherent memory needs nothing. */
+    virtual void beginCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool write);
+    //! called when the CPU is done: makes its writes visible to the device (cache clean). Does nothing by default.
+    virtual void endCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool written);
+>>>>>>> pr30398
 
     /** @brief Host memory for the CPU's copy of device memory, preferably pinned so copies to
     and from it run asynchronously. fastMalloc by default. NULL when out of memory. */
@@ -153,6 +209,16 @@ process. */
 CV_EXPORTS void registerBackend(const Ptr<Backend>& backend);
 
 //! the device address of @p m's first element, for operations
+//! where @p m's first element is, for operations
+static inline DeviceRef deviceRef(const UMat& m)
+{
+    return m.u ? DeviceRef(m.u->handle, m.offset) : DeviceRef();
+}
+
+/** @brief The device address of @p m's first element.
+
+Only for a backend whose allocate() returns an address, which CUDA and HIP do. Anything that
+has to work on every backend uses deviceRef() instead. */
 static inline void* devicePtr(const UMat& m)
 {
     return m.u ? (void*)((uchar*)m.u->handle + m.offset) : 0;
@@ -220,6 +286,7 @@ typedef const char* (*FN_opencv_core_accel_plugin_abi_v1)();
 CV_ACCEL_DEFINE_PLUGIN(new MyBackend())
 @endcode */
 #define CV_ACCEL_DEFINE_PLUGIN(expr) \
+<<<<<<< HEAD
     extern "C" CV_ACCEL_PLUGIN_EXPORTS const char* opencv_core_accel_plugin_abi_v1() \
     { \
         return CV_ACCEL_PLUGIN_ABI_TAG; \

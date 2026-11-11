@@ -178,6 +178,10 @@ if(HAVE_CUDA)
   endif()
 endif()
 
+if(CV_CLANG_CL AND AARCH64)
+  set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/persistence.cpp" PROPERTIES COMPILE_OPTIONS "/O1")
+endif()
+
 ocv_create_module(${extra_libs})
 
 

@@ -6,12 +6,8 @@
 
 // Non-CPU HAL: running a cv:: call on a device (OpCall).
 //
-// Where a call runs is decided by fixed rules, never by how many bytes would move:
-// the device of this thread's ExecutionScope, otherwise the device that holds the first UMat
-// input. Inputs elsewhere are copied to that device; outputs are created on it, or, when they
-// cannot move (a Mat, a region of a larger UMat, memory with its own allocator), get the result
-// copied in. Memory shared with the CPU may be computed on by other devices: the preferred
-// devices are offered the call first, in their order, through imports of the same bytes.
+// A call runs on the thread's ExecutionScope device, else on the device of its first UMat input;
+// preferred devices go first for shared memory. Outputs that cannot move get the result copied in.
 
 #include "../precomp.hpp"
 #include "../umatrix.hpp"
@@ -49,7 +45,7 @@ bool copyOnlyMemory(const UMat& m)
         return false;
     BufferState* st = stateOf(m.u);
     if (st)
-        return !st->dev->shared;
+        return !isSharedKind(st->kind);     // this buffer's kind, whatever else the device offers
     return m.u->currAllocator != Mat::getDefaultAllocator();
 }
 
@@ -103,6 +99,23 @@ bool aliasArgs(const std::vector<UMat>& umats, Device::Impl* dev, std::vector<UM
     return true;
 }
 
+//! marks buffers as used by a call between orderOnStream() and recordUse(), when no lock is held
+class InflightGuard
+{
+public:
+    void add(UMatData* od) { data_.push_back(od); stateOf(od)->inflight++; }   // under od's lock
+    ~InflightGuard()
+    {
+        for (size_t i = 0; i < data_.size(); i++)
+        {
+            UMatDataAutoLock lock(data_[i]);
+            stateOf(data_[i])->inflight--;
+        }
+    }
+private:
+    std::vector<UMatData*> data_;
+};
+
 } // namespace
 
 bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vector<UMat>&, Stream&)>& fn)
@@ -115,9 +128,9 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         for (size_t i = 0; i < args_.size() && !dev; i++)
         {
             const Arg& a = args_[i];
-            if (!a.isOutput && a.in.isUMat())
+            if (!a.isOutput && a.in->isUMat())
             {
-                BufferState* st = stateOf(umatOf(a.in).u);
+                BufferState* st = stateOf(umatOf(*a.in).u);
                 if (st)
                     dev = st->dev;
             }
@@ -131,59 +144,61 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
     std::vector<int> plan(n, PLAN_USE);
     bool mapped = false;            // a device argument has a Mat view: the CPU has to run the call
     bool copies = false;            // running on the device copies between host and device memory
-    bool fallbackCopies = !dev->shared;   // the CPU would copy: outputs are created on the device
+    // the CPU would copy: outputs are created on the device, with the kind new buffers get there
+    bool fallbackCopies = !isSharedKind(newBufferKind(dev));
     for (size_t i = 0; i < n; i++)
     {
         const Arg& a = args_[i];
-        const int kind = a.in.kind();
+        const int kind = a.in->kind();
         if (kind != _InputArray::MAT && kind != _InputArray::UMAT)
             return false;
-        if (kind == _InputArray::UMAT && copyOnlyMemory(umatOf(a.in)))
+        if (kind == _InputArray::UMAT && copyOnlyMemory(umatOf(*a.in)))
             fallbackCopies = true;
         if (!a.isOutput)
         {
-            if (a.in.empty())
+            if (a.in->empty())
                 return false;
             if (kind == _InputArray::UMAT)
             {
-                const UMat& m = umatOf(a.in);
+                const UMat& m = umatOf(*a.in);
                 if (onDevice(m, dev))
                 {
                     mapped = mapped || m.u->refcount > 0;
                     continue;
                 }
-                copies = copies || !dev->shared || copyOnlyMemory(m);
+                // m is copied into a new buffer on dev: the kind that buffer will get
+                copies = copies || !isSharedKind(newBufferKind(dev)) || copyOnlyMemory(m);
             }
             else
-                copies = copies || !dev->shared;
+                copies = copies || !isSharedKind(newBufferKind(dev));
             plan[i] = PLAN_UPLOAD;
             continue;
         }
         if (kind == _InputArray::UMAT)
         {
-            UMat& m = a.out.getUMatRef();
+            UMat& m = a.out->getUMatRef();
             bool aliases = false;
             for (size_t j = 0; j < n; j++)
-                if (!args_[j].isOutput && args_[j].in.isUMat() && m.u && umatOf(args_[j].in).u == m.u)
+                if (!args_[j].isOutput && args_[j].in->isUMat() && m.u && umatOf(*args_[j].in).u == m.u)
                     aliases = true;
             if (!aliases && onDevice(m, dev) && m.type() == a.type && m.shape() == a.shape)
             {
                 mapped = mapped || m.u->refcount > 0;
                 continue;
             }
-            if (!aliases && movable(m, a.out))
+            if (!aliases && movable(m, *a.out))
             {
                 plan[i] = PLAN_CREATE;
                 continue;
             }
             plan[i] = PLAN_TEMP;
             if (!onDevice(m, dev))
-                copies = copies || !dev->shared || copyOnlyMemory(m);
+                copies = copies || !isSharedKind(newBufferKind(dev)) || copyOnlyMemory(m);
         }
         else
         {
             plan[i] = PLAN_TEMP;
-            copies = copies || !dev->shared;
+            copies = copies || !isSharedKind(newBufferKind(dev));
         }
     }
 
@@ -196,7 +211,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         {
             if (plan[i] == PLAN_CREATE)
             {
-                UMat& m = args_[i].out.getUMatRef();
+                UMat& m = args_[i].out->getUMatRef();
                 if (!onDevice(m, dev))
                 {
                     m.release();
@@ -214,10 +229,22 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         CV_Error_(Error::StsError, ("accel: %s on %s would copy data between host and device memory "
                                     "(TRANSFER_FORBID)", name_, dev->name.c_str()));
 
+    // other devices reach arguments through dma-bufs, which only shared memory can export
+    bool shareable = isSharedKind(newBufferKind(dev));
+    for (size_t i = 0; i < n && shareable; i++)
+    {
+        if (plan[i] != PLAN_USE)
+            continue;   // created or uploaded below, so it gets dev's default kind
+        const UMat& m = args_[i].isOutput ? args_[i].out->getUMatRef() : umatOf(*args_[i].in);
+        BufferState* st = m.u ? stateOf(m.u) : 0;
+        if (st && !isSharedKind(st->kind))
+            shareable = false;
+    }
+
     // the devices that may run it: for memory shared with the CPU, the preferred devices first
     // (they reach it through an alias, the data stays where it is), then the device holding it
     std::vector<Device::Impl*> candidates;
-    if (!scoped && dev->shared)
+    if (!scoped && shareable)
         candidates = preferredDevices();
     if (std::find(candidates.begin(), candidates.end(), dev) == candidates.end())
         candidates.push_back(dev);
@@ -235,16 +262,16 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         switch (plan[i])
         {
         case PLAN_USE:
-            umats[i] = a.isOutput ? a.out.getUMatRef() : umatOf(a.in);
+            umats[i] = a.isOutput ? a.out->getUMatRef() : umatOf(*a.in);
             break;
         case PLAN_UPLOAD:
             if (!createOn(umats[i], dev, a.shape, a.type))
                 return fallback();
-            a.in.copyTo(umats[i]);
+            a.in->copyTo(umats[i]);
             break;
         case PLAN_CREATE:
         {
-            UMat& m = a.out.getUMatRef();
+            UMat& m = a.out->getUMatRef();
             m.release();
             if (!createOn(m, dev, a.shape, a.type))
                 return fallback();
@@ -272,11 +299,13 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
             continue;
 
         const Ptr<Stream>& s = currentStream(cand);
+        InflightGuard inflight;     // released after recordUse below, on every exit
         for (size_t i = 0; i < n; i++)
         {
             UMatData* od = owningData(args[i].u);
             UMatDataAutoLock lock(od);
             orderOnStream(stateOf(od), s, args_[i].isOutput);
+            inflight.add(od);
         }
         bool done = false;
         try
@@ -315,7 +344,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
             if (args_[i].isOutput)
             {
                 st->initialized = true;
-                if (!st->dev->shared)
+                if (!isSharedKind(st->kind))
                 {
                     od->markHostCopyObsolete(true);
                     od->markDeviceCopyObsolete(false);
@@ -327,7 +356,7 @@ bool OpCall::runImpl(const char* module, const std::function<bool(Ops*, std::vec
         // 5. results whose destination is elsewhere
         for (size_t i = 0; i < n; i++)
             if (plan[i] == PLAN_TEMP)
-                umats[i].copyTo(args_[i].out);
+                umats[i].copyTo(*args_[i].out);
         return true;
     }
     return fallback();
@@ -341,7 +370,8 @@ OpCall& OpCall::input(InputArray arr)
 {
     Arg a;
     a.isOutput = false;
-    a.in = arr;
+    a.in = &arr;
+    a.out = 0;
     a.type = arr.empty() ? -1 : arr.type();
     if (!arr.empty())
         a.shape = arr.shape();
@@ -353,8 +383,8 @@ OpCall& OpCall::output(OutputArray arr, const MatShape& shape, int type)
 {
     Arg a;
     a.isOutput = true;
-    a.in = arr;
-    a.out = arr;
+    a.in = &arr;
+    a.out = &arr;
     a.shape = shape;
     a.type = type;
     args_.push_back(a);

@@ -2367,6 +2367,12 @@ TEST_P(Core_CheckRange_Float, accuracy)
     case CV_32F:
         src.ptr<float>(1)[bad_scalar] = inf;
         break;
+    case CV_8F_E4M3FN: // fp8 has no infinity, NaN is out of range as well
+        src.ptr<cv::fp8_t>(1)[bad_scalar] = cv::fp8_t(std::numeric_limits<float>::quiet_NaN());
+        break;
+    case CV_8F_E4M3FNUZ:
+        src.ptr<cv::fp8a_t>(1)[bad_scalar] = cv::fp8a_t(std::numeric_limits<float>::quiet_NaN());
+        break;
     default:
         FAIL() << "Unexpected depth: " << depth;
     }
@@ -2377,7 +2383,28 @@ TEST_P(Core_CheckRange_Float, accuracy)
 }
 
 INSTANTIATE_TEST_CASE_P(/*nothing*/, Core_CheckRange_Float,
-    testing::Values(CV_16F, CV_16BF, CV_32F));
+    testing::Values(CV_16F, CV_16BF, CV_32F, CV_8F_E4M3FN, CV_8F_E4M3FNUZ));
+
+// every fp8 value against the definition: in range iff minVal <= v < maxVal (NaN never is)
+typedef testing::TestWithParam<int> Core_CheckRange_FP8;
+
+TEST_P(Core_CheckRange_FP8, all_values)
+{
+    const int depth = GetParam();
+    const double ranges[][2] = { { -DBL_MAX, DBL_MAX }, { -1, 1 }, { 0, 0.3 }, { -0.3, 0 }, { 2, 2 } };
+    Mat src(1, 1, depth), f;
+    for (int b = 0; b < 256; b++)
+    {
+        src.ptr<uchar>()[0] = (uchar)b;
+        src.convertTo(f, CV_32F);
+        const float v = f.at<float>(0);
+        for (const auto& r : ranges)
+            EXPECT_EQ(v >= r[0] && v < r[1], checkRange(src, true, NULL, r[0], r[1]))
+                << "byte " << b << ", range [" << r[0] << ", " << r[1] << ")";
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(/*nothing*/, Core_CheckRange_FP8, testing::Values(CV_8F_E4M3FN, CV_8F_E4M3FNUZ));
 
 typedef testing::TestWithParam<int> Core_CheckRange_ExtendedInteger;
 
@@ -2944,6 +2971,51 @@ TEST(Core_QR_Solver, accuracy64f)
       A.at<double>(0, i) = A.at<double>(1, i);
     ASSERT_FALSE(solve(A, B, solutionQR, DECOMP_QR));
 }
+
+// Non-symmetric and above the HAL thresholds (LU 100, QR 30), unlike every other solve test.
+typedef testing::TestWithParam<std::tuple<cvtest::MatDepth, int> > Core_Solve_Large;
+
+TEST_P(Core_Solve_Large, nonsymmetric)
+{
+    const int depth = std::get<0>(GetParam());
+    const int method = std::get<1>(GetParam());
+    const double eps = depth == CV_32F ? 1e-4 : 1e-10;
+    const int n = 120;
+
+    RNG& rng = theRNG();
+    Mat a(n, n, depth), x0(n, 1, depth);
+    rng.fill(a, RNG::UNIFORM, -1, 1);
+    rng.fill(x0, RNG::UNIFORM, -1, 1);
+    a += Mat::eye(n, n, depth)*n;
+
+    Mat b = a*x0, x;
+    ASSERT_TRUE(solve(a, b, x, method));
+    EXPECT_LE(cvtest::norm(a*x, b, NORM_INF | NORM_RELATIVE), eps);
+}
+
+INSTANTIATE_TEST_CASE_P(/*nothing*/, Core_Solve_Large,
+                        testing::Combine(testing::Values(CV_32F, CV_64F),
+                                         testing::Values(DECOMP_LU, DECOMP_QR)));
+
+typedef testing::TestWithParam<cvtest::MatDepth> Core_Invert_Large;
+
+TEST_P(Core_Invert_Large, nonsymmetric)
+{
+    const int depth = GetParam();
+    const double eps = depth == CV_32F ? 1e-4 : 1e-10;
+    const int n = 120;
+
+    RNG& rng = theRNG();
+    Mat a(n, n, depth);
+    rng.fill(a, RNG::UNIFORM, -1, 1);
+    a += Mat::eye(n, n, depth)*n;
+
+    Mat inv;
+    ASSERT_NE(0.0, invert(a, inv, DECOMP_LU));
+    EXPECT_LE(cvtest::norm(a*inv, Mat::eye(n, n, depth), NORM_INF | NORM_RELATIVE), eps);
+}
+
+INSTANTIATE_TEST_CASE_P(/*nothing*/, Core_Invert_Large, testing::Values(CV_32F, CV_64F));
 
 TEST(Core_Solve, regression_11888)
 {

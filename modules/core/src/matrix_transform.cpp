@@ -1037,7 +1037,7 @@ static bool accel_flip(InputArray _src, OutputArray _dst, int flipMode)
 {
     if (_src.empty())
         return false;
-    const Size sz = _src.size();    // what the CPU and OpenCL paths create: always 2-D
+    const Size sz = _src.size();
     accel::detail::OpCall call("flip");
     call.input(_src).output(_dst, MatShape({sz.height, sz.width}), _src.type());
     return call.run<accel::CoreOps>([flipMode](accel::CoreOps& ops, std::vector<UMat>& a, accel::Stream& s) {

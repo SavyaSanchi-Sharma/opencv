@@ -1127,6 +1127,40 @@ TEST(Imgproc_Remap, issue_23562)
     }
 }
 
+typedef testing::TestWithParam<tuple<int, int> > Imgproc_RemapManyChannels;
+
+TEST_P(Imgproc_RemapManyChannels, linear)
+{
+    RNG& rng = theRNG();
+    const int channels = get<0>(GetParam());
+    const int border = get<1>(GetParam());
+    Mat storage(29, 41, CV_MAKETYPE(CV_32F, channels));
+    rng.fill(storage, RNG::UNIFORM, -1.f, 1.f);
+    Mat src = storage(Rect(2, 3, 35, 23));
+    Mat mapx(19, 37, CV_32F), mapy(mapx.size(), CV_32F), fixed, fractions;
+    rng.fill(mapx, RNG::UNIFORM, -2.f, 37.f);
+    rng.fill(mapy, RNG::UNIFORM, -2.f, 25.f);
+    convertMaps(mapx, mapy, fixed, fractions, CV_16SC2);
+    Mat outputStorage(23, 43, src.type());
+    outputStorage.reshape(1).setTo(0.17);
+    Mat actual = outputStorage(Rect(3, 2, mapx.cols, mapx.rows));
+    const Scalar fill(0.13, 0.29, -0.41, 0.53);
+    remap(src, actual, fixed, fractions, INTER_LINEAR, border, fill);
+    for (int channel = 0; channel < channels; ++channel)
+    {
+        Mat plane, expected(mapx.size(), CV_32F, Scalar(0.17)), result;
+        extractChannel(src, plane, channel);
+        remap(plane, expected, fixed, fractions, INTER_LINEAR, border, Scalar(fill[channel & 3]));
+        extractChannel(actual, result, channel);
+        EXPECT_LE(cvtest::norm(expected, result, NORM_INF), 2e-6) << "channel=" << channel;
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapManyChannels, testing::Combine(
+    testing::Values(5, 7, 9, 20, 31, 33, CV_CN_MAX),
+    testing::Values((int)BORDER_CONSTANT, (int)BORDER_REPLICATE, (int)BORDER_REFLECT,
+                    (int)BORDER_REFLECT_101, (int)BORDER_WRAP, (int)BORDER_TRANSPARENT)));
+
 TEST(Imgproc_Remap, lanczos4_unsupported_depth)
 {
     Mat_<float> mapx({2, 2}, {0, 1, 0, 1});
@@ -1385,6 +1419,46 @@ TEST(Imgproc_ConvertMaps, regression_22763)
     EXPECT_EQ(src1.size(), dst2.size());
     EXPECT_EQ(CV_16UC1, dst2.type());
 }
+
+// https://github.com/opencv/opencv/issues/30301
+typedef testing::TestWithParam<testing::tuple<int, int> > Imgproc_GetRectSubPix_Border;
+
+TEST_P(Imgproc_GetRectSubPix_Border, regression_30301)
+{
+    const int depth = get<0>(GetParam()), ddepth = get<1>(GetParam());
+
+    // The images are ROIs of a buffer filled with 250, so reads outside of them show up in the result
+    const Rect rampRoi(8, 8, 4, 4), columnRoi(2, 2, 1, 4);
+    Mat buf8u(20, 20, CV_8UC1, Scalar(250)), buf;
+    for (int r = 0; r < 4; r++)
+    {
+        for (int c = 0; c < 4; c++)
+            buf8u(rampRoi).at<uchar>(r, c) = (uchar)(r * 40 + c * 8);
+        buf8u(columnRoi).at<uchar>(r, 0) = (uchar)(10 + r * 10);
+    }
+    buf8u.convertTo(buf, depth);
+
+    const struct { Rect roi; Size size; Point2f center; std::vector<float> expected; } cases[] = {
+        // the window crosses the top and the right edges
+        { rampRoi, Size(3, 3), Point2f(3.f, 0.f), { 16, 24, 24, 16, 24, 24, 56, 64, 64 } },
+        { columnRoi, Size(3, 3), Point2f(0.f, 0.f), { 10, 10, 10, 10, 10, 10, 20, 20, 20 } },
+        // the window is to the left of the image
+        { rampRoi, Size(1, 1), Point2f(-2.75f, 3.f), { 120 } },
+    };
+    for (const auto& tc : cases)
+    {
+        SCOPED_TRACE(cv::format("image=%dx%d center=(%g, %g)", tc.roi.width, tc.roi.height, tc.center.x, tc.center.y));
+        Mat patch, patch32f;
+        getRectSubPix(buf(tc.roi), tc.size, tc.center, patch, ddepth);
+        patch.convertTo(patch32f, CV_32F);
+        Mat expected = Mat(tc.expected).reshape(1, tc.size.height);
+        EXPECT_LE(cvtest::norm(patch32f, expected, NORM_INF), 1e-3) << patch32f;
+    }
+}
+
+INSTANTIATE_TEST_CASE_P(/**/, Imgproc_GetRectSubPix_Border, testing::Values(
+    testing::make_tuple(CV_8U, CV_8U), testing::make_tuple(CV_8U, CV_32F), testing::make_tuple(CV_32F, CV_32F)));
+
 
 }} // namespace
 /* End of file. */

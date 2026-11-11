@@ -46,7 +46,7 @@
 #include <vector>
 #include <opencv2/core.hpp>
 #include "opencv2/core/async.hpp"
-
+#include <opencv2/imgproc.hpp>
 #include "../dnn/version.hpp"
 
 #include <opencv2/dnn/dict.hpp>
@@ -713,6 +713,10 @@ CV__DNN_INLINE_NS_BEGIN
         CV_WRAP void setInputsNames(const std::vector<String> &inputBlobNames);
 
         /** @brief Specify shape of network input.
+         *
+         * Must be called before the first forward(). With the new engine, shape computations that depend
+         * on a pinned input are folded into constants; on the CUDA backend a model left with no dynamic
+         * shapes then runs each forward() as one replayed CUDA Graph instead of one launch per layer.
          */
         CV_WRAP void setInputShape(const String &inputName, const MatShape& shape);
 
@@ -720,6 +724,13 @@ CV__DNN_INLINE_NS_BEGIN
          *  @param outputName name for layer which output is needed to get
          *  @return blob for first output of specified layer.
          *  @details By default runs forward pass for the whole network.
+         *  @note In Python, CV_16BF / CV_8F_E4M3FN / CV_8F_E4M3FNUZ output blobs are
+         *  returned as NumPy float32 arrays by default. To preserve their exact dtypes,
+         *  import the optional ml_dtypes package and call
+         *  `cv.setUseExactNumpyDtypes(True)` before forward(). This process-wide
+         *  setting affects outputs only; registered bfloat16 / float8 input arrays are
+         *  accepted regardless of it. It belongs to the application: libraries should not
+         *  change it. See @ref tutorial_py_bindings_basics for details.
          */
         CV_WRAP Mat forward(const String& outputName = String());
 
@@ -736,12 +747,14 @@ CV__DNN_INLINE_NS_BEGIN
          *  @param outputBlobs contains all output blobs for specified layer.
          *  @param outputName name for layer which output is needed to get
          *  @details If @p outputName is empty, runs forward pass for the whole network.
+         *  @note Python output dtype handling is described in forward(const String&).
          */
         CV_WRAP void forward(CV_ND OutputArrayOfArrays outputBlobs, const String& outputName = String());
 
         /** @brief Runs forward pass to compute outputs of layers listed in @p outBlobNames.
          *  @param outputBlobs contains blobs for first outputs of specified layers.
          *  @param outBlobNames names for layers which outputs are needed to get
+         *  @note Python output dtype handling is described in forward(const String&).
          */
         CV_WRAP void forward(CV_ND OutputArrayOfArrays outputBlobs,
                              const std::vector<String>& outBlobNames);
@@ -749,6 +762,7 @@ CV__DNN_INLINE_NS_BEGIN
         /** @brief Runs forward pass to compute outputs of layers listed in @p outBlobNames.
          *  @param outputBlobs contains all output blobs for each layer specified in @p outBlobNames.
          *  @param outBlobNames names for layers which outputs are needed to get
+         *  @note Python output dtype handling is described in forward(const String&).
          */
         CV_WRAP_AS(forwardAndRetrieve) void forward(CV_OUT std::vector<std::vector<Mat> >& outputBlobs,
                                                     const std::vector<String>& outBlobNames);
@@ -1024,6 +1038,12 @@ CV__DNN_INLINE_NS_BEGIN
         */
         CV_WRAP void enableWinograd(bool useWinograd);
 
+        /** @brief Enables or disables TF32 Tensor Core math for FP32 convolutions and GEMMs on DNN_TARGET_CUDA.
+         * TF32 is faster on compute capability 8.0 and newer, but rounds the inputs to a 10-bit mantissa.
+        * @param useTF32 true to allow TF32 math. The default is true; set false for exact FP32 math.
+        */
+        CV_WRAP void enableTF32(bool useTF32);
+
         /** @brief Returns overall time for inference and timings (in ticks) for layers.
          *
          * Indexes in returned vector correspond to layers ids. Some layers can be fused with others,
@@ -1213,6 +1233,26 @@ CV__DNN_INLINE_NS_BEGIN
      */
     CV_EXPORTS_W Net readNetFromONNX(CV_WRAP_FILE_PATH const String &onnxFile, int engine=ENGINE_AUTO);
 
+    /** @brief Reads a network model <a href="https://onnx.ai/">ONNX</a>, optionally
+     *  memory-mapping the weights that are held in external data files.
+     *  @param onnxFile path to the .onnx file with text description of the network architecture.
+     *  @param engine select DNN engine to be used, as in the overload above.
+     *  @param mapExternalData true maps each initializer's byte range into the address space with
+     *  the platform's memory-mapping call rather than reading the bytes into memory:
+     *  CreateFileMapping() with MapViewOfFile() on Windows, mmap() on Linux, Android, macOS, iOS
+     *  and other Unix-like platforms. The pages are faulted in on demand, so the data files must
+     *  stay in place and unmodified for as long as the Net is alive; the overload above reads
+     *  them, so only a caller that passes true here takes on that requirement. A platform that
+     *  supplies no mapping of its own reads the data instead and reports that in the log, as does
+     *  a file the platform refuses to map. Where OpenCV is built without filesystem support, such
+     *  as Emscripten or WinRT, external data is not supported at all, with or without this flag.
+     *  OPENCV_DNN_ONNX_MMAP_EXTERNAL_DATA, an environment variable read once when the first model
+     *  is loaded, forces reading for every model when set to 0.
+     *  @returns Network object that ready to do forward, throw an exception in failure cases.
+     */
+    CV_EXPORTS_W Net readNetFromONNX(CV_WRAP_FILE_PATH const String &onnxFile, int engine,
+                                     bool mapExternalData);
+
     /** @brief Reads a network model from <a href="https://onnx.ai/">ONNX</a>
      *         in-memory buffer.
      *  @param buffer memory address of the first byte of the buffer.
@@ -1250,6 +1290,7 @@ CV__DNN_INLINE_NS_BEGIN
      *  in 3-channel image is necessary.
      *  @param crop flag which indicates whether image will be cropped after resize or not
      *  @param ddepth Depth of output blob. Choose CV_32F or CV_8U.
+     *  @param interpolation resize interpolation mode. Default: INTER_LINEAR.
      *  @details if @p crop is true, input image is resized so one side after resize is equal to corresponding
      *  dimension in @p size and another one is equal or larger. Then, crop from the center is performed.
      *  If @p crop is false, direct resize without cropping and preserving aspect ratio is performed.
@@ -1260,7 +1301,7 @@ CV__DNN_INLINE_NS_BEGIN
      */
     CV_EXPORTS_W Mat blobFromImage(InputArray image, double scalefactor=1.0, const Size& size = Size(),
                                    const Scalar& mean = Scalar(), bool swapRB=false, bool crop=false,
-                                   int ddepth=CV_32F);
+                                   int ddepth=CV_32F, int interpolation=cv::INTER_LINEAR);
 
     /** @brief Creates 4-dimensional blob from image.
      *  @details This is an overloaded member function, provided for convenience.
@@ -1268,7 +1309,8 @@ CV__DNN_INLINE_NS_BEGIN
      */
     CV_EXPORTS void blobFromImage(InputArray image, OutputArray blob, double scalefactor=1.0,
                                   const Size& size = Size(), const Scalar& mean = Scalar(),
-                                  bool swapRB=false, bool crop=false, int ddepth=CV_32F);
+                                  bool swapRB=false, bool crop=false, int ddepth=CV_32F,
+                                  int interpolation=cv::INTER_LINEAR);
 
 
     /** @brief Creates 4-dimensional blob from series of images. Optionally resizes and
@@ -1283,6 +1325,7 @@ CV__DNN_INLINE_NS_BEGIN
      *  in 3-channel image is necessary.
      *  @param crop flag which indicates whether image will be cropped after resize or not
      *  @param ddepth Depth of output blob. Choose CV_32F or CV_8U.
+     *  @param interpolation resize interpolation mode. Default: INTER_LINEAR.
      *  @details if @p crop is true, input image is resized so one side after resize is equal to corresponding
      *  dimension in @p size and another one is equal or larger. Then, crop from the center is performed.
      *  If @p crop is false, direct resize without cropping and preserving aspect ratio is performed.
@@ -1293,7 +1336,7 @@ CV__DNN_INLINE_NS_BEGIN
      */
     CV_EXPORTS_W Mat blobFromImages(InputArrayOfArrays images, double scalefactor=1.0,
                                     Size size = Size(), const Scalar& mean = Scalar(), bool swapRB=false, bool crop=false,
-                                    int ddepth=CV_32F);
+                                    int ddepth=CV_32F, int interpolation=cv::INTER_LINEAR);
 
     /** @brief Creates 4-dimensional blob from series of images.
      *  @details This is an overloaded member function, provided for convenience.
@@ -1302,7 +1345,7 @@ CV__DNN_INLINE_NS_BEGIN
     CV_EXPORTS void blobFromImages(InputArrayOfArrays images, OutputArray blob,
                                    double scalefactor=1.0, Size size = Size(),
                                    const Scalar& mean = Scalar(), bool swapRB=false, bool crop=false,
-                                   int ddepth=CV_32F);
+                                   int ddepth=CV_32F, int interpolation=cv::INTER_LINEAR);
 
     /**
      * @brief Enum of image processing mode.
@@ -1333,7 +1376,8 @@ CV__DNN_INLINE_NS_BEGIN
         CV_WRAP Image2BlobParams();
         CV_WRAP Image2BlobParams(const Scalar& scalefactor, const Size& size = Size(), const Scalar& mean = Scalar(),
                             bool swapRB = false, int ddepth = CV_32F, DataLayout datalayout = DNN_LAYOUT_NCHW,
-                            ImagePaddingMode mode = dnn::DNN_PMODE_NULL, Scalar borderValue = 0.0);
+                            ImagePaddingMode mode = dnn::DNN_PMODE_NULL, Scalar borderValue = 0.0,
+                            int interpolation = cv::INTER_LINEAR);
 
         CV_PROP_RW Scalar scalefactor; //!< scalefactor multiplier for input image values.
         CV_PROP_RW Size size;    //!< Spatial size for output image.
@@ -1343,6 +1387,7 @@ CV__DNN_INLINE_NS_BEGIN
         CV_PROP_RW DataLayout datalayout; //!< Order of output dimensions. Choose DNN_LAYOUT_NCHW or DNN_LAYOUT_NHWC.
         CV_PROP_RW dnn::ImagePaddingMode paddingmode;   //!< Image padding mode. @see ImagePaddingMode.
         CV_PROP_RW Scalar borderValue;   //!< Value used in padding mode for padding.
+        CV_PROP_RW int interpolation;    //!< Interpolation mode for resize. INTER_LINEAR by default
 
         /** @brief Get rectangle coordinates in original image system from rectangle in blob coordinates.
          *  @param rBlob rect in blob coordinates.
@@ -1583,6 +1628,9 @@ CV__DNN_INLINE_NS_BEGIN
 
          /// @sa Net::enableWinograd
          CV_WRAP Model& enableWinograd(bool useWinograd);
+
+         /// @sa Net::enableTF32
+         CV_WRAP Model& enableTF32(bool useTF32);
 
          CV_DEPRECATED_EXTERNAL
          operator Net&() const { return getNetwork_(); }
