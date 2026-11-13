@@ -67,9 +67,6 @@ public:
     String name() const;        //!< "cuda:0", or "cpu"
     String description() const; //!< what the backend reports, for example the GPU model
 
-    /** @brief true when the CPU reaches this device's memory directly (NPUs, integrated GPUs),
-    false when it works on a copy (discrete GPUs). */
-    bool sharesHostMemory() const;
     /** @brief The MemoryKind values this device can provide, as a bitmask.
     MEMORY_SHARED_COHERENT for the CPU (an empty Device). */
     int memoryKinds() const;

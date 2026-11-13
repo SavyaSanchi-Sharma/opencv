@@ -29,6 +29,11 @@ Backend::~Backend() {}
 
 bool CoreOps::flip(const UMat&, UMat&, int, Stream&) { return false; }
 bool CoreOps::transpose(const UMat&, UMat&, Stream&) { return false; }
+bool CoreOps::setTo(UMat&, const Scalar&, Stream&) { return false; }
+bool CoreOps::convertTo(const UMat&, UMat&, double, double, Stream&) { return false; }
+
+bool ImgprocOps::boxFilter(const UMat&, UMat&, Size, Point, bool, int, Stream&) { return false; }
+bool ImgprocOps::cvtTwoPlaneYUVtoBGR(const UMat&, UMat&, int, bool, int, Stream&) { return false; }
 
 void* Backend::hostAddress(int, void* ptr, MemoryKind) { return ptr; }
 void Backend::beginCpuAccess(int, void*, size_t, MemoryKind, bool) {}
@@ -89,7 +94,6 @@ Ptr<Stream> Device::Impl::newStream()
 namespace {
 
 // never shrinks, so Device::Impl pointers stay valid; leaked at exit, not to race backend teardown
->>>>>>> pr30398
 class Registry
 {
 public:

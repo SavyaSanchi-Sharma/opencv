@@ -48,11 +48,22 @@ endif()
 
 include("${OpenCV_SOURCE_DIR}/cmake/OpenCVDetectROCm.cmake")
 
+# The kernel selection rules are read at run time from opencv_hip_tuning/ next to the plugin,
+# so they can be changed without a rebuild. The build tree gets a copy; edit tuning/ instead.
+file(GLOB _tuning_yaml "${CMAKE_CURRENT_LIST_DIR}/tuning/*.yaml")
+foreach(_f ${_tuning_yaml})
+  get_filename_component(_name "${_f}" NAME)
+  configure_file("${_f}" "${OPENCV_PLUGIN_DESTINATION}/opencv_hip_tuning/${_name}" COPYONLY)
+endforeach()
+
 set(OPENCV_PLUGIN_EXTRA_SRC_FILES
     "${CMAKE_CURRENT_LIST_DIR}/core/ops.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/core/core.hip"
     "${CMAKE_CURRENT_LIST_DIR}/core/flip.hip"
-    "${CMAKE_CURRENT_LIST_DIR}/core/transpose.hip")
+    "${CMAKE_CURRENT_LIST_DIR}/core/transpose.hip"
+    "${CMAKE_CURRENT_LIST_DIR}/imgproc/ops.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/imgproc/box_filter.hip"
+    "${CMAKE_CURRENT_LIST_DIR}/imgproc/color_yuv.hip")
 set(OPENCV_PLUGIN_EXTRA_INCLUDES "${CMAKE_CURRENT_LIST_DIR}")
 
 ocv_create_plugin(core "opencv_core_accel_hip" "hip::host" "HIP"
@@ -60,6 +71,8 @@ ocv_create_plugin(core "opencv_core_accel_hip" "hip::host" "HIP"
 
 target_compile_definitions(${OPENCV_PLUGIN_NAME} PRIVATE HAVE_ACCEL_HIP=1 __HIP_PLATFORM_AMD__=1)
 target_include_directories(${OPENCV_PLUGIN_NAME} PRIVATE ${hip_INCLUDE_DIRS})
+# dladdr: the plugin finds opencv_hip_tuning/ through its own location
+target_link_libraries(${OPENCV_PLUGIN_NAME} PRIVATE ${CMAKE_DL_LIBS})
 if(ROCM_FOUND)
   target_compile_definitions(${OPENCV_PLUGIN_NAME} PRIVATE
       OPENCV_ROCM_VERSION_MAJOR=${ROCM_VERSION_MAJOR}

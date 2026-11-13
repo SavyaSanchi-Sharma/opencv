@@ -18,14 +18,18 @@ endif()
 
 include(ExternalProject)
 
+# a ';' in CMAKE_ARGS splits the argument, which built the plugin for the first architecture only
+string(REPLACE ";" "|" _accel_hip_archs "${CMAKE_HIP_ARCHITECTURES}")
+
 ExternalProject_Add(opencv_core_accel_hip_plugin
   SOURCE_DIR        "${OpenCV_SOURCE_DIR}/hal/accel/hip"
   BINARY_DIR        "${CMAKE_BINARY_DIR}/accel_hip"
   DEPENDS           opencv_core
+  LIST_SEPARATOR    |
   CMAKE_ARGS
     "-DOpenCV_DIR=${CMAKE_BINARY_DIR}"
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
-    "-DCMAKE_HIP_ARCHITECTURES=${CMAKE_HIP_ARCHITECTURES}"
+    "-DCMAKE_HIP_ARCHITECTURES=${_accel_hip_archs}"
     "-DOPENCV_PLUGIN_DESTINATION=${LIBRARY_OUTPUT_PATH}"
   BUILD_ALWAYS      TRUE
   INSTALL_COMMAND   ""
@@ -35,3 +39,7 @@ install(DIRECTORY "${LIBRARY_OUTPUT_PATH}/"
         DESTINATION "${OPENCV_LIB_INSTALL_PATH}"
         COMPONENT libs
         FILES_MATCHING PATTERN "libopencv_core_accel_hip*")
+# the kernel selection rules the plugin reads from its own directory
+install(DIRECTORY "${LIBRARY_OUTPUT_PATH}/opencv_hip_tuning"
+        DESTINATION "${OPENCV_LIB_INSTALL_PATH}"
+        COMPONENT libs)

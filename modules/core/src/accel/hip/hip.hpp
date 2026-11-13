@@ -58,6 +58,9 @@ HipStream& hipStreamOf(Stream& s);
 //! the core module's operations, implemented in core/ops.cpp
 CoreOps* coreOps();
 
+//! the imgproc module's operations, implemented in imgproc/ops.cpp
+ImgprocOps* imgprocOps();
+
 }}} // namespace cv::accel::hip_impl
 
 #endif // OPENCV_CORE_SRC_ACCEL_HIP_HPP

@@ -144,15 +144,21 @@ public:
     String name() const CV_OVERRIDE { return "hip"; }
     int deviceCount() const CV_OVERRIDE { return (int)devs_.size(); }
     String deviceDescription(int device) const CV_OVERRIDE { return devs_[device]->prop.name; }
-    bool sharesHostMemory(int device) const CV_OVERRIDE { return devs_[device]->shared; }
+    /* An integrated GPU maps host memory, so the CPU reaches a buffer without a copy; device
+       memory stays on offer for buffers the CPU never touches. A discrete GPU has only the
+       latter. The mapped memory is fine-grained, so it needs no cache maintenance. */
+    int memoryKinds(int device) const CV_OVERRIDE
+    {
+        return devs_[device]->shared ? (MEMORY_SHARED_COHERENT | MEMORY_DEVICE) : MEMORY_DEVICE;
+    }
 
-    void* allocate(int device, size_t size) CV_OVERRIDE
+    void* allocate(int device, size_t size, MemoryKind kind) CV_OVERRIDE
     {
         Dev& d = *devs_[device];
         DeviceGuard g(device);
         void* p = 0;
         hipError_t r;
-        if (d.shared)
+        if (isSharedKind(kind))
             r = hipHostMalloc(&p, size, hipHostMallocMapped | hipHostMallocPortable);  // one address for CPU and GPU
         else if (d.pools)
         {
@@ -172,14 +178,14 @@ public:
         return p;
     }
 
-    void deallocate(int device, void* ptr) CV_OVERRIDE
+    void deallocate(int device, void* ptr, MemoryKind kind) CV_OVERRIDE
     {
         // called while UMats are released: report failures, never throw
         try
         {
             Dev& d = *devs_[device];
             DeviceGuard g(device);
-            const hipError_t r = d.shared ? hipHostFree(ptr)
+            const hipError_t r = isSharedKind(kind) ? hipHostFree(ptr)
                                : d.pools ? hipFreeAsync(ptr, allocStream(device))
                                : hipFree(ptr);
             if (r != hipSuccess)
@@ -212,12 +218,15 @@ public:
             (void)hipGetLastError();
     }
 
-    void copy(int device, CopyKind kind, void* dst, size_t dstStep, const void* src, size_t srcStep,
+    void copy(int device, CopyKind kind, DeviceRef dst, size_t dstStep, DeviceRef src, size_t srcStep,
               size_t widthBytes, size_t rows, Stream& stream, bool hostStable) CV_OVERRIDE
     {
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(device);
-        check(hipMemcpy2DAsync(dst, dstStep, src, srcStep, widthBytes, rows, hipMemcpyDefault, s.s_),
+        // HIP memory is addressable, so a DeviceRef is just its handle plus the offset
+        check(hipMemcpy2DAsync((uchar*)dst.handle + dst.offset, dstStep,
+                               (const uchar*)src.handle + src.offset, srcStep,
+                               widthBytes, rows, hipMemcpyDefault, s.s_),
               "hipMemcpy2DAsync");
         if (kind == COPY_HOST_TO_DEVICE && !hostStable)
         {
@@ -234,7 +243,11 @@ public:
 
     Ops* ops(const String& module) CV_OVERRIDE
     {
-        return module == CoreOps::module() ? coreOps() : 0;
+        if (module == CoreOps::module())
+            return coreOps();
+        if (module == ImgprocOps::module())
+            return imgprocOps();
+        return 0;
     }
 
 private:

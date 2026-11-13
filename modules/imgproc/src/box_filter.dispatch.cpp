@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "opencv2/core/hal/intrin.hpp"
+#include "opencv2/core/utils/accel_dispatch.private.hpp"
 #include "opencl_kernels_imgproc.hpp"
 
 #include "box_filter.simd.hpp"
@@ -315,6 +316,28 @@ Ptr<FilterEngine> createBoxFilter(int srcType, int dstType, Size ksize,
 }
 
 
+static bool accel_boxFilter(InputArray _src, OutputArray _dst, int ddepth,
+                            Size ksize, Point anchor, bool normalize, int borderType)
+{
+    const int stype = _src.type();
+    if (ddepth >= 0 && ddepth != CV_MAT_DEPTH(stype))
+        return false;
+    // the device sees only the region; the CPU reads the pixels around it unless isolated
+    if (_src.dims() > 2 || (_src.isSubmatrix() && (borderType & BORDER_ISOLATED) == 0))
+        return false;
+    const Size sz = _src.size();
+    if (anchor.x < 0)
+        anchor.x = ksize.width / 2;
+    if (anchor.y < 0)
+        anchor.y = ksize.height / 2;
+    const int border = borderType & ~BORDER_ISOLATED;
+    accel::detail::OpCall call("boxFilter");
+    call.input(_src).output(_dst, MatShape({sz.height, sz.width}), stype);
+    return call.run<accel::ImgprocOps>([&](accel::ImgprocOps& ops, std::vector<UMat>& a, accel::Stream& s) {
+        return ops.boxFilter(a[0], a[1], ksize, anchor, normalize, border, s);
+    });
+}
+
 void boxFilter(InputArray _src, OutputArray _dst, int ddepth,
                Size ksize, Point anchor,
                bool normalize, int borderType)
@@ -323,6 +346,9 @@ void boxFilter(InputArray _src, OutputArray _dst, int ddepth,
 
     CV_Assert(!_src.empty());
     CV_Assert(ksize.width > 0 && ksize.height > 0);
+
+    CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(),
+                 accel_boxFilter(_src, _dst, ddepth, ksize, anchor, normalize, borderType))
 
     CV_OCL_RUN(_dst.isUMat() &&
                (borderType == BORDER_REPLICATE || borderType == BORDER_CONSTANT ||

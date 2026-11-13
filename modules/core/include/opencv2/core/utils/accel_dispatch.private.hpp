@@ -37,6 +37,9 @@ namespace cv { namespace accel { namespace detail {
 //! true while device memory exists or this thread is inside an ExecutionScope
 CV_EXPORTS bool isActive();
 
+//! reads the OPENCV_ACCEL_* memory settings again, which are otherwise read once; for tests
+CV_EXPORTS void reloadSettings();
+
 class CV_EXPORTS OpCall
 {
 public:
@@ -62,14 +65,14 @@ public:
     }
 
 private:
-    // By value: an InputArray built from a UMat at the call site is a temporary, and storing
-    // its address left a dangling pointer. Copying the wrapper is cheap and still refers to
-    // the caller's matrix.
+    // The arrays are referred to, not copied, so each one must outlive run(). An InputArray
+    // built from a UMat at the call site is a temporary that dies at the semicolon: a caller
+    // binds it to a named _InputArray/_OutputArray first.
     struct Arg
     {
         bool isOutput;
-        _InputArray in;
-        _OutputArray out;
+        const _InputArray* in;
+        const _OutputArray* out;
         MatShape shape;
         int type;
     };

@@ -486,7 +486,6 @@ void* allocateDevice(Device::Impl* dev, size_t size, MemoryKind kind)
     // managed memory is not pinned up front, but counting it errs on the safe side
     if (p && isSharedKind(kind))
         dev->pinnedBytes += size;
->>>>>>> pr30398
     return p;
 }
 

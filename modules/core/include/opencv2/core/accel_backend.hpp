@@ -100,7 +100,7 @@ public:
 
 /** @brief Operations of the core module.
 
-Arguments are UMats in this device's memory (use devicePtr()), ordered on @p stream: the
+Arguments are UMats in this device's memory (use deviceRef()), ordered on @p stream: the
 work queued on it runs after everything that writes them. Outputs have their final size and
 type and never overlap inputs. An operation returns false, without queueing anything, when the
 device cannot run the call; OpenCV then runs it on the CPU. */
@@ -118,6 +118,22 @@ public:
     virtual bool convertTo(const UMat& src, UMat& dst, double alpha, double beta, Stream& stream);
 };
 
+/** @brief Operations of the imgproc module, under the same rules as CoreOps.
+Parameters arrive decoded, as the CPU HAL takes them, so a backend needs only core types. */
+class CV_EXPORTS ImgprocOps : public Ops
+{
+public:
+    static const char* module() { return "imgproc"; }
+    /** @brief cv::boxFilter with @p dst of @p src's type, @p anchor resolved and no BORDER_ISOLATED
+    in @p borderType: it reads only the pixels of @p src. */
+    virtual bool boxFilter(const UMat& src, UMat& dst, Size ksize, Point anchor, bool normalize,
+                           int borderType, Stream& stream);
+    /** @brief hal::cvtTwoPlaneYUVtoBGR: @p src is the Y plane followed by the UV plane, @p uIdx
+    is 0 for NV12 and 1 for NV21. */
+    virtual bool cvtTwoPlaneYUVtoBGR(const UMat& src, UMat& dst, int dcn, bool swapBlue, int uIdx,
+                                     Stream& stream);
+};
+
 /** @brief An accelerator runtime: its devices, their memory, streams and operations.
 
 OpenCV calls a backend from any thread, so its methods must be thread-safe. */
@@ -131,23 +147,6 @@ public:
     virtual int deviceCount() const = 0;
     virtual String deviceDescription(int device) const = 0;
 
-    /** @brief true when the CPU can address this device's memory (hostAddress()), so CPU
-    access needs no copy; false when the CPU works on a copy of it. */
-    virtual bool sharesHostMemory(int device) const = 0;
-
-    //! @p size bytes of device memory, or NULL when the device is out of memory
-    virtual void* allocate(int device, size_t size) = 0;
-    //! frees allocate()'d memory. OpenCV calls it only after all work using the memory has finished.
-    virtual void deallocate(int device, void* ptr) = 0;
-
-    //! the CPU address of shared memory (sharesHostMemory()); returns @p ptr by default
-    virtual void* hostAddress(int device, void* ptr);
-    /** @brief Called before the CPU accesses shared memory, after the device work on it has
-    finished: makes the device's writes visible to the CPU (cache invalidation on non-coherent
-    memory). Does nothing by default, as coherent memory needs nothing. */
-    virtual void beginCpuAccess(int device, void* ptr, size_t size, bool write);
-    //! called when the CPU is done: makes its writes visible to the device (cache clean). Does nothing by default.
-    virtual void endCpuAccess(int device, void* ptr, size_t size, bool written);
     /** @brief The MemoryKind values this device can provide, as a bitmask. At least one bit
     must be set. A device whose memory the CPU cannot address offers MEMORY_DEVICE alone. */
     virtual int memoryKinds(int device) const = 0;
@@ -172,7 +171,6 @@ public:
     virtual void beginCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool write);
     //! called when the CPU is done: makes its writes visible to the device (cache clean). Does nothing by default.
     virtual void endCpuAccess(int device, void* ptr, size_t size, MemoryKind kind, bool written);
->>>>>>> pr30398
 
     /** @brief Host memory for the CPU's copy of device memory, preferably pinned so copies to
     and from it run asynchronously. fastMalloc by default. NULL when out of memory. */
@@ -185,19 +183,21 @@ public:
     may change as soon as this returns, so the backend must have read it by then. In every other
     case OpenCV keeps the host memory alive and unchanged until the stream reaches the copy, and
     waits for the stream before it reads memory written by a COPY_DEVICE_TO_HOST. */
-    virtual void copy(int device, CopyKind kind, void* dst, size_t dstStep,
-                      const void* src, size_t srcStep, size_t widthBytes, size_t rows,
+    virtual void copy(int device, CopyKind kind, DeviceRef dst, size_t dstStep,
+                      DeviceRef src, size_t srcStep, size_t widthBytes, size_t rows,
                       Stream& stream, bool hostStable) = 0;
 
     virtual Ptr<Stream> createStream(int device) = 0;
 
     /** @brief Imports a Linux dma-buf of @p size bytes as device memory, without copying.
-    @p fd stays the caller's (dup() it to keep it). deallocate() releases the import. Returns
-    NULL when the device cannot import it, which is the default. */
-    virtual void* importDmaBuf(int device, int fd, size_t size);
-    /** @brief Exports allocate()'d or imported memory as a dma-buf: a new file descriptor that
-    the caller closes, or -1 when that is not possible, which is the default. */
-    virtual int exportDmaBuf(int device, void* ptr, size_t size);
+
+    @p fd stays the caller's (dup() it to keep it). Sets @p kind to the kind of the imported
+    memory, which the exporter decides, not defaultMemoryKind(). deallocate() releases the
+    import. Returns NULL when the device cannot import it, which is the default. */
+    virtual void* importDmaBuf(int device, int fd, size_t size, MemoryKind& kind);
+    /** @brief Exports allocate()'d or imported memory of @p kind as a dma-buf: a new file
+    descriptor that the caller closes, or -1 when that is not possible, which is the default. */
+    virtual int exportDmaBuf(int device, void* ptr, size_t size, MemoryKind kind);
 
     //! operations for @p module ("core", ...), or NULL when the backend has none
     virtual Ops* ops(const String& module);
@@ -208,7 +208,6 @@ Built-in backends (CUDA) register themselves. Backends stay registered for the l
 process. */
 CV_EXPORTS void registerBackend(const Ptr<Backend>& backend);
 
-//! the device address of @p m's first element, for operations
 //! where @p m's first element is, for operations
 static inline DeviceRef deviceRef(const UMat& m)
 {
@@ -224,50 +223,31 @@ static inline void* devicePtr(const UMat& m)
     return m.u ? (void*)((uchar*)m.u->handle + m.offset) : 0;
 }
 
+/** @brief Version of the classes a plugin implements (Backend, Stream, Event, Ops). Bumped
+whenever one of them changes its layout, so a plugin built against another layout is not loaded. */
+#define CV_ACCEL_PLUGIN_ABI_VERSION 1
+//! version of what the interface offers within one ABI version
+#define CV_ACCEL_PLUGIN_API_VERSION 0
+
+/** @brief What a backend plugin provides.
+
+The interface passes C++ objects (UMat, String, Ptr) across the library boundary, and the
+Backend is created by the plugin's operator new and released by OpenCV. A plugin is therefore
+loaded only into the OpenCV version it was built against, which @p api_header carries. */
+typedef struct OpenCV_Core_Accel_Plugin_API
+{
+    OpenCV_API_Header api_header;
+    //! creates the backend; CV_ERROR_FAIL when it cannot be created
+    CvResult (CV_API_CALL *createBackend)(CV_OUT Backend** backend);
+} OpenCV_Core_Accel_Plugin_API;
+
 /** @brief Entry point of a backend plugin.
 
-A plugin is a shared library built against the headers of the OpenCV version that loads it.
-It exports this function, which returns a new Backend, or NULL when @p major and @p minor are
-not the version it was built for. Define it with CV_ACCEL_DEFINE_PLUGIN. */
-typedef Backend* (*FN_opencv_core_accel_plugin_init_v1)(int major, int minor, int patch);
+Returns the API for @p requested_abi_version and @p requested_api_version, or NULL when the
+plugin does not implement them. Define it with CV_ACCEL_DEFINE_PLUGIN. */
+typedef const OpenCV_Core_Accel_Plugin_API* (CV_API_CALL *FN_opencv_core_accel_plugin_init_t)
+        (int requested_abi_version, int requested_api_version, void* reserved /*NULL*/);
 #define CV_ACCEL_PLUGIN_INIT_NAME "opencv_core_accel_plugin_init_v1"
-
-/** @brief Tag of the C++ ABI a plugin was built with.
-
-Backend, Ptr, String, std::vector and UMat all cross the library boundary, and the Backend is
-created by the plugin's operator new and released by OpenCV, so both sides must agree on the
-compiler and the standard library. A plugin built with a different one is rejected rather than
-left to fail somewhere later. The OpenCV version check ignores the patch number, which does not
-change the ABI within a release. */
-typedef const char* (*FN_opencv_core_accel_plugin_abi_v1)();
-#define CV_ACCEL_PLUGIN_ABI_NAME "opencv_core_accel_plugin_abi_v1"
-
-#if defined(__clang__)
-#  define CV_ACCEL_ABI_COMPILER "clang" CVAUX_STR(__clang_major__)
-#elif defined(__GNUC__)
-#  define CV_ACCEL_ABI_COMPILER "gcc" CVAUX_STR(__GNUC__)
-#elif defined(_MSC_VER)
-#  define CV_ACCEL_ABI_COMPILER "msvc" CVAUX_STR(_MSC_VER)
-#else
-#  define CV_ACCEL_ABI_COMPILER "unknown"
-#endif
-
-#if defined(_GLIBCXX_USE_CXX11_ABI)
-#  define CV_ACCEL_ABI_STDLIB "libstdc++" CVAUX_STR(_GLIBCXX_USE_CXX11_ABI)
-#elif defined(_LIBCPP_VERSION)
-#  define CV_ACCEL_ABI_STDLIB "libc++"
-#else
-#  define CV_ACCEL_ABI_STDLIB "stdlib"
-#endif
-
-#if defined(__SIZEOF_POINTER__)
-#  define CV_ACCEL_ABI_PTR_BITS __SIZEOF_POINTER__
-#else
-#  define CV_ACCEL_ABI_PTR_BITS 0
-#endif
-
-#define CV_ACCEL_PLUGIN_ABI_TAG \
-    CV_ACCEL_ABI_COMPILER "/" CV_ACCEL_ABI_STDLIB "/ptr" CVAUX_STR(CV_ACCEL_ABI_PTR_BITS)
 
 //! @}
 
@@ -286,17 +266,30 @@ typedef const char* (*FN_opencv_core_accel_plugin_abi_v1)();
 CV_ACCEL_DEFINE_PLUGIN(new MyBackend())
 @endcode */
 #define CV_ACCEL_DEFINE_PLUGIN(expr) \
-<<<<<<< HEAD
-    extern "C" CV_ACCEL_PLUGIN_EXPORTS const char* opencv_core_accel_plugin_abi_v1() \
+    static CvResult CV_API_CALL cv_accel_plugin_create_backend(CV_OUT cv::accel::Backend** backend) CV_NOEXCEPT \
     { \
-        return CV_ACCEL_PLUGIN_ABI_TAG; \
+        if (!backend) \
+            return CV_ERROR_FAIL; \
+        try { *backend = (expr); } catch (...) { *backend = 0; } \
+        return *backend ? CV_ERROR_OK : CV_ERROR_FAIL; \
     } \
-    extern "C" CV_ACCEL_PLUGIN_EXPORTS cv::accel::Backend* opencv_core_accel_plugin_init_v1(int major, int minor, int patch) \
+    static const cv::accel::OpenCV_Core_Accel_Plugin_API cv_accel_plugin_api = \
     { \
-        (void)patch; \
-        if (major != CV_VERSION_MAJOR || minor != CV_VERSION_MINOR) \
+        { \
+            sizeof(cv::accel::OpenCV_Core_Accel_Plugin_API), \
+            CV_ACCEL_PLUGIN_ABI_VERSION, CV_ACCEL_PLUGIN_API_VERSION, \
+            CV_VERSION_MAJOR, CV_VERSION_MINOR, CV_VERSION_REVISION, CV_VERSION_STATUS, \
+            "OpenCV core accel backend plugin" \
+        }, \
+        cv_accel_plugin_create_backend \
+    }; \
+    extern "C" CV_ACCEL_PLUGIN_EXPORTS const cv::accel::OpenCV_Core_Accel_Plugin_API* CV_API_CALL \
+    opencv_core_accel_plugin_init_v1(int requested_abi_version, int requested_api_version, void* /*reserved*/) CV_NOEXCEPT \
+    { \
+        if (requested_abi_version != CV_ACCEL_PLUGIN_ABI_VERSION \
+            || requested_api_version > CV_ACCEL_PLUGIN_API_VERSION) \
             return 0; \
-        try { return (expr); } catch (...) { return 0; } \
+        return &cv_accel_plugin_api; \
     }
 
 #endif // OPENCV_CORE_ACCEL_BACKEND_HPP
