@@ -1,0 +1,52 @@
+%YAML:1.0
+---
+# HIP imgproc kernel rules per GPU architecture: each op runs the first kernel that applies, fits,
+# does not spill and keeps min_resident_blocks resident. opencv_hip_tune writes imgproc.tuned.yaml.
+schema: 2
+
+archs:
+   # W7900: lds_tile fastest of 47 box variants (37.6 us, wave64 + cumode);
+   # chroma share 64x4 the only cvt variant above the noise (15.4 us)
+   gfx1100:
+      min_resident_blocks: 2
+      boxFilter:
+         kernels: [ lds_tile, sliding_column ]
+      nv12ToBgr:
+         kernels: [ chroma_share ]
+         block: [ 64, 4 ]
+
+   # Ryzen iGPU: lds_tile fastest on Linux and Windows; chroma share 1.46x, block shape not swept
+   gfx1036:
+      min_resident_blocks: 2
+      boxFilter:
+         kernels: [ lds_tile, sliding_column ]
+      nv12ToBgr:
+         kernels: [ chroma_share ]
+         block: [ 64, 4 ]
+
+   # Strix Halo: lds_tile within 1.1% of the best; chroma share 32x8 fastest (20.6 us)
+   gfx1151:
+      min_resident_blocks: 2
+      boxFilter:
+         kernels: [ lds_tile, sliding_column ]
+      nv12ToBgr:
+         kernels: [ chroma_share ]
+         block: [ 32, 8 ]
+
+   # RX 9070 XT: lds_tile fastest (48.8 us); NV12 timings unusable, so the default block
+   gfx1201:
+      min_resident_blocks: 2
+      boxFilter:
+         kernels: [ lds_tile, sliding_column ]
+      nv12ToBgr:
+         kernels: [ chroma_share ]
+         block: [ 64, 4 ]
+
+   # any other architecture: the order that held on all four above
+   default:
+      min_resident_blocks: 2
+      boxFilter:
+         kernels: [ lds_tile, sliding_column ]
+      nv12ToBgr:
+         kernels: [ chroma_share ]
+         block: [ 64, 4 ]
