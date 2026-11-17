@@ -20,21 +20,28 @@ const int IMGPROC_MAX_ROWS = 65535 * 4;
 //! threads per block of both box filter kernels (64 x 4)
 const int BOX_BLOCK_THREADS = 256;
 
+//! cv::boxFilter's division: (sum + divDelta) * divScale >> 23 when divScale is set, else round(sum * scale)
+struct BoxScale
+{
+    float scale;
+    unsigned divScale, divDelta;
+};
+
 //! the LDS tile box filter for @p cn channels (1, 3, 4) and @p border; NULL unless ksize is 3 or 5
-const void* boxLdsKernelFor(int cn, int ksize, int border);
+const void* boxLdsKernelFor(int cn, int ksize, int border, bool fixed);
 
 //! the sliding column box filter, any ksize; NULL for borders it does not implement
-const void* boxSlidingKernelFor(int cn, int border);
+const void* boxSlidingKernelFor(int cn, int border, bool fixed);
 
 //! runs @p kernel from boxLdsKernelFor; @p ax, @p ay is the anchor
 hipError_t boxFilterLds(const void* kernel, const unsigned char* src, size_t sstep,
                         unsigned char* dst, size_t dstep, int rows, int cols,
-                        int ax, int ay, float scale, hipStream_t s);
+                        int ax, int ay, BoxScale scale, hipStream_t s);
 
 //! runs @p kernel from boxSlidingKernelFor
 hipError_t boxFilterSliding(const void* kernel, const unsigned char* src, size_t sstep,
                             unsigned char* dst, size_t dstep, int rows, int cols,
-                            int kw, int kh, int ax, int ay, float scale, hipStream_t s);
+                            int kw, int kh, int ax, int ay, BoxScale scale, hipStream_t s);
 
 //! NV12 (@p uIdx 0) or NV21 (1) to @p dcn channels (3, 4), BGR order unless @p swapBlue
 const void* nv12ToBgrKernelFor(int dcn, bool swapBlue, int uIdx);

@@ -10,4 +10,6 @@ ocv_add_application(opencv_hip_tune
 if(TARGET opencv_hip_tune)
   # hipGetDeviceProperties / hipRuntimeGetVersion for the stamp of the tuned file; no device code
   ocv_target_link_libraries(opencv_hip_tune hip::host ${CMAKE_DL_LIBS})
+  # the kernel rules are read and validated by the same code as in the plugin
+  ocv_target_include_directories(opencv_hip_tune "${OpenCV_SOURCE_DIR}/hal/accel/hip")
 endif()

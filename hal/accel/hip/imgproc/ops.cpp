@@ -4,8 +4,8 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-// Imgproc operations of the HIP backend. Each picks its kernel from the rules in opencv_hip_tuning/
-// next to the plugin and from facts about the compiled kernel; nothing is timed.
+// Imgproc operations of the HIP backend. Each runs the first kernel of its rules (opencv_hip_tuning/
+// next to the plugin) that can run on the device; nothing is timed here.
 
 #ifdef HAVE_ACCEL_HIP
 
@@ -16,6 +16,7 @@
 #include "opencv2/core/utils/logger.hpp"
 
 #include "kernels.hpp"
+#include "rules.hpp"
 
 #include <dlfcn.h>
 
@@ -52,112 +53,36 @@ void trace(const std::string& message)
 ////////////////////////////////////////////////////////////////////////////////////////////////
 // rules
 
-struct OpRules
+std::string pluginPath()
 {
-    std::vector<std::string> kernels;   //!< best first
-    Size block;                         //!< empty when the rules give none
-};
-
-struct ArchRules
-{
-    ArchRules() : minResidentBlocks(1), measuredRuntime(0) {}
-    std::string section;                //!< the section these came from, for the trace
-    int minResidentBlocks;
-    std::map<std::string, OpRules> ops;
-    std::string measuredDevice;         //!< set in a section written by opencv_hip_tune
-    int measuredRuntime;
-};
-
-// The kernels the code has per operation; each is compiled for every architecture of the build.
-// Which ones an architecture uses, and in what order, is its section of the rules.
-bool implemented(const std::string& op, const std::string& kernel)
-{
-    static const char* const kernels[][2] = {
-        { "boxFilter", "lds_tile" },
-        { "boxFilter", "sliding_column" },
-        { "nv12ToBgr", "chroma_share" },
-    };
-    for (size_t i = 0; i < sizeof(kernels) / sizeof(kernels[0]); i++)
-        if (op == kernels[i][0] && kernel == kernels[i][1])
-            return true;
-    return false;
-}
-
-Size readBlock(const FileNode& n, const std::string& where)
-{
-    const Size b = n.size() == 2 ? Size((int)n[0], (int)n[1]) : Size();
-    if (b.width <= 0 || b.height <= 0 || b.area() > 256)
-        CV_Error_(Error::StsParseError, ("%s: a block is [x, y] with at most 256 threads", where.c_str()));
-    return b;
-}
-
-ArchRules readArch(const FileNode& node, const std::string& path)
-{
-    ArchRules a;
-    a.section = node.name();
-    const std::string where = path + ", " + a.section;
-    if (!node["min_resident_blocks"].empty())
-        a.minResidentBlocks = (int)node["min_resident_blocks"];
-    const FileNode measured = node["measured_on"];
-    if (!measured.empty())
-    {
-        a.measuredDevice = (std::string)measured["device"];
-        a.measuredRuntime = (int)measured["hip_runtime"];
-    }
-    for (FileNodeIterator it = node.begin(); it != node.end(); ++it)
-    {
-        const FileNode op = *it;
-        const std::string name = op.name();
-        if (!op.isMap() || name == "measured_on")
-            continue;
-        OpRules& r = a.ops[name];
-        const FileNode ks = op["kernels"];
-        for (FileNodeIterator k = ks.begin(); k != ks.end(); ++k)
-        {
-            const std::string kernel = (std::string)*k;
-            if (!implemented(name, kernel))
-                CV_Error_(Error::StsParseError, ("%s: %s has no kernel '%s'", where.c_str(), name.c_str(), kernel.c_str()));
-            r.kernels.push_back(kernel);
-        }
-        if (!op["block"].empty())
-            r.block = readBlock(op["block"], where);
-    }
-    return a;
-}
-
-// a rules file that cannot be read or parsed throws cv::Exception
-std::map<std::string, ArchRules> loadRules(const std::string& path)
-{
-    FileStorage fs(path, FileStorage::READ);
-    if (!fs.isOpened())
-        CV_Error_(Error::StsError, ("cannot open %s", path.c_str()));
-    if ((int)fs["schema"] != 2)
-        CV_Error_(Error::StsParseError, ("%s: expected schema 2", path.c_str()));
-    std::map<std::string, ArchRules> rules;
-    const FileNode archs = fs["archs"];
-    for (FileNodeIterator it = archs.begin(); it != archs.end(); ++it)
-        rules[(*it).name()] = readArch(*it, path);
-    if (tracing())
-        trace("kernel rules from " + path);
-    return rules;
+    Dl_info info;
+    return dladdr(reinterpret_cast<void*>(&pluginPath), &info) && info.dli_fname ? std::string(info.dli_fname) : std::string();
 }
 
 //! the directory of this plugin, with a trailing slash, or empty
 std::string pluginDir()
 {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&pluginDir), &info) || !info.dli_fname)
-        return std::string();
-    const std::string p(info.dli_fname);
+    const std::string p = pluginPath();
     const size_t slash = p.rfind('/');
     return slash == std::string::npos ? std::string() : p.substr(0, slash + 1);
+}
+
+rules::RuleFile loadRules(const std::string& path)
+{
+    std::vector<std::string> warnings;
+    rules::RuleFile r = rules::read(path, warnings);
+    for (size_t i = 0; i < warnings.size(); i++)
+        CV_LOG_WARNING(NULL, "accel(hip): " << warnings[i]);
+    if (tracing())
+        trace("kernel rules from " + path);
+    return r;
 }
 
 // imgproc.yaml is shipped, imgproc.tuned.yaml is written by opencv_hip_tune for this machine;
 // OPENCV_ACCEL_HIP_RULES=<file> reads that file instead of both
 struct RuleFiles
 {
-    std::map<std::string, ArchRules> shipped, tuned;
+    rules::RuleFile shipped, tuned;
 };
 
 const RuleFiles& ruleFiles()
@@ -177,12 +102,6 @@ const RuleFiles& ruleFiles()
         return f;
     }();
     return files;
-}
-
-const ArchRules* findSection(const std::map<std::string, ArchRules>& rules, const std::string& name)
-{
-    std::map<std::string, ArchRules>::const_iterator it = rules.find(name);
-    return it == rules.end() ? 0 : &it->second;
 }
 
 struct DeviceFacts
@@ -214,67 +133,49 @@ const DeviceFacts& deviceFacts(int device)
     return it->second;
 }
 
-// The shipped section of the device's architecture (else "default"), with its tuned operations
-// on top when they were measured on the same GPU model and HIP runtime. NULL when there are none.
-const ArchRules* rulesFor(int device)
+// the rules of the device: see rules::effective; NULL when there are none
+const rules::ArchRules* rulesFor(int device)
 {
     static std::mutex mtx;
-    static std::map<int, std::pair<bool, ArchRules> > merged;
+    static std::map<int, std::pair<bool, rules::ArchRules> > merged;
     const DeviceFacts& dev = deviceFacts(device);
     std::lock_guard<std::mutex> lock(mtx);
-    std::map<int, std::pair<bool, ArchRules> >::iterator it = merged.find(device);
+    std::map<int, std::pair<bool, rules::ArchRules> >::iterator it = merged.find(device);
     if (it != merged.end())
         return it->second.first ? &it->second.second : 0;
 
     const RuleFiles& files = ruleFiles();
-    const ArchRules* base = findSection(files.shipped, dev.arch);
-    if (!base)
-        base = findSection(files.shipped, "default");
-    const ArchRules* tuned = findSection(files.tuned, dev.arch);
-    if (tuned && (tuned->measuredDevice != dev.name || tuned->measuredRuntime != dev.runtime))
-    {
-        CV_LOG_WARNING(NULL, "accel(hip): the tuned rules for " << dev.arch << " were measured on "
-                       << tuned->measuredDevice << " with HIP " << tuned->measuredRuntime << ", this is "
-                       << dev.name << " with HIP " << dev.runtime << "; using the shipped rules. "
-                       "Run opencv_hip_tune again.");
-        tuned = 0;
-    }
-
-    ArchRules r;
-    if (base)
-        r = *base;
-    if (tuned)
-    {
-        for (std::map<std::string, OpRules>::const_iterator op = tuned->ops.begin(); op != tuned->ops.end(); ++op)
-            r.ops[op->first] = op->second;
-        r.section = tuned->section + " (tuned)" + (base ? " over " + base->section : std::string());
-    }
-    const bool found = base || tuned;
+    static const std::string plugin = files.tuned.empty() ? std::string() : rules::fingerprint(pluginPath());
+    std::vector<std::string> warnings;
+    bool found = false;
+    const rules::ArchRules r = rules::effective(files.shipped, files.tuned, dev.arch, dev.name, dev.runtime,
+                                                plugin, warnings, found);
+    for (size_t i = 0; i < warnings.size(); i++)
+        CV_LOG_WARNING(NULL, "accel(hip): " << warnings[i]);
     it = merged.insert(std::make_pair(device, std::make_pair(found, r))).first;
     return found ? &it->second.second : 0;
 }
 
-const OpRules* opRules(const ArchRules* arch, const char* op)
+const rules::OpRules* opRules(const rules::ArchRules* arch, const char* op)
 {
     if (!arch)
         return 0;
-    std::map<std::string, OpRules>::const_iterator it = arch->ops.find(op);
+    std::map<std::string, rules::OpRules>::const_iterator it = arch->ops.find(op);
     return it == arch->ops.end() ? 0 : &it->second;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 // choosing a kernel
 
-// Why @p kernel, as compiled for @p device (the current one), cannot run well there, or NULL.
-// One LDS kernel measured 4.5-5x slower with a toolchain that spilled it.
-const char* kernelRejected(const void* kernel, int blockThreads, int minResidentBlocks, int device)
+// why @p kernel cannot run on @p device (the current one) with @p blockThreads, or NULL; hard limits only
+const char* kernelIneligible(const void* kernel, int blockThreads, int device)
 {
     static std::mutex mtx;
-    static std::map<std::tuple<const void*, int, int, int>, const char*> verdicts;
+    static std::map<std::tuple<const void*, int, int>, const char*> verdicts;
     const size_t lds = deviceFacts(device).ldsPerBlock;
     std::lock_guard<std::mutex> lock(mtx);
-    const std::tuple<const void*, int, int, int> key(kernel, blockThreads, minResidentBlocks, device);
-    std::map<std::tuple<const void*, int, int, int>, const char*>::iterator it = verdicts.find(key);
+    const std::tuple<const void*, int, int> key(kernel, blockThreads, device);
+    std::map<std::tuple<const void*, int, int>, const char*>::iterator it = verdicts.find(key);
     if (it != verdicts.end())
         return it->second;
 
@@ -283,14 +184,14 @@ const char* kernelRejected(const void* kernel, int blockThreads, int minResident
     int blocks = 0;
     if (hipFuncGetAttributes(&a, kernel) != hipSuccess)
         why = "it is not built for this architecture";
+    else if (a.maxThreadsPerBlock < blockThreads)
+        why = "its block is larger than it was built for";
     else if (a.sharedSizeBytes > lds)
         why = "its LDS does not fit";
-    else if (a.localSizeBytes > 0)
-        why = "it spills to scratch";
     else if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, blockThreads, 0) != hipSuccess)
         why = "its occupancy cannot be read";
-    else if (blocks < minResidentBlocks)
-        why = "too few of its blocks stay resident";
+    else if (blocks < 1)
+        why = "none of its blocks fits on a compute unit";
     if (why)
         (void)hipGetLastError();
     verdicts[key] = why;
@@ -304,14 +205,12 @@ struct Candidate
     const char* notApplicable;
 };
 
-// the first candidate that applies and is not rejected, or -1; @p reasons says why others were skipped
-int choose(const std::vector<Candidate>& c, int blockThreads, const ArchRules& arch, int device,
-           std::string& reasons)
+// the first candidate that applies and is eligible, or -1; @p reasons says why others were skipped
+int choose(const std::vector<Candidate>& c, int blockThreads, int device, std::string& reasons)
 {
     for (size_t i = 0; i < c.size(); i++)
     {
-        const char* why = c[i].kernel ? kernelRejected(c[i].kernel, blockThreads, arch.minResidentBlocks, device)
-                                      : c[i].notApplicable;
+        const char* why = c[i].kernel ? kernelIneligible(c[i].kernel, blockThreads, device) : c[i].notApplicable;
         if (!why)
             return (int)i;
         reasons += (reasons.empty() ? "" : "; ") + c[i].name + ": " + why;
@@ -319,13 +218,39 @@ int choose(const std::vector<Candidate>& c, int blockThreads, const ArchRules& a
     return -1;
 }
 
-std::string traceTail(const ArchRules* arch, const std::string& reasons)
+std::string traceTail(const rules::ArchRules* arch, const rules::OpRules* op, const rules::Choice* choice,
+                      const std::string& reasons)
 {
-    std::string s = " [rules: " + (arch ? arch->section : std::string("none")) + "]";
+    std::string s = " [rules: " + (arch ? arch->section : std::string("none"));
+    if (op && choice != &op->general)
+        s += ", workload rule";
+    s += "]";
     return reasons.empty() ? s : s + " (" + reasons + ")";
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
+
+// mirrors ColumnSum<ushort, uchar> in box_filter.simd.hpp
+kernels::BoxScale boxScale(Size ksize, bool normalize)
+{
+    kernels::BoxScale b = { 1.f, 0u, 0u };
+    const int area = ksize.width * ksize.height;
+    if (!normalize || area == 1)
+        return b;
+    b.scale = (float)(1. / area);
+    if (area <= 256)
+    {
+        const double scalef = (double)(1 << 23) / area;
+        int divScale = cvFloor(scalef), divDelta = area / 2;
+        if (scalef - divScale < 0.5)
+            divDelta++;
+        else
+            divScale++;
+        b.divScale = (unsigned)divScale;
+        b.divDelta = (unsigned)divDelta;
+    }
+    return b;
+}
 
 class HipImgprocOps CV_FINAL : public ImgprocOps
 {
@@ -340,36 +265,38 @@ public:
         // invalid anchors are reported by the CPU path
         if (anchor.x < 0 || anchor.x >= ksize.width || anchor.y < 0 || anchor.y >= ksize.height)
             return false;
+        const kernels::BoxScale scale = boxScale(ksize, normalize);
+        const bool fixed = scale.divScale != 0;
         // BORDER_WRAP and anything else the kernels do not implement
-        const void* sliding = kernels::boxSlidingKernelFor(cn, borderType);
+        const void* sliding = kernels::boxSlidingKernelFor(cn, borderType, fixed);
         if (!sliding)
             return false;
 
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(s.device_);
         const DeviceFacts& dev = deviceFacts(s.device_);
-        const ArchRules* arch = rulesFor(s.device_);
-        const OpRules* rules = opRules(arch, "boxFilter");
+        const rules::ArchRules* arch = rulesFor(s.device_);
+        const rules::OpRules* op = opRules(arch, "boxFilter");
+        const rules::Choice* choice = op ? &op->choose({ cn, ksize.width == ksize.height ? ksize.width : 0 }) : 0;
 
-        const void* lds = ksize.width == ksize.height ? kernels::boxLdsKernelFor(cn, ksize.width, borderType) : 0;
+        const void* lds = ksize.width == ksize.height ? kernels::boxLdsKernelFor(cn, ksize.width, borderType, fixed) : 0;
         std::vector<Candidate> c;
-        for (size_t i = 0; rules && i < rules->kernels.size(); i++)
+        for (size_t i = 0; choice && i < choice->kernels.size(); i++)
         {
-            if (rules->kernels[i] == "lds_tile")
-                c.push_back({ rules->kernels[i], lds, "built for square 3x3 and 5x5 only" });
-            else if (rules->kernels[i] == "sliding_column")
-                c.push_back({ rules->kernels[i], sliding, 0 });
+            if (choice->kernels[i] == "lds_tile")
+                c.push_back({ choice->kernels[i], lds, "built for square 3x3 and 5x5 only" });
+            else if (choice->kernels[i] == "sliding_column")
+                c.push_back({ choice->kernels[i], sliding, 0 });
         }
 
         std::string reasons;
-        const int k = arch ? choose(c, kernels::BOX_BLOCK_THREADS, *arch, s.device_, reasons) : -1;
+        const int k = choose(c, kernels::BOX_BLOCK_THREADS, s.device_, reasons);
         if (tracing())
             trace(format("boxFilter %dx%d C%d on %s: ", ksize.width, ksize.height, cn, dev.arch.c_str()) +
-                  (k < 0 ? std::string("CPU") : c[k].name) + traceTail(arch, reasons));
+                  (k < 0 ? std::string("CPU") : c[k].name) + traceTail(arch, op, choice, reasons));
         if (k < 0)
             return false;
 
-        const float scale = normalize ? 1.f / ((float)ksize.width * ksize.height) : 1.f;
         const unsigned char* sp = (const unsigned char*)devicePtr(src);
         unsigned char* dp = (unsigned char*)devicePtr(dst);
         if (lds && c[k].kernel == lds)
@@ -394,22 +321,23 @@ public:
         HipStream& s = hipStreamOf(stream);
         DeviceGuard g(s.device_);
         const DeviceFacts& dev = deviceFacts(s.device_);
-        const ArchRules* arch = rulesFor(s.device_);
-        const OpRules* rules = opRules(arch, "nv12ToBgr");
+        const rules::ArchRules* arch = rulesFor(s.device_);
+        const rules::OpRules* op = opRules(arch, "nv12ToBgr");
+        const rules::Choice* choice = op ? &op->choose({ dcn, 0 }) : 0;
 
         std::vector<Candidate> c;
-        for (size_t i = 0; rules && i < rules->kernels.size(); i++)
-            if (rules->kernels[i] == "chroma_share")
-                c.push_back({ rules->kernels[i], kernels::nv12ToBgrKernelFor(dcn, swapBlue, uIdx), 0 });
+        for (size_t i = 0; choice && i < choice->kernels.size(); i++)
+            if (choice->kernels[i] == "chroma_share")
+                c.push_back({ choice->kernels[i], kernels::nv12ToBgrKernelFor(dcn, swapBlue, uIdx), 0 });
 
         // 64x4 when the rules give no block
-        const Size block = rules && !rules->block.empty() ? rules->block : Size(64, 4);
+        const Size block = choice && !choice->block.empty() ? choice->block : Size(64, 4);
         std::string reasons;
-        const int k = arch ? choose(c, block.area(), *arch, s.device_, reasons) : -1;
+        const int k = choose(c, block.area(), s.device_, reasons);
         if (tracing())
             trace(format("cvtColor NV12 to %d channels on %s: ", dcn, dev.arch.c_str()) +
                   (k < 0 ? std::string("CPU") : format("%s %dx%d", c[k].name.c_str(), block.width, block.height)) +
-                  traceTail(arch, reasons));
+                  traceTail(arch, op, choice, reasons));
         if (k < 0)
             return false;
 

@@ -4,8 +4,7 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-// Box filter of 8-bit images: the two of 47 hipbench variants kept. Integer sums and
-// round(sum * scale) match cv::boxFilter bit for bit.
+// Box filter of 8-bit images: the two of 47 hipbench variants kept, bit-exact with cv::boxFilter.
 
 #include "../common.hpp"
 #include "kernels.hpp"
@@ -43,9 +42,16 @@ __device__ __forceinline__ int borderIdx(int p, int len)
     return -1;
 }
 
-__device__ __forceinline__ unsigned char boxOut(int sum, float scale)
+template<bool FIXED>
+__device__ __forceinline__ unsigned char boxOut(int sum, const BoxScale& scale)
 {
-    const int v = __float2int_rn((float)sum * scale);
+    // saturates like the CPU SIMD path
+    if (FIXED)
+    {
+        const unsigned v = __umul24((unsigned)sum + scale.divDelta, scale.divScale) >> 23;
+        return (unsigned char)(v > 255 ? 255 : v);
+    }
+    const int v = __float2int_rn((float)sum * scale.scale);
     return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
 }
 
@@ -53,10 +59,10 @@ __device__ __forceinline__ unsigned char boxOut(int sum, float scale)
 // one; any ksize. Threads whose window is inside the image skip the border arithmetic.
 const int SLIDE_BX = 64, SLIDE_BY = 4, SLIDE_PPY = 4;
 
-template<int CN, int BORDER>
+template<int CN, int BORDER, bool FIXED>
 __global__ void __launch_bounds__(SLIDE_BX * SLIDE_BY)
 boxSlidingKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                 int rows, int cols, int kw, int kh, int ax, int ay, float scale)
+                 int rows, int cols, int kw, int kh, int ax, int ay, BoxScale scale)
 {
     const int x = blockIdx.x * SLIDE_BX + threadIdx.x;
     const int y0 = (blockIdx.y * SLIDE_BY + threadIdx.y) * SLIDE_PPY;
@@ -103,7 +109,7 @@ boxSlidingKernel(const unsigned char* src, size_t sstep, unsigned char* dst, siz
     unsigned char* d = dst + (size_t)y0 * dstep + (size_t)x * CN;
 #pragma unroll
     for (int c = 0; c < CN; c++)
-        d[c] = boxOut(col[c], scale);
+        d[c] = boxOut<FIXED>(col[c], scale);
 
 #pragma unroll
     for (int g = 1; g < SLIDE_PPY; g++)
@@ -131,7 +137,7 @@ boxSlidingKernel(const unsigned char* src, size_t sstep, unsigned char* dst, siz
         d = dst + (size_t)y * dstep + (size_t)x * CN;
 #pragma unroll
         for (int c = 0; c < CN; c++)
-            d[c] = boxOut(col[c], scale);
+            d[c] = boxOut<FIXED>(col[c], scale);
     }
 }
 
@@ -140,17 +146,19 @@ boxSlidingKernel(const unsigned char* src, size_t sstep, unsigned char* dst, siz
 const int LDS_BX = 64, LDS_BY = 4, LDS_PPT = 2;
 
 static_assert(SLIDE_BX * SLIDE_BY == BOX_BLOCK_THREADS && LDS_BX * LDS_BY == BOX_BLOCK_THREADS,
-              "the selection in ops.cpp reads occupancy for BOX_BLOCK_THREADS threads per block");
+              "the eligibility check in ops.cpp assumes BOX_BLOCK_THREADS threads per block");
 
-template<int CN, int BORDER, int K>
+template<int CN, int BORDER, int K, bool FIXED>
 __global__ void __launch_bounds__(LDS_BX * LDS_BY)
 boxLdsKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-             int rows, int cols, int ax, int ay, float scale)
+             int rows, int cols, int ax, int ay, BoxScale scale)
 {
     constexpr int TW = LDS_BX * LDS_PPT + K - 1;
     constexpr int TH = LDS_BY + K - 1;
-    // one plane per channel: measured 2x faster than interleaved channels for a u8 tile
-    __shared__ unsigned char tile[CN * TH * TW];
+    // 4 channels: one word per pixel, so every tap is one aligned load; else one plane per channel
+    constexpr bool PACKED = CN == 4;
+    __shared__ unsigned char tile[PACKED ? 1 : CN * TH * TW];
+    __shared__ unsigned tile32[PACKED ? TH * TW : 1];
 
     const int ox = blockIdx.x * LDS_BX * LDS_PPT - ax;
     const int oy = blockIdx.y * LDS_BY - ay;
@@ -160,9 +168,14 @@ boxLdsKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t 
         const int sx = borderIdx<BORDER>(ox + tx, cols);
         const int sy = borderIdx<BORDER>(oy + ty, rows);
         const unsigned char* p = sx < 0 || sy < 0 ? 0 : src + (size_t)sy * sstep + (size_t)sx * CN;
+        if (PACKED)
+            tile32[ty * TW + tx] = p ? p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned)p[3] << 24) : 0u;
+        else
+        {
 #pragma unroll
-        for (int c = 0; c < CN; c++)
-            tile[(c * TH + ty) * TW + tx] = p ? p[c] : 0;
+            for (int c = 0; c < CN; c++)
+                tile[(c * TH + ty) * TW + tx] = p ? p[c] : 0;
+        }
     }
     __syncthreads();
 
@@ -185,74 +198,98 @@ boxLdsKernel(const unsigned char* src, size_t sstep, unsigned char* dst, size_t 
         for (int j = 0; j < K; j++)
 #pragma unroll
             for (int i = 0; i < K; i++)
+            {
+                if (PACKED)
+                {
+                    const unsigned v = tile32[(threadIdx.y + j) * TW + lx + p + i];
 #pragma unroll
-                for (int c = 0; c < CN; c++)
-                    sum[c] += tile[(c * TH + threadIdx.y + j) * TW + lx + p + i];
+                    for (int c = 0; c < CN; c++)
+                        sum[c] += (v >> (8 * c)) & 255;
+                }
+                else
+                {
+#pragma unroll
+                    for (int c = 0; c < CN; c++)
+                        sum[c] += tile[(c * TH + threadIdx.y + j) * TW + lx + p + i];
+                }
+            }
 #pragma unroll
         for (int c = 0; c < CN; c++)
-            d[(size_t)x * CN + c] = boxOut(sum[c], scale);
+            d[(size_t)x * CN + c] = boxOut<FIXED>(sum[c], scale);
     }
 }
 
-template<int CN, int K>
+template<int CN, int K, bool FIXED>
 const void* ldsByBorder(int border)
 {
     switch (border)
     {
-    case B_CONSTANT:    return reinterpret_cast<const void*>(boxLdsKernel<CN, B_CONSTANT, K>);
-    case B_REPLICATE:   return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REPLICATE, K>);
-    case B_REFLECT:     return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REFLECT, K>);
-    case B_REFLECT_101: return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REFLECT_101, K>);
+    case B_CONSTANT:    return reinterpret_cast<const void*>(boxLdsKernel<CN, B_CONSTANT, K, FIXED>);
+    case B_REPLICATE:   return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REPLICATE, K, FIXED>);
+    case B_REFLECT:     return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REFLECT, K, FIXED>);
+    case B_REFLECT_101: return reinterpret_cast<const void*>(boxLdsKernel<CN, B_REFLECT_101, K, FIXED>);
     default:            return 0;
     }
 }
 
-template<int K>
+template<int K, bool FIXED>
 const void* ldsByCn(int cn, int border)
 {
     switch (cn)
     {
-    case 1: return ldsByBorder<1, K>(border);
-    case 3: return ldsByBorder<3, K>(border);
-    case 4: return ldsByBorder<4, K>(border);
+    case 1: return ldsByBorder<1, K, FIXED>(border);
+    case 3: return ldsByBorder<3, K, FIXED>(border);
+    case 4: return ldsByBorder<4, K, FIXED>(border);
     default: return 0;
     }
 }
 
-template<int CN>
+template<int K>
+const void* ldsByScale(int cn, int border, bool fixed)
+{
+    return fixed ? ldsByCn<K, true>(cn, border) : ldsByCn<K, false>(cn, border);
+}
+
+template<int CN, bool FIXED>
 const void* slidingByBorder(int border)
 {
     switch (border)
     {
-    case B_CONSTANT:    return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_CONSTANT>);
-    case B_REPLICATE:   return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REPLICATE>);
-    case B_REFLECT:     return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REFLECT>);
-    case B_REFLECT_101: return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REFLECT_101>);
+    case B_CONSTANT:    return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_CONSTANT, FIXED>);
+    case B_REPLICATE:   return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REPLICATE, FIXED>);
+    case B_REFLECT:     return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REFLECT, FIXED>);
+    case B_REFLECT_101: return reinterpret_cast<const void*>(boxSlidingKernel<CN, B_REFLECT_101, FIXED>);
     default:            return 0;
+    }
+}
+
+template<bool FIXED>
+const void* slidingByCn(int cn, int border)
+{
+    switch (cn)
+    {
+    case 1: return slidingByBorder<1, FIXED>(border);
+    case 3: return slidingByBorder<3, FIXED>(border);
+    case 4: return slidingByBorder<4, FIXED>(border);
+    default: return 0;
     }
 }
 
 } // namespace
 
-const void* boxLdsKernelFor(int cn, int ksize, int border)
+const void* boxLdsKernelFor(int cn, int ksize, int border, bool fixed)
 {
-    return ksize == 3 ? ldsByCn<3>(cn, border) : ksize == 5 ? ldsByCn<5>(cn, border) : 0;
+    return ksize == 3 ? ldsByScale<3>(cn, border, fixed) : ksize == 5 ? ldsByScale<5>(cn, border, fixed) : 0;
 }
 
-const void* boxSlidingKernelFor(int cn, int border)
+const void* boxSlidingKernelFor(int cn, int border, bool fixed)
 {
-    switch (cn)
-    {
-    case 1: return slidingByBorder<1>(border);
-    case 3: return slidingByBorder<3>(border);
-    case 4: return slidingByBorder<4>(border);
-    default: return 0;
-    }
+    return fixed ? slidingByCn<true>(cn, border) : slidingByCn<false>(cn, border);
 }
 
 hipError_t boxFilterLds(const void* kernel, const unsigned char* src, size_t sstep,
                         unsigned char* dst, size_t dstep, int rows, int cols,
-                        int ax, int ay, float scale, hipStream_t s)
+                        int ax, int ay, BoxScale scale, hipStream_t s)
 {
     if (rows <= 0 || cols <= 0)
         return hipSuccess;
@@ -264,7 +301,7 @@ hipError_t boxFilterLds(const void* kernel, const unsigned char* src, size_t sst
 
 hipError_t boxFilterSliding(const void* kernel, const unsigned char* src, size_t sstep,
                             unsigned char* dst, size_t dstep, int rows, int cols,
-                            int kw, int kh, int ax, int ay, float scale, hipStream_t s)
+                            int kw, int kh, int ax, int ay, BoxScale scale, hipStream_t s)
 {
     if (rows <= 0 || cols <= 0)
         return hipSuccess;
