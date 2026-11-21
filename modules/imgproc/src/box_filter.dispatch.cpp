@@ -324,6 +324,9 @@ void boxFilter(InputArray _src, OutputArray _dst, int ddepth,
     CV_Assert(!_src.empty());
     CV_Assert(ksize.width > 0 && ksize.height > 0);
 
+    CV_NON_CPU_HAL_RUN(_src.isUMat() && _dst.isUMat(),
+                       cv_non_cpu_hal_boxFilter(_src, _dst, ddepth, ksize, anchor, normalize, borderType))
+
     CV_OCL_RUN(_dst.isUMat() &&
                (borderType == BORDER_REPLICATE || borderType == BORDER_CONSTANT ||
                 borderType == BORDER_REFLECT || borderType == BORDER_REFLECT_101),

@@ -26,6 +26,7 @@ CV_EXPORTS void setUseCollection(bool flag); // set implementation collection st
 #define CV_IMPL_PLAIN  0x01 // native CPU OpenCV implementation
 #define CV_IMPL_OCL    0x02 // OpenCL implementation
 #define CV_IMPL_IPP    0x04 // IPP implementation
+#define CV_IMPL_CUDA   0x08 // CUDA implementation
 #define CV_IMPL_MT     0x10 // multithreaded implementation
 
 #undef CV_IMPL_ADD
