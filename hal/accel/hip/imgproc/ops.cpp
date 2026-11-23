@@ -5,14 +5,14 @@
 // Third party copyrights are property of their respective owners.
 
 // Imgproc operations of the HIP backend. Each runs the first kernel of its rules (opencv_hip_tuning/
-// next to the plugin) that can run on the device; nothing is timed here.
-
-#ifdef HAVE_ACCEL_HIP
+// next to the library these operations are built into) that can run on the device; nothing is
+// timed here.
 
 #include "accel/hip/hip.hpp"
 
+#ifdef HAVE_HIP
+
 #include "opencv2/core/utils/configuration.private.hpp"
-#include "opencv2/core/utils/filesystem.hpp"
 #include "opencv2/core/utils/logger.hpp"
 
 #include "kernels.hpp"
@@ -53,16 +53,13 @@ void trace(const std::string& message)
 ////////////////////////////////////////////////////////////////////////////////////////////////
 // rules
 
-std::string pluginPath()
+//! the directory of the library these operations are built into (opencv_core), with a trailing slash, or empty
+std::string libraryDir()
 {
     Dl_info info;
-    return dladdr(reinterpret_cast<void*>(&pluginPath), &info) && info.dli_fname ? std::string(info.dli_fname) : std::string();
-}
-
-//! the directory of this plugin, with a trailing slash, or empty
-std::string pluginDir()
-{
-    const std::string p = pluginPath();
+    if (!dladdr(reinterpret_cast<void*>(&libraryDir), &info) || !info.dli_fname)
+        return std::string();
+    const std::string p = info.dli_fname;
     const size_t slash = p.rfind('/');
     return slash == std::string::npos ? std::string() : p.substr(0, slash + 1);
 }
@@ -78,30 +75,15 @@ rules::RuleFile loadRules(const std::string& path)
     return r;
 }
 
-// imgproc.yaml is shipped, imgproc.tuned.yaml is written by opencv_hip_tune for this machine;
-// OPENCV_ACCEL_HIP_RULES=<file> reads that file instead of both
-struct RuleFiles
+// the shipped imgproc.yaml in opencv_hip_tuning/ next to the library;
+// OPENCV_ACCEL_HIP_RULES=<file> reads that file instead
+const rules::RuleFile& ruleFile()
 {
-    rules::RuleFile shipped, tuned;
-};
-
-const RuleFiles& ruleFiles()
-{
-    static const RuleFiles files = []() {
-        RuleFiles f;
+    static const rules::RuleFile file = []() {
         const std::string path = utils::getConfigurationParameterString("OPENCV_ACCEL_HIP_RULES");
-        if (!path.empty())
-        {
-            f.shipped = loadRules(path);
-            return f;
-        }
-        const std::string dir = pluginDir() + "opencv_hip_tuning/";
-        f.shipped = loadRules(dir + "imgproc.yaml");
-        if (utils::fs::exists(dir + "imgproc.tuned.yaml"))
-            f.tuned = loadRules(dir + "imgproc.tuned.yaml");
-        return f;
+        return loadRules(!path.empty() ? path : libraryDir() + "opencv_hip_tuning/imgproc.yaml");
     }();
-    return files;
+    return file;
 }
 
 struct DeviceFacts
@@ -121,19 +103,19 @@ const DeviceFacts& deviceFacts(int device)
     if (it == facts.end())
     {
         hipDeviceProp_t p;
-        check(hipGetDeviceProperties(&p, device), "hipGetDeviceProperties");
+        hipCheck(hipGetDeviceProperties(&p, device), "hipGetDeviceProperties");
         DeviceFacts f;
         f.name = p.name;
         f.arch = p.gcnArchName;
         f.arch = f.arch.substr(0, f.arch.find(':'));
         f.ldsPerBlock = p.sharedMemPerBlock;
-        check(hipRuntimeGetVersion(&f.runtime), "hipRuntimeGetVersion");
+        hipCheck(hipRuntimeGetVersion(&f.runtime), "hipRuntimeGetVersion");
         it = facts.insert(std::make_pair(device, f)).first;
     }
     return it->second;
 }
 
-// the rules of the device: see rules::effective; NULL when there are none
+// the rules of the device: its arch's section of the YAML, else "default"; NULL when there are none
 const rules::ArchRules* rulesFor(int device)
 {
     static std::mutex mtx;
@@ -144,12 +126,10 @@ const rules::ArchRules* rulesFor(int device)
     if (it != merged.end())
         return it->second.first ? &it->second.second : 0;
 
-    const RuleFiles& files = ruleFiles();
-    static const std::string plugin = files.tuned.empty() ? std::string() : rules::fingerprint(pluginPath());
     std::vector<std::string> warnings;
     bool found = false;
-    const rules::ArchRules r = rules::effective(files.shipped, files.tuned, dev.arch, dev.name, dev.runtime,
-                                                plugin, warnings, found);
+    const rules::ArchRules r = rules::effective(ruleFile(), rules::RuleFile(), dev.arch, dev.name, dev.runtime,
+                                                std::string(), warnings, found);
     for (size_t i = 0; i < warnings.size(); i++)
         CV_LOG_WARNING(NULL, "accel(hip): " << warnings[i]);
     it = merged.insert(std::make_pair(device, std::make_pair(found, r))).first;
@@ -265,6 +245,9 @@ public:
         // invalid anchors are reported by the CPU path
         if (anchor.x < 0 || anchor.x >= ksize.width || anchor.y < 0 || anchor.y >= ksize.height)
             return false;
+        // the window reads pixels that other threads write; UMat::handle() needs no Mat view alive
+        if (src.u == dst.u || src.u->refcount != 0 || dst.u->refcount != 0)
+            return false;
         const kernels::BoxScale scale = boxScale(ksize, normalize);
         const bool fixed = scale.divScale != 0;
         // BORDER_WRAP and anything else the kernels do not implement
@@ -272,10 +255,10 @@ public:
         if (!sliding)
             return false;
 
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        const DeviceFacts& dev = deviceFacts(s.device_);
-        const rules::ArchRules* arch = rulesFor(s.device_);
+        const HipStreamRef s = hipStreamOf(stream);
+        HipDeviceGuard g(s.device);
+        const DeviceFacts& dev = deviceFacts(s.device);
+        const rules::ArchRules* arch = rulesFor(s.device);
         const rules::OpRules* op = opRules(arch, "boxFilter");
         const rules::Choice* choice = op ? &op->choose({ cn, ksize.width == ksize.height ? ksize.width : 0 }) : 0;
 
@@ -290,21 +273,23 @@ public:
         }
 
         std::string reasons;
-        const int k = choose(c, kernels::BOX_BLOCK_THREADS, s.device_, reasons);
+        const int k = choose(c, kernels::BOX_BLOCK_THREADS, s.device, reasons);
         if (tracing())
             trace(format("boxFilter %dx%d C%d on %s: ", ksize.width, ksize.height, cn, dev.arch.c_str()) +
                   (k < 0 ? std::string("CPU") : c[k].name) + traceTail(arch, op, choice, reasons));
         if (k < 0)
             return false;
 
-        const unsigned char* sp = (const unsigned char*)devicePtr(src);
-        unsigned char* dp = (unsigned char*)devicePtr(dst);
+        const unsigned char* sp = (const unsigned char*)src.handle(ACCESS_READ) + src.offset;
+        unsigned char* dp = (unsigned char*)dst.handle(ACCESS_WRITE) + dst.offset;
         if (lds && c[k].kernel == lds)
-            check(kernels::boxFilterLds(lds, sp, src.step[0], dp, dst.step[0], src.rows, src.cols,
-                                        anchor.x, anchor.y, scale, s.s_), "boxFilter");
+            hipCheck(kernels::boxFilterLds(lds, sp, src.step[0], dp, dst.step[0], src.rows, src.cols,
+                                           anchor.x, anchor.y, scale, s.stream), "boxFilter");
         else
-            check(kernels::boxFilterSliding(sliding, sp, src.step[0], dp, dst.step[0], src.rows, src.cols,
-                                            ksize.width, ksize.height, anchor.x, anchor.y, scale, s.s_), "boxFilter");
+            hipCheck(kernels::boxFilterSliding(sliding, sp, src.step[0], dp, dst.step[0], src.rows, src.cols,
+                                               ksize.width, ksize.height, anchor.x, anchor.y, scale, s.stream),
+                     "boxFilter");
+        stream.retain({ src, dst });
         return true;
     }
 
@@ -317,11 +302,14 @@ public:
         if (dst.rows % 2 != 0 || dst.cols % 2 != 0 || src.cols != dst.cols ||
             src.rows != dst.rows * 3 / 2 || dst.rows >= kernels::IMGPROC_MAX_ROWS)
             return false;
+        // UMat::handle() needs no Mat view alive
+        if (src.u == dst.u || src.u->refcount != 0 || dst.u->refcount != 0)
+            return false;
 
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        const DeviceFacts& dev = deviceFacts(s.device_);
-        const rules::ArchRules* arch = rulesFor(s.device_);
+        const HipStreamRef s = hipStreamOf(stream);
+        HipDeviceGuard g(s.device);
+        const DeviceFacts& dev = deviceFacts(s.device);
+        const rules::ArchRules* arch = rulesFor(s.device);
         const rules::OpRules* op = opRules(arch, "nv12ToBgr");
         const rules::Choice* choice = op ? &op->choose({ dcn, 0 }) : 0;
 
@@ -333,7 +321,7 @@ public:
         // 64x4 when the rules give no block
         const Size block = choice && !choice->block.empty() ? choice->block : Size(64, 4);
         std::string reasons;
-        const int k = choose(c, block.area(), s.device_, reasons);
+        const int k = choose(c, block.area(), s.device, reasons);
         if (tracing())
             trace(format("cvtColor NV12 to %d channels on %s: ", dcn, dev.arch.c_str()) +
                   (k < 0 ? std::string("CPU") : format("%s %dx%d", c[k].name.c_str(), block.width, block.height)) +
@@ -341,9 +329,11 @@ public:
         if (k < 0)
             return false;
 
-        check(kernels::nv12ToBgr(c[k].kernel, (const unsigned char*)devicePtr(src), src.step[0],
-                                 (unsigned char*)devicePtr(dst), dst.step[0], dst.rows, dst.cols,
-                                 block.width, block.height, s.s_), "cvtColor");
+        hipCheck(kernels::nv12ToBgr(c[k].kernel, (const unsigned char*)src.handle(ACCESS_READ) + src.offset,
+                                    src.step[0], (unsigned char*)dst.handle(ACCESS_WRITE) + dst.offset,
+                                    dst.step[0], dst.rows, dst.cols, block.width, block.height, s.stream),
+                 "cvtColor");
+        stream.retain({ src, dst });
         return true;
     }
 };
@@ -358,4 +348,4 @@ ImgprocOps* imgprocOps()
 
 }}} // namespace cv::accel::hip_impl
 
-#endif // HAVE_ACCEL_HIP
+#endif // HAVE_HIP

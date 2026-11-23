@@ -10,19 +10,9 @@
 #include <hip/hip_runtime_api.h>
 #include <stddef.h>
 
-// Kernels of the HIP backend plugin, queued on @p s. Elements are @p esz bytes
-// (supportedElementSize), rows are @p sstep / @p dstep bytes apart.
+// setTo and convertTo kernels of the HIP backend, queued on @p s; rows are @p sstep / @p dstep
+// bytes apart. flip and transpose are the kernels the backend shares with CUDA (src/accel/gpu).
 namespace cv { namespace accel { namespace hip_impl { namespace kernels {
-
-bool supportedElementSize(int esz);
-
-//! OpenCV's flip codes: 0 around the x axis, > 0 around the y axis, < 0 both
-hipError_t flip(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                int rows, int cols, int esz, int mode, hipStream_t s);
-
-//! @p rows x @p cols in, cols x rows out
-hipError_t transpose(const unsigned char* src, size_t sstep, unsigned char* dst, size_t dstep,
-                     int rows, int cols, int esz, hipStream_t s);
 
 //! @p val is a Scalar's 4 doubles; every element is written
 hipError_t setTo(unsigned char* dst, size_t dstep, int rows, int cols, int depth, int cn,

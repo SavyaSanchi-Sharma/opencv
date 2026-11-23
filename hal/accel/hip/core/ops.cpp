@@ -4,12 +4,12 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-// Core-module operations of the HIP backend. Each returns false, before queueing anything,
-// when the device cannot run that call; OpenCV then runs it on the CPU.
-
-#ifdef HAVE_ACCEL_HIP
+// setTo and convertTo of the HIP backend. Each returns false, before queueing anything, when the
+// device cannot run that call; OpenCV then runs it on the CPU.
 
 #include "accel/hip/hip.hpp"
+
+#ifdef HAVE_HIP
 
 #include "kernels.hpp"
 
@@ -17,59 +17,57 @@ namespace cv { namespace accel { namespace hip_impl {
 
 namespace {
 
+// no Mat view alive (UMat::handle() needs that), and separate buffers or the same view (in place)
+bool runnable(const UMat& src, const UMat& dst)
+{
+    return src.u->refcount == 0 && dst.u->refcount == 0 &&
+           (src.u != dst.u || (src.offset == dst.offset && src.step[0] == dst.step[0]));
+}
+
+// false when the build has no code for this GPU: nothing was queued, the CPU runs the call
+bool launched(hipError_t r, const char* what)
+{
+    if (r == hipErrorNoBinaryForGpu)
+    {
+        (void)hipGetLastError();
+        return false;
+    }
+    hipCheck(r, what);
+    return true;
+}
+
 class HipCoreOps CV_FINAL : public CoreOps
 {
 public:
-    bool flip(const UMat& src, UMat& dst, int flipCode, Stream& stream) CV_OVERRIDE
-    {
-        const int esz = (int)src.elemSize();
-        if (src.dims != 2 || !kernels::supportedElementSize(esz))
-            return false;
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        check(kernels::flip((const unsigned char*)devicePtr(src), src.step[0],
-                            (unsigned char*)devicePtr(dst), dst.step[0],
-                            src.rows, src.cols, esz, flipCode, s.s_), "flip");
-        return true;
-    }
-
-    bool transpose(const UMat& src, UMat& dst, Stream& stream) CV_OVERRIDE
-    {
-        const int esz = (int)src.elemSize();
-        if (src.dims != 2 || !kernels::supportedElementSize(esz))
-            return false;
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        check(kernels::transpose((const unsigned char*)devicePtr(src), src.step[0],
-                                 (unsigned char*)devicePtr(dst), dst.step[0],
-                                 src.rows, src.cols, esz, s.s_), "transpose");
-        return true;
-    }
-
     bool setTo(UMat& dst, const Scalar& value, Stream& stream) CV_OVERRIDE
     {
-        if (dst.dims != 2 || dst.depth() > CV_64F || dst.channels() > 4)
+        if (dst.dims != 2 || dst.depth() > CV_64F || dst.channels() > 4 || dst.u->refcount != 0)
             return false;
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        check(kernels::setTo((unsigned char*)devicePtr(dst), dst.step[0],
-                             dst.rows, dst.cols, dst.depth(), dst.channels(),
-                             value.val, s.s_), "setTo");
+        const HipStreamRef s = hipStreamOf(stream);
+        HipDeviceGuard g(s.device);
+        if (!launched(kernels::setTo((unsigned char*)dst.handle(ACCESS_WRITE) + dst.offset, dst.step[0],
+                                     dst.rows, dst.cols, dst.depth(), dst.channels(), value.val, s.stream),
+                      "setTo"))
+            return false;
+        stream.retain({ dst });
         return true;
     }
 
     bool convertTo(const UMat& src, UMat& dst, double alpha, double beta, Stream& stream) CV_OVERRIDE
     {
-        if (src.dims != 2 || src.depth() > CV_64F || dst.depth() > CV_64F)
+        if (src.dims != 2 || src.depth() > CV_64F || dst.depth() > CV_64F ||
+            src.channels() != dst.channels() || !runnable(src, dst))
             return false;
-        if (src.channels() != dst.channels())
+        const HipStreamRef s = hipStreamOf(stream);
+        HipDeviceGuard g(s.device);
+        if (!launched(kernels::convertToScale((const unsigned char*)src.handle(ACCESS_READ) + src.offset,
+                                              src.step[0], src.depth(),
+                                              (unsigned char*)dst.handle(ACCESS_WRITE) + dst.offset,
+                                              dst.step[0], dst.depth(),
+                                              src.rows, src.cols, src.channels(), alpha, beta, s.stream),
+                      "convertTo"))
             return false;
-        HipStream& s = hipStreamOf(stream);
-        DeviceGuard g(s.device_);
-        check(kernels::convertToScale((const unsigned char*)devicePtr(src), src.step[0], src.depth(),
-                                      (unsigned char*)devicePtr(dst), dst.step[0], dst.depth(),
-                                      src.rows, src.cols, src.channels(), alpha, beta, s.s_),
-              "convertToScale");
+        stream.retain({ src, dst });
         return true;
     }
 };
@@ -84,4 +82,4 @@ CoreOps* coreOps()
 
 }}} // namespace cv::accel::hip_impl
 
-#endif // HAVE_ACCEL_HIP
+#endif // HAVE_HIP

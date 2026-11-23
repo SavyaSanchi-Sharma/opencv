@@ -3,7 +3,8 @@
 # HIP imgproc kernel rules per GPU architecture: each op runs the first of its kernels that applies
 # to the call and can run on the GPU, else the CPU code. An op may add workloads, a list of
 # { cn: [..], ksize: [..], kernels: [..] } entries (ksize for square boxFilter windows only); the
-# first that matches the call is used instead. opencv_hip_tune writes imgproc.tuned.yaml.
+# first that matches the call is used instead. Read once per process from opencv_hip_tuning/ next
+# to the OpenCV core library; OPENCV_ACCEL_HIP_RULES=<file> reads another file instead.
 schema: 3
 
 archs:

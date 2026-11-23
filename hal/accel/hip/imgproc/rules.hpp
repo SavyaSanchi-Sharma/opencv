@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-// The kernel rules of the HIP imgproc ops, read by the plugin and by opencv_hip_tune.
+// The kernel rules of the HIP imgproc ops, read by the HIP backend (imgproc/ops.cpp).
 namespace cv { namespace accel { namespace hip_impl { namespace rules {
 
 const int SCHEMA = 3;
@@ -58,7 +58,7 @@ struct ArchRules
 {
     std::string section;
     std::map<std::string, OpRules> ops;
-    std::string device, plugin, date;   //!< measured_on, in sections written by opencv_hip_tune
+    std::string device, plugin, date;   //!< measured_on, in sections of tuned rules
     int runtime = 0;
 };
 
@@ -240,7 +240,7 @@ inline ArchRules effective(const RuleFile& shipped, const RuleFile& tuned, const
                                                                                                        : "another build of the plugin";
         warnings.push_back("the tuned rules for " + arch + " were measured with " + what + " (" + t->second.device +
                            format(", HIP %d, ", t->second.runtime) + t->second.plugin + "); using the shipped rules. "
-                           "Run opencv_hip_tune again.");
+                           "Tune again.");
         t = tuned.end();
     }
 

@@ -47,7 +47,7 @@
 #include <vector>
 
 #include "opencv2/core/hal/intrin.hpp"
-#include "opencv2/core/utils/accel_dispatch.private.hpp"
+#include "opencv2/core/private/accel_backend.hpp"
 #include "opencl_kernels_imgproc.hpp"
 
 #include "box_filter.simd.hpp"
@@ -319,23 +319,39 @@ Ptr<FilterEngine> createBoxFilter(int srcType, int dstType, Size ksize,
 static bool accel_boxFilter(InputArray _src, OutputArray _dst, int ddepth,
                             Size ksize, Point anchor, bool normalize, int borderType)
 {
-    const int stype = _src.type();
-    if (ddepth >= 0 && ddepth != CV_MAT_DEPTH(stype))
+    if (!_src.isUMat() || !_dst.isUMat() || _src.dims() > 2)
+        return false;
+    const UMat src = _src.getUMat();
+    if (ddepth >= 0 && ddepth != src.depth())
         return false;
     // the device sees only the region; the CPU reads the pixels around it unless isolated
-    if (_src.dims() > 2 || (_src.isSubmatrix() && (borderType & BORDER_ISOLATED) == 0))
+    if (src.isSubmatrix() && (borderType & BORDER_ISOLATED) == 0)
         return false;
-    const Size sz = _src.size();
+    accel::Device device = accel::getDevice(src);
+    if (device.empty())
+        return false;
+
+    UMat& dst = _dst.getUMatRef();
+    if ((_dst.fixedSize() && dst.size() != src.size()) || (_dst.fixedType() && dst.type() != src.type()))
+        return false;   // the CPU path reports the mismatch
+    // a region or fixed-size output elsewhere stays there; the CPU writes it
+    if (accel::getDevice(dst) != device && (_dst.fixedSize() || dst.isSubmatrix()))
+        return false;
+    // in place: the window reads pixels the call writes, so the CPU path with its copy
+    if (dst.u == src.u)
+        return false;
+    dst.createOn(device, src.size(), src.type());
+
+    accel::ImgprocOps* ops = device.ops<accel::ImgprocOps>("imgproc");
+    if (!ops)
+        return false;   // CPU fallback; the output is already on the device
+
     if (anchor.x < 0)
         anchor.x = ksize.width / 2;
     if (anchor.y < 0)
         anchor.y = ksize.height / 2;
-    const int border = borderType & ~BORDER_ISOLATED;
-    accel::detail::OpCall call("boxFilter");
-    call.input(_src).output(_dst, MatShape({sz.height, sz.width}), stype);
-    return call.run<accel::ImgprocOps>([&](accel::ImgprocOps& ops, std::vector<UMat>& a, accel::Stream& s) {
-        return ops.boxFilter(a[0], a[1], ksize, anchor, normalize, border, s);
-    });
+    return ops->boxFilter(src, dst, ksize, anchor, normalize, borderType & ~BORDER_ISOLATED,
+                          device.threadStream());
 }
 
 void boxFilter(InputArray _src, OutputArray _dst, int ddepth,
@@ -347,8 +363,8 @@ void boxFilter(InputArray _src, OutputArray _dst, int ddepth,
     CV_Assert(!_src.empty());
     CV_Assert(ksize.width > 0 && ksize.height > 0);
 
-    CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(),
-                 accel_boxFilter(_src, _dst, ddepth, ksize, anchor, normalize, borderType))
+    if (accel_boxFilter(_src, _dst, ddepth, ksize, anchor, normalize, borderType))
+        return;
 
     CV_OCL_RUN(_dst.isUMat() &&
                (borderType == BORDER_REPLICATE || borderType == BORDER_CONSTANT ||

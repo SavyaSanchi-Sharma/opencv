@@ -4,61 +4,45 @@
 // Copyright (C) 2026, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 
-// Internals shared by the HIP backend and its per-module operations.
+// Internals shared by the built-in HIP backend (accel/backend_hip.cpp) and its operations in
+// hal/accel/hip. gpu/gpu_backend.impl.hpp keeps its own helpers to backend_hip.cpp.
 
 #ifndef OPENCV_CORE_SRC_ACCEL_HIP_HPP
 #define OPENCV_CORE_SRC_ACCEL_HIP_HPP
 
-#include "opencv2/core/accel_backend.hpp"
+#include "opencv2/core/private/accel_backend.hpp"
 
 #include <hip/hip_runtime_api.h>
 
 namespace cv { namespace accel { namespace hip_impl {
 
-void check(hipError_t e, const char* what);
+//! throws cv::Exception for an error @p e of @p what
+void hipCheck(hipError_t e, const char* what);
 
 //! makes @p device current for the calling thread while it lives
-class DeviceGuard
+class HipDeviceGuard
 {
 public:
-    explicit DeviceGuard(int device);
-    ~DeviceGuard();
+    explicit HipDeviceGuard(int device);
+    ~HipDeviceGuard();
 private:
     int prev_;
+    HipDeviceGuard(const HipDeviceGuard&);
+    HipDeviceGuard& operator=(const HipDeviceGuard&);
 };
 
-class HipEvent CV_FINAL : public Event
+//! the device and the HIP stream behind a Stream of this backend
+struct HipStreamRef
 {
-public:
-    explicit HipEvent(hipEvent_t e) : e_(e) {}
-    ~HipEvent();
-
-    bool query() CV_OVERRIDE;
-    void wait() CV_OVERRIDE;
-
-    hipEvent_t e_;
+    int device;
+    hipStream_t stream;
 };
+HipStreamRef hipStreamOf(Stream& s);
 
-class HipStream CV_FINAL : public Stream
-{
-public:
-    explicit HipStream(int device);
-    ~HipStream();
-
-    Ptr<Event> record() CV_OVERRIDE;
-    bool waitEvent(const Ptr<Event>& event) CV_OVERRIDE;
-    void synchronize() CV_OVERRIDE;
-
-    const int device_;
-    hipStream_t s_;
-};
-
-HipStream& hipStreamOf(Stream& s);
-
-//! the core module's operations, implemented in core/ops.cpp
+//! setTo and convertTo, implemented in hal/accel/hip/core/ops.cpp
 CoreOps* coreOps();
 
-//! the imgproc module's operations, implemented in imgproc/ops.cpp
+//! the imgproc module's operations, implemented in hal/accel/hip/imgproc/ops.cpp
 ImgprocOps* imgprocOps();
 
 }}} // namespace cv::accel::hip_impl

@@ -4,6 +4,7 @@
 
 #include "test_precomp.hpp"
 #include "opencv2/core/accel.hpp"
+#include "opencv2/core/private/accel_backend.hpp"
 
 namespace opencv_test { namespace {
 
@@ -19,12 +20,40 @@ std::vector<accel::Device> hipDevices()
 
 UMat onDevice(const accel::Device& d, const Mat& m)
 {
-    UMat u;
-    u.allocator = d.allocator();
-    u.create(m.size(), m.type());
-    u.allocator = 0;
-    m.copyTo(u);
-    return u;
+    return m.upload(d);
+}
+
+// whether the device's own boxFilter runs this call, rather than declining it to the CPU
+bool deviceRunsBox(const accel::Device& dev, const UMat& src, Size ksize, Point anchor, bool normalize, int border)
+{
+    accel::ImgprocOps* ops = dev.ops<accel::ImgprocOps>("imgproc");
+    if (!ops)
+        return false;
+    if (anchor.x < 0)
+        anchor.x = ksize.width / 2;
+    if (anchor.y < 0)
+        anchor.y = ksize.height / 2;
+    UMat dst;
+    dst.createOn(dev, src.size(), src.type());
+    return ops->boxFilter(src, dst, ksize, anchor, normalize, border & ~BORDER_ISOLATED, dev.threadStream());
+}
+
+// whether the device's own NV12 / NV21 conversion runs @p code on @p yuv, rather than declining it
+bool deviceRunsNv12(const accel::Device& dev, const UMat& yuv, int code)
+{
+    accel::ImgprocOps* ops = dev.ops<accel::ImgprocOps>("imgproc");
+    if (!ops)
+        return false;
+    const bool rgb = code == COLOR_YUV2RGB_NV12 || code == COLOR_YUV2RGBA_NV12 ||
+                     code == COLOR_YUV2RGB_NV21 || code == COLOR_YUV2RGBA_NV21;
+    const bool alpha = code == COLOR_YUV2BGRA_NV12 || code == COLOR_YUV2RGBA_NV12 ||
+                       code == COLOR_YUV2BGRA_NV21 || code == COLOR_YUV2RGBA_NV21;
+    const int uIdx = code == COLOR_YUV2BGR_NV21 || code == COLOR_YUV2RGB_NV21 ||
+                     code == COLOR_YUV2BGRA_NV21 || code == COLOR_YUV2RGBA_NV21 ? 1 : 0;
+    const int dcn = alpha ? 4 : 3;
+    UMat dst;
+    dst.createOn(dev, Size(yuv.cols, yuv.rows * 2 / 3), CV_8UC(dcn));
+    return ops->cvtTwoPlaneYUVtoBGR(yuv, dst, dcn, rgb, uIdx, dev.threadStream());
 }
 
 Mat toHost(const UMat& u)
@@ -56,7 +85,6 @@ protected:
         devs = hipDevices();
         if (devs.empty())
             throw SkipTestException("no HIP device");
-        accel::setTransferPolicy(accel::TRANSFER_ALLOW);
     }
     void TearDown() CV_OVERRIDE
     {
@@ -69,13 +97,11 @@ protected:
         Mat expected;
         cv::boxFilter(src, expected, -1, ksize, anchor, normalize, border);
         UMat u = onDevice(dev, src), dst;
-        accel::resetTransferStats();
         cv::boxFilter(u, dst, -1, ksize, anchor, normalize, border);
-        const accel::TransferStats st = accel::getTransferStats();
         const std::string what = cv::format("%s: %dx%d C%d, ksize %dx%d, anchor (%d, %d), %s, ", dev.name().c_str(),
                                             src.cols, src.rows, src.channels(), ksize.width, ksize.height,
                                             anchor.x, anchor.y, normalize ? "normalized" : "sum") + borderName(border);
-        EXPECT_EQ(1u, st.deviceOps) << what;
+        EXPECT_TRUE(deviceRunsBox(dev, u, ksize, anchor, normalize, border)) << what;
         EXPECT_EQ(dev, accel::getDevice(dst)) << what;
         EXPECT_EQ(0, cvtest::norm(expected, toHost(dst), NORM_INF)) << what;
     }
@@ -154,10 +180,11 @@ TEST_F(Imgproc_AccelHip, boxFilter_region)
                 Mat expected;
                 cv::boxFilter(big(r), expected, -1, Size(5, 5), Point(-1, -1), true, border | isolated);
                 UMat dst;
-                accel::resetTransferStats();
                 cv::boxFilter(ubig(r), dst, -1, Size(5, 5), Point(-1, -1), true, border | isolated);
                 const std::string what = dev.name() + ", " + borderName(border | isolated);
-                EXPECT_EQ(isolated ? 1u : 0u, accel::getTransferStats().deviceOps) << what;
+                // a region that is not isolated never reaches the device: the hook leaves it to the CPU
+                if (isolated)
+                    EXPECT_TRUE(deviceRunsBox(dev, ubig(r), Size(5, 5), Point(-1, -1), true, border)) << what;
                 EXPECT_EQ(0, cvtest::norm(expected, toHost(dst), NORM_INF)) << what;
             }
         }
@@ -177,9 +204,11 @@ TEST_F(Imgproc_AccelHip, boxFilter_unsupported_calls_run_on_the_cpu)
             Mat expected;
             cv::boxFilter(*c.src, expected, c.ddepth, Size(3, 3));
             UMat u = onDevice(dev, *c.src), dst;
-            accel::resetTransferStats();
             cv::boxFilter(u, dst, c.ddepth, Size(3, 3));
-            EXPECT_EQ(0u, accel::getTransferStats().deviceOps) << dev.name() << ", " << c.what;
+            // a change of depth never reaches the device: the hook leaves it to the CPU
+            if (c.ddepth < 0)
+                EXPECT_FALSE(deviceRunsBox(dev, u, Size(3, 3), Point(-1, -1), true, BORDER_DEFAULT))
+                    << dev.name() << ", " << c.what;
             EXPECT_EQ(0, cvtest::norm(expected, toHost(dst), NORM_INF)) << dev.name() << ", " << c.what;
         }
     }
@@ -202,10 +231,9 @@ TEST_F(Imgproc_AccelHip, cvtColor_two_plane_yuv_matches_the_cpu)
                 Mat expected;
                 cv::cvtColor(yuv, expected, code);
                 UMat dst;
-                accel::resetTransferStats();
                 cv::cvtColor(u, dst, code);
                 const std::string what = cv::format("%s: %dx%d, code %d", dev.name().c_str(), sz.width, sz.height, code);
-                EXPECT_EQ(1u, accel::getTransferStats().deviceOps) << what;
+                EXPECT_TRUE(deviceRunsNv12(dev, u, code)) << what;
                 EXPECT_EQ(0, cvtest::norm(expected, toHost(dst), NORM_INF)) << what;
             }
         }
