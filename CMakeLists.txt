@@ -672,6 +672,8 @@ endif()
 
 # --- HIP/ROCm Support ---
 OCV_OPTION(WITH_HIP "Include AMD ROCm/HIP support" OFF)
+OCV_OPTION(BUILD_PLUGIN_ACCEL_HIP "Build the HIP backend of the non-CPU HAL as a plugin" ON
+           VISIBLE_IF WITH_HIP)
 if(WITH_HIP)
   include(CheckLanguage)
   check_language(HIP)
@@ -1077,6 +1079,9 @@ ocv_add_modules_compiler_options()
 
 # OpenCV modules
 ocv_register_modules()
+
+# HIP backend of the non-CPU HAL, built as a plugin against the modules above
+include(cmake/OpenCVBuildAccelHip.cmake)
 
 # Generate targets for documentation
 add_subdirectory(doc)

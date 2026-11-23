@@ -4,6 +4,7 @@
 
 #include "precomp.hpp"
 #include "opencl_kernels_imgproc.hpp"
+#include "opencv2/core/utils/accel_dispatch.private.hpp"
 #include "color.hpp"
 
 namespace cv
@@ -189,6 +190,32 @@ void cvtColorTwoPlane( InputArray _ysrc, InputArray _uvsrc, OutputArray _dst, in
 //                                   The main function                                  //
 //////////////////////////////////////////////////////////////////////////////////////////
 
+static bool accel_cvtColor(InputArray _src, OutputArray _dst, int code, int dcn)
+{
+    switch (code)
+    {
+    case COLOR_YUV2RGB_NV12: case COLOR_YUV2BGR_NV12: case COLOR_YUV2RGB_NV21: case COLOR_YUV2BGR_NV21:
+    case COLOR_YUV2RGBA_NV12: case COLOR_YUV2BGRA_NV12: case COLOR_YUV2RGBA_NV21: case COLOR_YUV2BGRA_NV21:
+    {
+        // the layout the CPU path asserts: one 8-bit plane, Y rows then half as many UV rows
+        const Size sz = _src.size();
+        if (_src.dims() > 2 || _src.type() != CV_8UC1 || sz.width % 2 != 0 || sz.height % 3 != 0 ||
+            (dcn != 3 && dcn != 4))
+            return false;
+        const int uidx = code == COLOR_YUV2RGBA_NV21 || code == COLOR_YUV2RGB_NV21 ||
+                         code == COLOR_YUV2BGRA_NV21 || code == COLOR_YUV2BGR_NV21 ? 1 : 0;
+        const bool swapb = swapBlue(code);
+        accel::detail::OpCall call("cvtColor");
+        call.input(_src).output(_dst, MatShape({sz.height * 2 / 3, sz.width}), CV_MAKETYPE(CV_8U, dcn));
+        return call.run<accel::ImgprocOps>([&](accel::ImgprocOps& ops, std::vector<UMat>& a, accel::Stream& s) {
+            return ops.cvtTwoPlaneYUVtoBGR(a[0], a[1], dcn, swapb, uidx, s);
+        });
+    }
+    default:
+        return false;
+    }
+}
+
 void cvtColor( InputArray _src, OutputArray _dst, int code, int dcn, AlgorithmHint hint)
 {
     CV_INSTRUMENT_REGION();
@@ -200,6 +227,8 @@ void cvtColor( InputArray _src, OutputArray _dst, int code, int dcn, AlgorithmHi
 
     if(dcn <= 0)
             dcn = dstChannels(code);
+
+    CV_ACCEL_RUN(_src.isUMat() || _dst.isUMat(), accel_cvtColor(_src, _dst, code, dcn))
 
     CV_OCL_RUN( _src.dims() <= 2 && _dst.isUMat() &&
                 !(CV_MAT_DEPTH(_src.type()) == CV_8U && (code == COLOR_Luv2BGR || code == COLOR_Luv2RGB)),
