@@ -168,13 +168,14 @@ if(PARALLEL_ENABLE_PLUGINS)
 endif()
 
 if(HAVE_CUDA)
+  # Real CUDA installation present — cudev module required.
   if(NOT HAVE_opencv_cudev)
     message(FATAL_ERROR "CUDA: OpenCV requires enabled 'cudev' module from 'opencv_contrib' repository: https://github.com/opencv/opencv_contrib")
   endif()
-  if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
-   list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
-  endif()
   ocv_warnings_disable(CMAKE_CXX_FLAGS -Wundef -Wenum-compare -Wunused-function -Wshadow)
+  if(ENABLE_CUDA_FIRST_CLASS_LANGUAGE)
+    list(APPEND extra_libs CUDA::cudart${CUDA_LIB_EXT})
+  endif()
 endif()
 
 if(CV_CLANG_CL AND AARCH64)
@@ -182,6 +183,7 @@ if(CV_CLANG_CL AND AARCH64)
 endif()
 
 ocv_create_module(${extra_libs})
+
 
 ocv_target_link_libraries(${the_module} PRIVATE
     "${ZLIB_LIBRARIES}" "${OPENCL_LIBRARIES}" "${VA_LIBRARIES}"
@@ -191,6 +193,27 @@ ocv_target_link_libraries(${the_module} PRIVATE
     "${ITT_LIBRARIES}"
     "${OPENCV_HAL_LINKER_LIBS}"
 )
+
+if(HAVE_HIP)
+  # the HIP backend of the non-CPU HAL: the kernels are HIP, backend_hip.cpp is plain C++;
+  # setTo, convertTo and the imgproc operations live in hal/accel/hip
+  set(_hip_hal "${OpenCV_SOURCE_DIR}/hal/accel/hip")
+  file(GLOB _hip_hal_srcs "${_hip_hal}/*/*.hip" "${_hip_hal}/*/*.cpp")
+  target_sources(${the_module} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src/hip/accel_kernels.hip" ${_hip_hal_srcs})
+  # dladdr: the imgproc operations read their rules from next to this library
+  ocv_target_link_libraries(${the_module} PRIVATE hip::host ${CMAKE_DL_LIBS})
+  # with the HIP language enabled, CMake treats ROCm's lib directory as implicit and leaves it out of RUNPATH
+  set_property(TARGET ${the_module} APPEND PROPERTY BUILD_RPATH "${hip_LIB_INSTALL_DIR}")
+
+  # the kernel rules, read at run time from opencv_hip_tuning/ next to the library, so they
+  # change without a rebuild; the build tree gets a copy, edit hal/accel/hip/tuning instead
+  file(GLOB _hip_rules "${_hip_hal}/tuning/*.yaml")
+  foreach(_f ${_hip_rules})
+    get_filename_component(_name "${_f}" NAME)
+    configure_file("${_f}" "${LIBRARY_OUTPUT_PATH}/opencv_hip_tuning/${_name}" COPYONLY)
+  endforeach()
+  install(FILES ${_hip_rules} DESTINATION "${OPENCV_LIB_INSTALL_PATH}/opencv_hip_tuning" COMPONENT libs)
+endif()
 
 if(OPENCV_DISABLE_THREAD_SUPPORT)
   ocv_target_compile_definitions(${the_module} PUBLIC "OPENCV_DISABLE_THREAD_SUPPORT=1")
